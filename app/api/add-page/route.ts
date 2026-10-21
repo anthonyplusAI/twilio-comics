@@ -1,18 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
-import { db } from "@/lib/db";
-import { pages } from "@/lib/schema";
-import { eq } from "drizzle-orm";
+import { auth } from "@/auth";
 import {
   updatePage,
   createPage,
   getNextPageNumber,
   getStoryWithPagesBySlug,
-  getLastPageImage,
   deletePage,
 } from "@/lib/db-actions";
-import { freeTierRateLimit } from "@/lib/rate-limit";
-import { uploadBufferToS3 } from "@/lib/s3-upload";
+import { uploadBufferToBlob } from "@/lib/blob-storage";
+import {
+  consumeFreeTierQuota,
+  releaseFreeTierQuota,
+  reserveFreeTierQuota,
+} from "@/lib/quota";
 import { buildComicPrompt } from "@/lib/prompt";
 import { generateComicImage } from "@/lib/image-generation";
 import {
@@ -21,8 +22,30 @@ import {
 } from "@/lib/utils";
 
 export async function POST(request: NextRequest) {
+  let quotaClaimKey: string | null = null;
+  async function releasePendingQuota(): Promise<void> {
+    if (!quotaClaimKey) return;
+    const claimKey = quotaClaimKey;
+    await releaseFreeTierQuota(claimKey);
+    quotaClaimKey = null;
+  }
+
+  async function finishSavedQuota(): Promise<void> {
+    const claimKey = quotaClaimKey;
+    // Saving the image already spent this reservation. Keep the saved result
+    // visible even if marking its claim consumed temporarily fails.
+    quotaClaimKey = null;
+    if (!claimKey) return;
+    try {
+      await consumeFreeTierQuota(claimKey);
+    } catch (error) {
+      console.error("Failed to mark saved page quota consumed:", error);
+    }
+  }
+
   try {
-    const { userId } = await auth();
+    const session = await auth();
+    const userId = session?.user?.id;
     const apiKey = request.headers.get("x-api-key") || undefined;
 
     if (!userId) {
@@ -67,25 +90,51 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    let page;
-    let pageNumber;
-    let isRedraw = false;
+    // Validate redraw targets before reserving a weekly generation credit.
+    // An unknown page must not leave a live quota claim behind.
+    let page = pageId ? pages.find((candidate) => candidate.id === pageId) : undefined;
+    if (pageId && !page) {
+      return NextResponse.json({ error: "Page not found" }, { status: 404 });
+    }
 
-    if (pageId) {
-      // Redraw mode: update existing page
-      isRedraw = true;
-      const storyData = await getStoryWithPagesBySlug(storyId);
-      if (!storyData) {
+    if (!apiKey) {
+      quotaClaimKey = `web-page:${userId}:${randomUUID()}`;
+      const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
+      if (!reservation.allowed) {
+        return NextResponse.json(
+          {
+            error: "You've reached the free limit of 3 comics this week.",
+            errorType: "quota_limit",
+            isRateLimited: true,
+            creditsRemaining: reservation.remaining,
+            resetTime: reservation.reset,
+          },
+          { status: 429 },
+        );
+      }
+    }
+
+    let pageNumber: number;
+    const isRedraw = Boolean(pageId);
+
+    if (isRedraw) {
+      // Preserve the post-reservation recheck: a page may be removed while the
+      // quota request is in flight. Release its claim before returning.
+      const refreshed = await getStoryWithPagesBySlug(storyId);
+      if (!refreshed) {
+        await releasePendingQuota();
         return NextResponse.json({ error: "Story not found" }, { status: 404 });
       }
-
-      const existingPage = storyData.pages.find((p) => p.id === pageId);
-      if (!existingPage) {
+      if (refreshed.story.userId !== userId) {
+        await releasePendingQuota();
+        return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      }
+      page = refreshed.pages.find((candidate) => candidate.id === pageId);
+      if (!page) {
+        await releasePendingQuota();
         return NextResponse.json({ error: "Page not found" }, { status: 404 });
       }
-
-      page = existingPage;
-      pageNumber = existingPage.pageNumber;
+      pageNumber = page.pageNumber;
     } else {
       // Add new page mode
       pageNumber = await getNextPageNumber(story.id);
@@ -98,7 +147,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Collect reference images: previous page + story characters + current characters
-    let referenceImages: string[] = [];
+    const referenceImages: string[] = [];
 
     // Get previous page image for style consistency (unless it's page 1)
     if (pageNumber > 1) {
@@ -156,6 +205,7 @@ export async function POST(request: NextRequest) {
       console.log(`Image generation completed in ${durationSeconds} seconds`);
     } catch (error) {
       console.error("Image generation error:", error);
+      await releasePendingQuota();
 
       // Clean up DB records if generation failed
       try {
@@ -215,29 +265,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const s3Key = `${story.id}/page-${page.pageNumber}-${Date.now()}.png`;
-    const s3ImageUrl = await uploadBufferToS3(imageBuffer, s3Key, "image/png");
+    const blobKey = `${story.id}/page-${page.pageNumber}-${Date.now()}.png`;
+    const imageUrl = await uploadBufferToBlob(imageBuffer, blobKey, "image/png");
 
-    await updatePage(page.id, s3ImageUrl);
+    await updatePage(page.id, imageUrl);
 
-    if (!apiKey) {
-      try {
-        await freeTierRateLimit.limit(userId);
-      } catch (rateLimitError) {
-        console.error(
-          "Error applying rate limit after successful generation:",
-          rateLimitError,
-        );
-        // Don't fail the request if rate limiting fails, just log it
-      }
-    }
+    await finishSavedQuota();
 
     return NextResponse.json({
-      imageUrl: s3ImageUrl,
+      imageUrl,
       pageId: page.id,
       pageNumber: page.pageNumber,
     });
   } catch (error) {
+    if (quotaClaimKey) {
+      try {
+        await releasePendingQuota();
+      } catch (quotaError) {
+        console.error("Failed to release generation quota", quotaError);
+      }
+    }
     console.error("Error in add-page API:", error);
     return NextResponse.json(
       {

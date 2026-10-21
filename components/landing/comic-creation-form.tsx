@@ -5,14 +5,15 @@ import { useRouter } from "next/navigation";
 import { Upload, X, Check, ArrowRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { useS3Upload } from "next-s3-upload";
-import { useAuth, SignInButton, useClerk } from "@clerk/nextjs";
+import { uploadFileToBlob } from "@/lib/blob-upload-client";
+import { signIn, useSession } from "next-auth/react";
+import { SignInButton } from "@/components/auth/sign-in-button";
 import { COMIC_STYLES } from "@/lib/constants";
 import { useKeyboardShortcut } from "@/hooks/use-keyboard-shortcut";
 import { useApiKey } from "@/hooks/use-api-key";
 import { isContentPolicyViolation } from "@/lib/utils";
 import { ApiKeyModal } from "@/components/api-key-modal";
-import { MAX_SYSTEM_LENGTH, MAX_USER_PROMPT } from "@/lib/prompt";
+import { MAX_USER_PROMPT } from "@/lib/prompt";
 
 interface ComicCreationFormProps {
   prompt: string;
@@ -41,9 +42,9 @@ export function ComicCreationForm({
   const router = useRouter();
   const [loadingStep, setLoadingStep] = useState(0);
   const { toast } = useToast();
-  const { uploadToS3 } = useS3Upload();
-  const { isSignedIn, isLoaded } = useAuth();
-  const { openSignIn } = useClerk();
+  const { status } = useSession();
+  const isLoaded = status !== "loading";
+  const isSignedIn = status === "authenticated";
   const [apiKey, setApiKey] = useApiKey();
   const hasApiKey = !!apiKey;
   const [previews, setPreviews] = useState<string[]>([]);
@@ -86,7 +87,9 @@ export function ComicCreationForm({
     if (saved && !prompt) {
       setPrompt(saved);
     }
-  }, []); // Run only on mount
+    // Restore only on mount; clearing the prompt must not restore the old draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load style preference from localStorage on mount
   useEffect(() => {
@@ -132,7 +135,7 @@ export function ComicCreationForm({
   useKeyboardShortcut(() => {
     if (!isLoading && prompt.trim()) {
       if (!isSignedIn) {
-        openSignIn();
+        void signIn("google", { redirectTo: window.location.href });
       } else {
         handleCreate();
       }
@@ -187,6 +190,15 @@ export function ComicCreationForm({
   }, []);
 
   const handleCreate = async () => {
+    if (!isLoaded) {
+      return;
+    }
+
+    if (!isSignedIn) {
+      void signIn("google", { redirectTo: window.location.href });
+      return;
+    }
+
     if (!prompt.trim()) {
       toast({
         title: "Prompt required",
@@ -241,7 +253,7 @@ export function ComicCreationForm({
       }
 
       const characterUploads = await Promise.all(
-        characterFiles.map((file) => uploadToS3(file).then(({ url }) => url))
+        characterFiles.map((file) => uploadFileToBlob(file).then(({ url }) => url))
       );
 
       // Use API to create story and generate first page
@@ -297,16 +309,6 @@ export function ComicCreationForm({
   const handleApiKeySubmit = (key: string) => {
     setApiKey(key);
     setShowApiModal(false);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const isEnter = e.key === "Enter" || e.key === "\n" || e.keyCode === 13;
-    const isModifierPressed = e.shiftKey || e.ctrlKey || e.metaKey; // metaKey for Cmd on Mac
-
-    if (isEnter && isModifierPressed) {
-      e.preventDefault();
-      handleCreate();
-    }
   };
 
   const loadingSteps = [
@@ -511,11 +513,9 @@ export function ComicCreationForm({
             </div>
           </div>
         ) : (
-          <SignInButton mode="modal">
-            <Button className="w-full sm:w-auto sm:min-w-40 bg-white hover:bg-neutral-200 text-black px-8 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-3 tracking-tight">
-              Login to create your comic
-              <ArrowRight className="w-4 h-4" />
-            </Button>
+          <SignInButton className="w-full sm:w-auto sm:min-w-40 bg-white hover:bg-neutral-200 text-black px-8 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-3 tracking-tight">
+            Login to create your comic
+            <ArrowRight className="w-4 h-4" />
           </SignInButton>
         )}
       </div>

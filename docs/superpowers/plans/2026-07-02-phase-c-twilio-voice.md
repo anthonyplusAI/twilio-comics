@@ -1,5 +1,7 @@
 # Phase C: Twilio Voice (ConversationRelay) — Implementation Plan
 
+> **Superseded:** This is a historical implementation plan. Voice now runs in the main Azure Container App and queues work through Azure Queue Storage; use the root README and `docs/INFRA_SETUP.md` for current instructions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let a user create a comic by phone call — Twilio ConversationRelay handles speech-to-text/text-to-speech; a standalone WebSocket server runs a scripted conversation (name → comic idea), enqueues the same generation job as SMS, and the finished comic is delivered to the caller by SMS/MMS.

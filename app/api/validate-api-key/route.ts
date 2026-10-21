@@ -1,8 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { auth } from "@/auth";
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json(
+        { valid: false, error: "Authentication required" },
+        { status: 401 },
+      );
+    }
     const { apiKey } = await request.json();
 
     if (!apiKey || typeof apiKey !== "string") {

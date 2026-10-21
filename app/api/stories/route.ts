@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
+import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import { stories, pages } from "@/lib/schema";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 export async function GET() {
   try {
-    const { userId } = await auth();
+    const session = await auth();
+    const userId = session?.user?.id;
 
     if (!userId) {
       return NextResponse.json(

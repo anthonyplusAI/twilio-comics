@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
+import { auth } from "@/auth";
 import { getStoryWithPagesBySlug, updateStory } from "@/lib/db-actions";
 import { db } from "@/lib/db";
 import { stories } from "@/lib/schema";
@@ -10,8 +10,8 @@ export async function GET(
   { params }: { params: Promise<{ storySlug: string }> }
 ) {
   try {
-    const authResult = await auth();
-    const { userId } = authResult;
+    const session = await auth();
+    const userId = session?.user?.id;
 
     const { storySlug: slug } = await params;
 
@@ -53,9 +53,21 @@ export async function GET(
     // Check if the story belongs to the authenticated user
     const isOwner = userId ? result.story.userId === userId : false;
 
-    // Return the story data with ownership information
+    const publicStory = {
+      id: result.story.id,
+      slug: result.story.slug,
+      title: result.story.title,
+      description: result.story.description,
+      style: result.story.style,
+      source: result.story.source,
+      createdAt: result.story.createdAt,
+      updatedAt: result.story.updatedAt,
+    };
     const responseData = {
-      ...result,
+      story: publicStory,
+      pages: result.pages.map((page) =>
+        isOwner ? page : { ...page, characterImageUrls: [] },
+      ),
       isOwner,
     };
     return NextResponse.json(responseData);
@@ -73,7 +85,8 @@ export async function PUT(
   { params }: { params: Promise<{ storySlug: string }> }
 ) {
   try {
-    const { userId } = await auth();
+    const session = await auth();
+    const userId = session?.user?.id;
 
     if (!userId) {
       return NextResponse.json(

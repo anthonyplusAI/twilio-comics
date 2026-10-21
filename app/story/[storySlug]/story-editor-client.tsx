@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useEffectEvent } from "react";
 import { useParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { useToast } from "@/hooks/use-toast";
 import { useApiKey } from "@/hooks/use-api-key";
-import { useAuth } from "@clerk/nextjs";
 import { EditorToolbar } from "@/components/editor/editor-toolbar";
 import { PageSidebar } from "@/components/editor/page-sidebar";
 import { ComicCanvas } from "@/components/editor/comic-canvas";
@@ -46,7 +46,9 @@ interface StoryData {
 export function StoryEditorClient() {
   const params = useParams();
   const slug = params.storySlug as string;
-  const { isSignedIn, isLoaded } = useAuth();
+  const { status } = useSession();
+  const isLoaded = status !== "loading";
+  const isSignedIn = status === "authenticated";
 
   const [story, setStory] = useState<StoryData | null>(null);
   const [isOwner, setIsOwner] = useState<boolean>(false);
@@ -128,47 +130,8 @@ export function StoryEditorClient() {
     }
   }, [slug, toast]);
 
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts if user is typing in an input field
-      const target = e.target as HTMLElement;
-      if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable
-      ) {
-        return;
-      }
-
-        if (e.key === "ArrowRight") {
-          e.preventDefault();
-          setCurrentPage((prev) => (prev < pages.length - 1 ? prev + 1 : prev));
-        } else if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          setCurrentPage((prev) => (prev > 0 ? prev - 1 : prev));
-        } else if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setCurrentPage((prev) => (prev > 0 ? prev - 1 : prev));
-        } else if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setCurrentPage((prev) => (prev < pages.length - 1 ? prev + 1 : prev));
-        } else if (e.key === "i" || e.key === "I") {
-          e.preventDefault();
-          setShowInfoSheet(true);
-        } else if (e.key === "c" || e.key === "C") {
-          e.preventDefault();
-          handleAddPage();
-        }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [pages.length, apiKey]);
-
-
   const handleAddPage = async () => {
-    if (!isLoaded || !isSignedIn) {
+    if (!isLoaded || !isSignedIn || !isOwner) {
       return;
     }
 
@@ -218,8 +181,44 @@ export function StoryEditorClient() {
     }
   };
 
+  const addPageFromShortcut = useEffectEvent(() => {
+    void handleAddPage();
+  });
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setCurrentPage((current) =>
+          current < pages.length - 1 ? current + 1 : current,
+        );
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setCurrentPage((current) => (current > 0 ? current - 1 : current));
+      } else if (event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        setShowInfoSheet(true);
+      } else if (event.key.toLowerCase() === "c" && isOwner) {
+        event.preventDefault();
+        addPageFromShortcut();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pages.length, isOwner]);
+
   const handleRedrawPage = () => {
-    if (!isLoaded || !isSignedIn) {
+    if (!isLoaded || !isSignedIn || !isOwner) {
       return;
     }
     if (!apiKey) {
@@ -230,6 +229,8 @@ export function StoryEditorClient() {
   };
 
   const confirmRedrawPage = async () => {
+    if (!isSignedIn || !isOwner) return;
+
     setShowRedrawDialog(false);
 
     const currentPageData = pages[currentPage];
@@ -331,12 +332,14 @@ export function StoryEditorClient() {
   };
 
   const handleDeletePage = (pageIndex: number) => {
+    if (!isOwner) return;
+
     setPageToDelete(pageIndex);
     setShowDeleteDialog(true);
   };
 
   const confirmDeletePage = async () => {
-    if (pageToDelete === null) return;
+    if (!isSignedIn || !isOwner || pageToDelete === null) return;
 
     const pageData = pages[pageToDelete];
     if (!pageData) return;
@@ -400,6 +403,10 @@ export function StoryEditorClient() {
     prompt: string;
     characterUrls?: string[];
   }): Promise<void> => {
+    if (!isSignedIn || !isOwner) {
+      throw new Error("Only the story owner can add pages");
+    }
+
     if (!apiKey) {
       setShowApiModal(true);
       throw new Error("API key required");

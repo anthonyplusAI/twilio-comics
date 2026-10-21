@@ -20,10 +20,12 @@ export async function GET(request: NextRequest) {
     }
 
     const { story, pages } = result;
+    const publicBaseUrl = process.env.PUBLIC_BASE_URL || "http://localhost:3000";
+    const publicHost = new URL(publicBaseUrl).host;
 
     const images = pages
-      .map((page: any) => page.generatedImageUrl)
-      .filter((url: string) => url && url !== "/placeholder.svg");
+      .map((page) => page.generatedImageUrl)
+      .filter((url): url is string => Boolean(url && url !== "/placeholder.svg"));
 
     if (images.length === 0) {
       return NextResponse.json(
@@ -56,10 +58,10 @@ export async function GET(request: NextRequest) {
       // For simplicity, assume images fit the page; in production you might want to scale
       pdf.addImage(imgData, "PNG", 10, 10, 190, 277); // A4 portrait size minus margins
 
-      // Add "Created by Make Comics" at the bottom
+      // Add the Twilio Comics credit at the bottom
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(12);
-      const text = "Created by Make Comics [makecomics.io]";
+      const text = `Created by Twilio Comics [${publicHost}]`;
       const textX = 105;
       const textY = 290;
       pdf.text(text, textX, textY, { align: "center" });
@@ -69,7 +71,7 @@ export async function GET(request: NextRequest) {
         textY - dimensions.h / 2,
         dimensions.w,
         dimensions.h,
-        { url: "https://www.makecomics.io/" },
+        { url: publicBaseUrl },
       );
     }
 

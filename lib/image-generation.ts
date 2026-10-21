@@ -1,4 +1,6 @@
 import OpenAI, { toFile } from "openai";
+import { BlobServiceClient } from "@azure/storage-blob";
+import { isValidMediaToken } from "@/lib/blob-storage";
 
 export const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 export const IMAGE_SIZE = "1024x1536"; // portrait 2:3 comic page
@@ -10,12 +12,47 @@ export interface GenerateComicImageArgs {
   referenceImageUrls?: string[];
 }
 
+function isAllowedReferenceUrl(url: URL): boolean {
+  const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING?.trim();
+  const configuredEndpoint = process.env.AZURE_STORAGE_BLOB_ENDPOINT?.trim();
+  const container = process.env.AZURE_STORAGE_CONTAINER_NAME?.trim();
+  const blobEndpoint = connectionString
+    ? new URL(BlobServiceClient.fromConnectionString(connectionString).url)
+    : configuredEndpoint
+      ? new URL(configuredEndpoint)
+      : null;
+  if (blobEndpoint && container) {
+    const containerPath = `${blobEndpoint.pathname.replace(/\/+$/, "")}/${container}/`;
+    if (url.origin === blobEndpoint.origin && url.pathname.startsWith(containerPath)) {
+      return true;
+    }
+  }
+
+  const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  if (!publicBaseUrl) return false;
+  const mediaUrl = new URL(`${publicBaseUrl.replace(/\/+$/, "")}/api/media`);
+  if (url.origin !== mediaUrl.origin || url.pathname !== mediaUrl.pathname) return false;
+  const key = url.searchParams.get("key");
+  const token = url.searchParams.get("token");
+  return Boolean(key && token && isValidMediaToken(key, token));
+}
+
 async function urlToFile(url: string, index: number) {
-  const res = await fetch(url);
+  const parsedUrl = new URL(url);
+  if (!isAllowedReferenceUrl(parsedUrl)) {
+    throw new Error("Reference image must be a configured Azure Blob or signed media URL");
+  }
+  const res = await fetch(parsedUrl, {
+    signal: AbortSignal.timeout(30_000),
+    redirect: "manual",
+  });
   if (!res.ok) {
     throw new Error(`Failed to fetch reference image ${url}: ${res.status}`);
   }
   const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > 10 * 1024 * 1024) {
+    throw new Error("Reference image exceeds the 10 MiB limit");
+  }
   const contentType = res.headers.get("content-type") || "image/png";
   const ext = contentType.includes("jpeg") || contentType.includes("jpg") ? "jpg" : "png";
   return toFile(buffer, `ref-${index}.${ext}`, { type: contentType });
@@ -45,7 +82,6 @@ export async function generateComicImage({
       prompt,
       size: IMAGE_SIZE,
       quality: "high",
-      input_fidelity: "high",
     });
   }
 

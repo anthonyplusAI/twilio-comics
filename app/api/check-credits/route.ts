@@ -1,10 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
-import { freeTierRateLimit } from "@/lib/rate-limit";
+import { auth } from "@/auth";
+import { getFreeTierQuota } from "@/lib/quota";
 
 export async function POST(request: NextRequest) {
   try {
-    const { userId } = await auth();
+    const session = await auth();
+    const userId = session?.user?.id;
 
     if (!userId) {
       return NextResponse.json(
@@ -24,8 +25,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // For free tier, check rate limit status via Redis
-    const limitResult = await freeTierRateLimit.getRemaining(userId);
+    const limitResult = await getFreeTierQuota(userId);
 
     return NextResponse.json({
       hasApiKey: false,

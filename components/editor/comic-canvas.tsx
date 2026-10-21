@@ -32,7 +32,7 @@ export function ComicCanvas({
   pageIndex,
   totalPages = 1,
   isLoading = false,
-  isOwner = true,
+  isOwner = false,
   onInfoClick,
   onRedrawClick,
   onDeletePage,
@@ -185,7 +185,7 @@ export function ComicCanvas({
                        title: page.title || "Comic Page",
                        url: url,
                      });
-                   } catch (err) {
+                    } catch {
                      // User cancelled or error, fallback to clipboard
                      try {
                        await navigator.clipboard.writeText(url);

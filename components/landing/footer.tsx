@@ -27,8 +27,8 @@ export function Footer() {
 
   return (
     <>
-      <footer className="h-8 border-t border-border/50 bg-background flex items-center justify-between px-6 text-[10px] text-muted-foreground select-none">
-        <div className="flex items-center gap-4">
+      <footer className="min-h-8 border-t border-border/50 bg-background flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-6 py-2 text-[10px] text-muted-foreground select-none">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <span>
             Made & powered by{" "}
             <Link
@@ -40,6 +40,18 @@ export function Footer() {
               OpenAI
             </Link>
           </span>
+          <span>
+            Forked from{" "}
+            <Link
+              href="https://github.com/Nutlope/make-comics"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-white hover:underline"
+            >
+              Make Comics
+            </Link>
+            . Thanks to its original creators and contributors.
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -50,7 +62,7 @@ export function Footer() {
             Got ideas? Tell us
           </button>
           <Link
-            href="https://github.com/nutlope/make-comics"
+            href="https://github.com/anthonyjdella/twilio-comics"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-white transition-colors"

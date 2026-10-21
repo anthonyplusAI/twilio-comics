@@ -12,11 +12,12 @@ Never execute this command always consider the "dev" server as already running, 
 
 ## Architecture
 - **Framework**: Next.js 16 (App Router) with React 19, TypeScript
-- **Auth**: Clerk (`@clerk/nextjs`)
+- **Auth**: Auth.js with Google OAuth (`next-auth`, `@auth/drizzle-adapter`)
 - **Database**: Neon Postgres with Drizzle ORM (`lib/schema.ts`, `lib/db.ts`)
-- **Storage**: AWS S3 for images (`lib/s3-upload.ts`)
+- **Storage**: Azure Blob Storage for images (`lib/blob-storage.ts`)
 - **AI**: OpenAI for image generation and title/description generation (`openai`)
-- **Rate Limiting**: Upstash Redis (`lib/rate-limit.ts`)
+- **Jobs**: Azure Queue Storage with an event-driven ACA Job (`worker/`)
+- **Rate Limiting**: Atomic PostgreSQL quota reservations (`lib/quota.ts`)
 - **UI**: Radix primitives + shadcn/ui (`components/ui/`), Tailwind CSS v4
 
 ## Code Style

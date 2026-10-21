@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { auth } from '@/auth';
 import { createFeedback } from '@/lib/db-actions';
 
 export async function POST(request: NextRequest) {
-  const { userId } = await auth();
+  const session = await auth();
+  const userId = session?.user?.id;
 
   const body = await request.json();
   const message = body?.message?.trim();

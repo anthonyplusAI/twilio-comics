@@ -1,0 +1,14 @@
+.git
+.github
+.next
+node_modules
+voice-server
+coverage
+docs
+.superpowers
+*.log
+.env
+.env.*
+!.example.env
+**/*.test.ts
+tsconfig.tsbuildinfo

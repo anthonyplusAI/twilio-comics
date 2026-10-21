@@ -1,0 +1,49 @@
+name: Auto-merge Dependabot
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v3
+      - name: Approve minor and patch updates
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Wait for Validate
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 60); do
+            echo "Validate poll attempt ${attempt}/60"
+            state=$(gh pr checks "$PR_URL" --json name,state --jq '.[] | select(.name == "Validate") | .state' 2>/dev/null || true)
+            if [ "$state" = "SUCCESS" ]; then exit 0; fi
+            case "$state" in
+              ""|PENDING|IN_PROGRESS|QUEUED|EXPECTED|WAITING|REQUESTED) sleep 20 ;;
+              *) echo "Validate did not pass: $state"; exit 1 ;;
+            esac
+          done
+          exit 1
+      - name: Squash merge
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

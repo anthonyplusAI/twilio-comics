@@ -2,10 +2,8 @@
 
 import {
   ArrowLeft,
-  RefreshCw,
   Share,
   Plus,
-  Info,
   Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,7 +25,7 @@ export function EditorToolbar({
   onContinueStory,
   onDownloadPDF,
   isGeneratingPDF = false,
-  isOwner = true,
+  isOwner = false,
   onTitleUpdate,
 }: EditorToolbarProps) {
   const router = useRouter();
