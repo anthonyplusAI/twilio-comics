@@ -1,8 +1,8 @@
 "use client";
 
-import { Plus, Loader2, Key, Trash2 } from "lucide-react";
+import { Plus, Loader2, Key } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { UserButton, Show } from "@clerk/nextjs";
+import { AccountMenu } from "@/components/auth/account-menu";
 
 interface PageData {
   id: number;
@@ -30,7 +30,7 @@ export function PageSidebar({
   onAddPage,
   loadingPageId,
   onApiKeyClick,
-  isOwner = true,
+  isOwner = false,
 }: PageSidebarProps) {
   return (
     <aside className="hidden md:flex md:flex-col md:items-center w-24 border-r border-border/50 bg-background/50 py-4 gap-2 justify-between h-full">
@@ -92,28 +92,19 @@ export function PageSidebar({
       </div>
 
       <div className="flex flex-col items-center gap-3 pt-2">
-        {/* API Key Button */}
-        <Button
-          onClick={onApiKeyClick}
-          variant="ghost"
-          size="icon"
-          className="w-10 h-10 glass-panel glass-panel-hover text-muted-foreground hover:text-white"
-          title="Manage API Key"
-        >
-          <Key className="w-4 h-4" />
-        </Button>
+        {isOwner && onApiKeyClick && (
+          <Button
+            onClick={onApiKeyClick}
+            variant="ghost"
+            size="icon"
+            className="w-10 h-10 glass-panel glass-panel-hover text-muted-foreground hover:text-white"
+            title="Manage API Key"
+          >
+            <Key className="w-4 h-4" />
+          </Button>
+        )}
 
-        <Show when="signed-in">
-          <div className="w-10 h-10 glass-panel glass-panel-hover rounded-md flex items-center justify-center text-muted-foreground hover:text-white transition-colors">
-            <UserButton
-              appearance={{
-                elements: {
-                  avatarBox: "w-full h-full rounded-md",
-                },
-              }}
-            />
-          </div>
-        </Show>
+        <AccountMenu side="right" />
       </div>
     </aside>
   );

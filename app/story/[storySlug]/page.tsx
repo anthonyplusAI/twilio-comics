@@ -14,16 +14,16 @@ export async function generateMetadata({
 
     if (!result) {
       return {
-        title: "Story Not Found | MakeComics",
+        title: "Story Not Found | Twilio Comics",
         description: "The requested comic story could not be found.",
       };
     }
 
     const { story, pages } = result;
-    const title = `${story.title} | MakeComics`;
+    const title = `${story.title} | Twilio Comics`;
     const description =
       story.description ||
-      `${story.title} - Create your own comic book with MakeComics`;
+      `${story.title} - Create your own comic book with Twilio Comics`;
 
     // Use the first page's image as the Open Graph image, or default if none
     const firstPageImage = pages.length > 0 && pages[0].generatedImageUrl ? pages[0].generatedImageUrl : "/placeholder.jpg";
@@ -41,8 +41,8 @@ export async function generateMetadata({
   } catch (error) {
     console.error("Error generating metadata:", error);
     return {
-      title: "MakeComics",
-      description: "Create your own comic book with MakeComics",
+      title: "Twilio Comics",
+      description: "Create your own comic book with Twilio Comics",
     };
   }
 }

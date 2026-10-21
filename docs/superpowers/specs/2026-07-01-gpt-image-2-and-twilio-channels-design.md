@@ -1,5 +1,7 @@
 # Design: GPT Image 2 generation + Twilio (SMS & Voice) input channels
 
+> **Superseded:** This historical design predates Auth.js, WhatsApp support, Azure Blob/Queue Storage, and the combined Azure Container Apps runtime. See the root README for the current architecture.
+
 **Date:** 2026-07-01
 **Status:** Implemented, then updated 2026-07-07 to remove the previous secondary AI provider entirely.
 **Scope:** Use OpenAI for comic image generation plus title/description generation, and add Twilio SMS/MMS and Twilio Voice (ConversationRelay) as alternative input channels to the existing web form.

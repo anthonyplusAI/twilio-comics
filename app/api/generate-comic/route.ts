@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
+import { auth } from "@/auth";
 import {
   updatePage,
   createPage,
@@ -8,8 +9,12 @@ import {
   getLastPageImage,
   deletePage,
 } from "@/lib/db-actions";
-import { freeTierRateLimit } from "@/lib/rate-limit";
-import { uploadBufferToS3 } from "@/lib/s3-upload";
+import { uploadBufferToBlob } from "@/lib/blob-storage";
+import {
+  consumeFreeTierQuota,
+  releaseFreeTierQuota,
+  reserveFreeTierQuota,
+} from "@/lib/quota";
 import { buildComicPrompt } from "@/lib/prompt";
 import { generateComicImage } from "@/lib/image-generation";
 import {
@@ -19,8 +24,30 @@ import {
 import { createComicStory, ComicServiceError } from "@/lib/comic-service";
 
 export async function POST(request: NextRequest) {
+  let quotaClaimKey: string | null = null;
+  async function releasePendingQuota(): Promise<void> {
+    if (!quotaClaimKey) return;
+    const claimKey = quotaClaimKey;
+    await releaseFreeTierQuota(claimKey);
+    quotaClaimKey = null;
+  }
+
+  async function finishSavedQuota(): Promise<void> {
+    const claimKey = quotaClaimKey;
+    // The comic is already saved and this reservation already counts toward
+    // the limit. A failed status write must not refund it or hide the result.
+    quotaClaimKey = null;
+    if (!claimKey) return;
+    try {
+      await consumeFreeTierQuota(claimKey);
+    } catch (error) {
+      console.error("Failed to mark saved comic quota consumed:", error);
+    }
+  }
+
   try {
-    const { userId } = await auth();
+    const session = await auth();
+    const userId = session?.user?.id;
 
     if (!userId) {
       return NextResponse.json(
@@ -46,9 +73,33 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
+    if (!openAIApiKey) {
+      return NextResponse.json(
+        { error: "Server configuration error - OpenAI API key not available" },
+        { status: 500 },
+      );
+    }
+
     // New-story path: delegate to channel-agnostic service and return early.
     // The continuation path (storyId present) falls through to the existing logic below.
     if (!storyId) {
+      if (!apiKey) {
+        quotaClaimKey = `web-generation:${userId}:${randomUUID()}`;
+        const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
+        if (!reservation.allowed) {
+          return NextResponse.json(
+            {
+              error: "You've reached the free limit of 3 comics this week.",
+              errorType: "quota_limit",
+              isRateLimited: true,
+              creditsRemaining: reservation.remaining,
+              resetTime: reservation.reset,
+            },
+            { status: 429 },
+          );
+        }
+      }
       try {
         const result = await createComicStory({
           userId,
@@ -60,6 +111,7 @@ export async function POST(request: NextRequest) {
           generateTitle: true,
           usesOwnApiKey: !!apiKey,
         });
+        await finishSavedQuota();
         return NextResponse.json({
           imageUrl: result.imageUrl,
           storyId: result.story.id,
@@ -70,6 +122,7 @@ export async function POST(request: NextRequest) {
           description: result.story.description,
         });
       } catch (error) {
+        await releasePendingQuota();
         if (error instanceof ComicServiceError) {
           if (error.type === "content_policy") {
             return NextResponse.json(
@@ -96,15 +149,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
-    if (!openAIApiKey) {
-      return NextResponse.json(
-        { error: "Server configuration error - OpenAI API key not available" },
-        { status: 500 },
-      );
-    }
-
-    let referenceImages: string[] = [];
+    const referenceImages: string[] = [];
 
     // Continuation: get previous page image and story character images.
     const story = await getStoryById(storyId);
@@ -113,6 +158,23 @@ export async function POST(request: NextRequest) {
     }
     if (story.userId !== userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    }
+
+    if (!apiKey) {
+      quotaClaimKey = `web-generation:${userId}:${randomUUID()}`;
+      const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
+      if (!reservation.allowed) {
+        return NextResponse.json(
+          {
+            error: "You've reached the free limit of 3 comics this week.",
+            errorType: "quota_limit",
+            isRateLimited: true,
+            creditsRemaining: reservation.remaining,
+            resetTime: reservation.reset,
+          },
+          { status: 429 },
+        );
+      }
     }
 
     const nextPageNumber = await getNextPageNumber(storyId);
@@ -161,6 +223,7 @@ export async function POST(request: NextRequest) {
       console.log(`Image generation completed in ${durationSeconds} seconds`);
     } catch (error) {
       console.error("Image generation error:", error);
+      await releasePendingQuota();
 
       // Clean up DB records if generation failed
       try {
@@ -217,41 +280,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Upload generated bytes to S3 for permanent storage
-    const s3Key = `${story.id}/page-${
+    const blobKey = `${story.id}/page-${
       page.pageNumber
     }-${Date.now()}.png`;
-    const s3ImageUrl = await uploadBufferToS3(imageBuffer, s3Key, "image/png");
+    const imageUrl = await uploadBufferToBlob(imageBuffer, blobKey, "image/png");
 
-    // Update page in database with S3 URL
+    // Save the Azure media URL on the generated page.
     try {
-      await updatePage(page.id, s3ImageUrl);
+      await updatePage(page.id, imageUrl);
     } catch (dbError) {
       console.error("Error updating page in database:", dbError);
+      await releasePendingQuota();
       return NextResponse.json(
         { error: "Failed to save generated image" },
         { status: 500 },
       );
     }
 
-    if (!apiKey) {
-      try {
-        await freeTierRateLimit.limit(userId);
-      } catch (rateLimitError) {
-        console.error(
-          "Error applying rate limit after successful generation:",
-          rateLimitError,
-        );
-        // Don't fail the request if rate limiting fails, just log it
-      }
-    }
+    await finishSavedQuota();
 
     return NextResponse.json({
-      imageUrl: s3ImageUrl,
+      imageUrl,
       pageId: page.id,
       pageNumber: page.pageNumber,
     });
   } catch (error) {
+    if (quotaClaimKey) {
+      try {
+        await releasePendingQuota();
+      } catch (quotaError) {
+        console.error("Failed to release generation quota", quotaError);
+      }
+    }
     console.error("Error in generate-comic API:", error);
     return NextResponse.json(
       {

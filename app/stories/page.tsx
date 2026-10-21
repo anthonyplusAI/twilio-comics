@@ -107,15 +107,15 @@ export default function StoriesPage() {
                   Your Comic Library Awaits
                 </h2>
                 <p className="text-muted-foreground mb-10 max-w-lg mx-auto leading-relaxed text-lg">
-                  Start crafting your first visual story. Every great comic
-                  begins with a single panel.
+                  Use the browser studio to test comic creation. Every great
+                  comic begins with a single panel.
                 </p>
                 <Button
-                  onClick={() => router.push("/")}
+                  onClick={() => router.push("/studio")}
                   className="glass-panel glass-panel-hover px-8 py-4 text-base font-medium transition-all duration-300 hover:shadow-indigo/20 hover:shadow-lg"
                 >
                   <Plus className="w-5 h-5 mr-3" />
-                  Create Your First Comic
+                  Open Studio
                 </Button>
               </div>
             ) : (

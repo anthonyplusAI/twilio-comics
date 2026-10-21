@@ -6,10 +6,7 @@ import {
   Space_Grotesk,
   Instrument_Serif,
 } from "next/font/google"
-import { Analytics } from "@vercel/analytics/next"
 import { Toaster } from "@/components/ui/toaster"
-import PlausibleProvider from "next-plausible"
-import { ClerkProvider } from "@clerk/nextjs"
 import "./globals.css"
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
@@ -28,12 +25,34 @@ const instrumentSerif = Instrument_Serif({
   variable: "--font-instrument-serif",
 })
 
+const title = "Twilio Comics | Turn a story idea into a comic"
+const description =
+  "Create a custom comic from your story idea with Twilio Comics. See which Twilio channels are available and how to get started."
+
 export const metadata: Metadata = {
-  title: "MakeComics - AI Comic Generator",
-  description:
-    "Create stunning AI-generated comics in seconds. Choose your style, describe your story, and watch the magic happen.",
+  metadataBase: new URL(process.env.PUBLIC_BASE_URL || "http://localhost:3000"),
+  applicationName: "Twilio Comics",
+  title,
+  description,
   openGraph: {
-    images: "https://www.makecomics.io/og.png",
+    type: "website",
+    siteName: "Twilio Comics",
+    title,
+    description,
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "Twilio Comics: turn a story idea into a custom comic",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+    images: ["/opengraph-image"],
   },
 }
 
@@ -43,23 +62,14 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <ClerkProvider>
-      <html
-        lang="en"
-        className={`${inter.variable} ${bangers.variable} ${spaceGrotesk.variable} ${instrumentSerif.variable}`}
-      >
-        <head>
-          <PlausibleProvider
-            src="https://plausible.io/js/script.js"
-            scriptProps={{ "data-domain": "makecomics.io" }}
-          />
-        </head>
-        <body className="font-sans antialiased">
-          {children}
-          <Analytics />
-          <Toaster />
-        </body>
-      </html>
-    </ClerkProvider>
+    <html
+      lang="en"
+      className={`${inter.variable} ${bangers.variable} ${spaceGrotesk.variable} ${instrumentSerif.variable}`}
+    >
+      <body className="font-sans antialiased">
+        {children}
+        <Toaster />
+      </body>
+    </html>
   )
 }

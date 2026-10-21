@@ -1,108 +1,185 @@
-<a href="https://www.makecomics.io/">
-  <img alt="Make Comics" src="./public/og.png">
-  <h1 align="center">Make Comics</h1>
-</a>
+<img src="public/images/twilio-bug.svg" alt="Twilio bug logo" width="56" height="56" />
 
-<p align="center">
-  Create comic books with AI. Generate stories, characters, and panels using advanced AI models.
-</p>
+# Twilio Comics
 
-## How AI Generates Comics
+Create AI-generated comic pages by texting an idea to a Twilio number, messaging an enabled WhatsApp sender, or calling to speak with a Twilio ConversationRelay voice agent. The agent helps shape the idea, asks for approval, and sends the finished comic after an Azure worker generates it. The public website shows how to start and displays finished stories; its browser comic studio is retained for testing.
 
-Comic pages are generated with [**OpenAI `gpt-image-2`**](https://platform.openai.com/docs/guides/image-generation): `images.edit` is used when a character reference image or a previous page is available (for visual consistency), and `images.generate` is used otherwise. Story titles and descriptions are generated with a separate OpenAI text model.
-The AI references previous pages for visual coherence and uses uploaded character images to maintain consistency across panels.
+Twilio Comics is a fork of [Make Comics](https://github.com/Nutlope/make-comics). Thanks to its original creators and contributors for the foundation.
 
-## Tech stack
+## Architecture
 
-- [Next.js 16](https://nextjs.org/) with React 19 and Tailwind CSS
-- [Drizzle ORM](https://orm.drizzle.team/) with [Neon](https://neon.tech) PostgreSQL database
-- [Clerk](https://clerk.com/) for authentication
-- [OpenAI](https://openai.com/) for image generation (`gpt-image-2`) and title/description generation
-- [AWS S3](https://aws.amazon.com/s3/) for image storage (current implementation; Azure Blob Storage is a natural future swap for Azure Container Apps)
-- [Upstash Redis](https://upstash.com/) for rate limiting
-- [jsPDF](https://github.com/parallax/jsPDF) for PDF generation
-- [Twilio](https://www.twilio.com/) for SMS/MMS delivery
-- [Upstash QStash](https://upstash.com/docs/qstash/overview) for async background jobs
+```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'primaryColor':'#EF223A','primaryTextColor':'#FFFFFF',
+  'primaryBorderColor':'#000D25','lineColor':'#000D25',
+  'fontFamily':'Inter, system-ui, sans-serif'}}}%%
+flowchart LR
+  Web[Marketing page, studio, and story viewer] --> App[Public Container App: Next.js + voice server]
+  Text[Twilio SMS and WhatsApp] -->|signed HTTP webhooks| App
+  Voice[Twilio Voice] -->|signed HTTP webhook| App
+  Voice <-->|ConversationRelay WebSocket| App
+  App --> DB[(PostgreSQL)]
+  App --> Queue[Azure Queue Storage]
+  Queue --> Job[Event-driven Container Apps Job]
+  Recovery[Scheduled recovery Job: every 5 minutes] --> DB
+  Recovery --> Queue
+  Job --> OpenAI[OpenAI]
+  Job --> Blob[Private Azure Blob Storage]
+  Job --> DB
+  Job --> Text
+```
 
-## Create comics by text (SMS/MMS)
+The public Azure Container App hosts Next.js, signed Twilio webhooks, and the `/relay` ConversationRelay WebSocket. The event-driven Job handles inbound text turns and slow image generation from Azure Queue. A second, scheduled Job republishes work left pending after a temporary failure. All three workloads run the same image; the Jobs scale independently of the public app.
 
-Text the Twilio number your name, then a comic idea (optionally attach a photo) — you receive the finished comic as an MMS image plus a link to the web story page approximately 1 minute later.
+## Usage
 
-The SMS channel uses an **async, webhook-driven design**: the incoming SMS webhook acknowledges instantly (to beat Twilio's ~15 second timeout), while a QStash background job generates the comic (30–60 seconds) and delivers it via outbound MMS.
+### How people start
 
-### Setup checklist
+The public homepage (`/`) is an invitation to make a comic through Twilio. Set `TWILIO_ENABLED_CHANNELS` on the public Container App to choose which channels people see and can use. Use an ordered, comma-separated list such as `sms,whatsapp,voice`. The first listed channel with a valid configured destination gets the main start action and QR code; an SMS QR opens a text, a WhatsApp QR opens a chat, and a Voice QR opens the dialer. The page gives channel-specific steps for each available option. The selected channel affects the way a person starts, while the same agent handles the comic conversation and sends a story link when it is ready.
 
-1. **Create a Twilio account** and retrieve your Account SID and Auth Token from the [Twilio Console](https://console.twilio.com).
+When `TWILIO_ENABLED_CHANNELS` is **unset**, the page keeps the default inferred behavior: a valid `TWILIO_PHONE_NUMBER` offers SMS and Voice, and a valid `whatsapp:`-prefixed `TWILIO_WHATSAPP_NUMBER` offers WhatsApp. When the variable is **set**, only listed channels with valid configured destinations are advertised and accepted by inbound webhooks. Set it to an empty value to disable all public start channels. With no available channel, the page says “opening soon” and offers no live action. This configuration reads local settings; it does not discover sender capabilities or approvals from Twilio Console. Verify each selected sender and webhook in Twilio before promoting the page. The example `+15551234567` is never a live destination.
 
-2. **Buy a Twilio phone number** with SMS, Voice, and MMS capabilities enabled.
+| Example selection | Public starting point | Required destination |
+|---|---|---|
+| `sms` | Text an idea; SMS instructions and QR | `TWILIO_PHONE_NUMBER` with SMS capability |
+| `whatsapp` | Open WhatsApp and message the approved sender | `TWILIO_WHATSAPP_NUMBER` |
+| `voice` | Call and speak to the ConversationRelay agent | `TWILIO_PHONE_NUMBER` with Voice **and outbound SMS** capability, because the result is sent by SMS |
+| `voice,whatsapp` | Call is primary; WhatsApp is also offered | Both destinations |
+| Explicit empty value | “Opening soon,” without start actions | None |
 
-3. **A2P 10DLC registration (Brand + Campaign)** — **REQUIRED for US SMS deliverability**. This ~10–15 day carrier review process is mandatory before your number can send SMS at scale. Start early.
-   - Register your brand and campaign in the [Twilio Console](https://console.twilio.com).
-   - Estimated completion: 10–15 days pending carrier review.
+| Channel | Where the idea arrives | Where the result goes |
+|---|---|---|
+| SMS/MMS | Text the Twilio number; `/api/twilio/sms` receives the webhook | Story link, with an MMS preview when available |
+| WhatsApp, when enabled | Message the approved sender; `/api/twilio/whatsapp` receives the webhook | Story link, with an image preview when available |
+| Voice | Call the Twilio number; `/api/twilio/voice` and `/relay` run ConversationRelay | Story link by SMS after the call, with an MMS preview when available |
 
-4. **Set the number's Messaging webhook** in the [Twilio Console](https://console.twilio.com):
-   - Webhook URL: `<PUBLIC_BASE_URL>/api/twilio/sms` (HTTP POST)
-   - Replace `<PUBLIC_BASE_URL>` with your public HTTPS domain (no trailing slash; e.g., `https://myapp.example.com` or `https://myapp.ngrok.io`).
+### Public website
 
-5. **Enable Upstash QStash** in the [Upstash Console](https://console.upstash.com):
-   - Create a QStash project and copy:
-     - `QSTASH_TOKEN`
-     - `QSTASH_CURRENT_SIGNING_KEY`
-     - `QSTASH_NEXT_SIGNING_KEY`
+The homepage uses the Twilio bug in the header and favicon, a red, white, blue, and navy palette, and a matching social preview image. Its actions, QR code, and three-step instructions follow the enabled channels; with no configured destination, it shows “opening soon” without a QR code or contact action. The footer credits the [Make Comics](https://github.com/Nutlope/make-comics) project. The page styles are in `app/marketing.module.css`, and the social preview is in `app/opengraph-image.tsx`.
 
-6. **Set all env vars** in your `.env` file:
-   - From Twilio: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`
-   - From QStash: `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY`
-   - Your public URL: `PUBLIC_BASE_URL`
-   - Plus existing vars: `OPENAI_API_KEY`, S3 credentials, database URL, Clerk keys, etc.
+The browser composer lives at `/studio` for manual testing and development. It is not linked as a public start action. Finished comics remain viewable at `/story/{slug}`, including from links sent by text. Creating a comic in the studio or editing a browser-owned story requires Google sign-in; phone users do not need a browser account to start or receive a comic.
 
-7. **Apply the database migration**:
-   ```bash
-   pnpm drizzle-kit push
-   ```
-   This introspects your live Neon database and applies the `conversations` table + `stories.source` column.
-   
-   **Important**: Use `drizzle-kit push`, not file-based `drizzle-kit migrate` — the migration folder has pre-existing orphaned history that only `push` handles correctly.
+### Conversation flow
 
-8. **Deploy or tunnel**: You need a public HTTPS URL so Twilio and QStash can reach your app.
-   - **Production**: Deploy to Vercel, Railway, or your preferred host.
-   - **Local testing**: Use [ngrok](https://ngrok.com/) or similar: `ngrok http 3000`, then set `PUBLIC_BASE_URL=https://<your-ngrok-url>`.
+Start with a comic idea; a name is optional. The agent can ask a short follow-up question and accepts revisions. SMS and WhatsApp also accept up to two character photos, including photo-only messages. The agent summarizes a draft and waits for **`CREATE`** by text or **“create it”** by voice. Each approval requests one five-panel page; the app does not count panels in the generated image. The first approval starts a story; **`CONTINUE`** starts a draft for its next page in the same conversation channel. **`STATUS`** checks progress, **`DISCARD`** discards an unsubmitted text draft (say “cancel” on a call), and **`NEW`** starts a new story. While a page is generating, the draft stays locked until its job finishes. The same agent logic powers all channels, with a separate saved draft per number and channel. SMS opt-out, opt-in, and help keywords are handled by Twilio rather than by the comic agent.
 
-## Create comics by phone call
+The result message always includes a link to the full story. It also includes a compact image preview when available. A story made by phone can be viewed through that link. A Google sign-in is a separate identity, so signing in does not automatically grant edit rights to a phone-created story.
 
-Call the Twilio number → a voice assistant asks your name and comic idea → the comic is generated and texted to you within ~1 minute.
+## How Pages Are Made
 
-The phone call channel uses [**Twilio ConversationRelay**](https://www.twilio.com/docs/voice/conversational-ai/conversation-relay), which handles speech-to-text and text-to-speech, connected to a dedicated persistent WebSocket server (see `voice-server/`) that runs the scripted conversation. When the call finishes it enqueues the same comic-generation job as the SMS channel, so the finished comic is delivered by text.
+OpenAI `gpt-image-2` is prompted to generate a five-panel page from the approved idea and selected style. When the user supplies character photos or continues a story, the app passes those references, including the prior page when available, to the image edit API for visual continuity. A text model supplies the story title and description. The full image is saved in private Azure Blob Storage; the outbound message uses a smaller preview when available.
 
-### Setup checklist
+## Stack
 
-1. **Deploy the voice server** to a long-lived host (Fly.io, Railway, etc.):
-   - See [`voice-server/README.md`](./voice-server/README.md) for detailed instructions.
-   - Note the public `wss://` URL of your deployed server.
+- Next.js 16 and React 19
+- Auth.js with Google OAuth
+- PostgreSQL through Neon and Drizzle ORM
+- OpenAI `gpt-image-2` for pages and a configurable text model for the agent and story metadata
+- Azure Blob Storage for uploaded and generated images
+- Azure Queue Storage, an event-driven Container Apps Job, and a scheduled recovery Job
+- Twilio Programmable Messaging, WhatsApp, and ConversationRelay
+- jsPDF for PDF export from the story page
+- GitHub Actions, Azure OIDC, Azure Container Registry, and Azure Container Apps
 
-2. **Set `CONVERSATION_RELAY_WS_URL`** to that URL:
-   - In the **Next.js app**: `.env` → `CONVERSATION_RELAY_WS_URL=wss://your-voice-server-url`
-   - In the **voice server**: `.env` / secrets → same URL
+## Installation
 
-3. **Configure the Twilio number's Voice webhook** in the [Twilio Console](https://console.twilio.com):
-   - **Webhook URL**: `<PUBLIC_BASE_URL>/api/twilio/voice` (HTTP POST)
-   - Replace `<PUBLIC_BASE_URL>` with your public HTTPS domain (no trailing slash; e.g., `https://myapp.example.com`).
+1. Install Node.js 22 and pnpm 10.20.0, then run `pnpm install`.
+2. Copy `.example.env` to `.env` and fill in OpenAI, PostgreSQL, Auth.js, Azure Storage, and Twilio values needed for the channels you will test. Optionally set `TWILIO_ENABLED_CHANNELS` to the ordered list you intend to offer. Leave both sender numbers blank, or set the channel list to an empty value, to preview the public “opening soon” state; real sender values and Twilio credentials are needed for phone tests. Use a development database or Neon branch.
+3. For a new empty database, run `pnpm db:migrate`. For an existing database, read the [migration gate](docs/DEPLOYMENT.md#database-migration-gate) before running file-based migrations.
+4. Start the browser-only Next.js server with `pnpm dev` to inspect the marketing page and `/studio`, or run `pnpm dev:voice` for Next.js **and** `/relay` on port `8080`. The latter is the local equivalent of the production `pnpm start` entrypoint.
 
-4. **⚠️ Accept the AI/ML Features Addendum** in the Twilio Console:
-   - Navigate to **Voice** → **Settings** → **Privacy & Security**
-   - Enable "AI/ML Features"
-   - **This is mandatory** — without it, ConversationRelay returns error 64110 "Account Opted Out" and calls fail.
+To preview the closed state, leave the sender numbers blank and check that `/` shows “opening soon” with no contact action or QR code. To preview a live channel, configure a real test sender and an explicit `TWILIO_ENABLED_CHANNELS` list, then check that the action, QR destination, and steps match that channel. Set `TWILIO_ENABLED_CHANNELS=sms` for an SMS-only number: leaving the setting unset infers both SMS and Voice from a valid phone number. Do not use the example number as a live destination.
 
-5. The same Twilio number, QStash, and OpenAI setup from the **SMS channel are reused** — no additional Twilio or API accounts needed.
+To test inbound Twilio webhooks and calls locally, expose the `pnpm dev:voice` port through an HTTPS tunnel that supports WebSocket upgrades. Set `PUBLIC_BASE_URL` to its exact HTTPS origin. When testing Voice, set `CONVERSATION_RELAY_WS_URL` to its `wss://` `/relay` URL. If using Google OAuth through that origin, set `AUTH_URL` and its Google callback to the same origin. Run `pnpm start:worker` to process one queued item locally; Azure runs this command for each Job execution in production.
 
-## Cloning & running
+For local Azure Storage development, run Azurite, create the private Blob container and both queues, and set:
 
-1. Clone the repo: `git clone https://github.com/nutlope/make-comics`
-2. Create a `.env` file based on `.example.env` and add your API keys:
-   - **OpenAI API key**: `OPENAI_API_KEY=<your_openai_api_key>`
-   - **OpenAI models**: `OPENAI_IMAGE_MODEL=gpt-image-2`, `OPENAI_TEXT_MODEL=gpt-4.1-mini` (optional; these are the defaults)
-   - **AWS S3 credentials**: `S3_UPLOAD_KEY`, `S3_UPLOAD_SECRET`, `S3_UPLOAD_BUCKET`, `S3_UPLOAD_REGION`
-   - **Database URL**: Use [Neon](https://neon.tech) to set up your PostgreSQL database: `DATABASE_URL=<your_database_url>`
-   - **Clerk keys**: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`
-   - **Upstash Redis**: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
-3. Run `pnpm install` and `pnpm dev` to install dependencies and run locally
+```env
+AZURE_STORAGE_CONNECTION_STRING=UseDevelopmentStorage=true
+AZURE_STORAGE_CONTAINER_NAME=comics
+AZURE_STORAGE_QUEUE_NAME=comic-generation
+AZURE_STORAGE_POISON_QUEUE_NAME=comic-generation-poison
+```
+
+The Blob container remains private. The application serves HMAC-signed media URLs that OpenAI, Twilio, and shared story pages can retrieve without exposing the storage account directly. Blob names are generated by the server.
+
+## Authentication
+
+Studio creation and browser-owned story editing use Auth.js with Google OAuth. The marketing page, story viewer, and phone conversation do not require Google sign-in. Configure this callback in Google Cloud:
+
+```text
+http://localhost:3000/api/auth/callback/google
+https://YOUR_DOMAIN/api/auth/callback/google
+```
+
+Required variables:
+
+```env
+AUTH_SECRET=
+AUTH_GOOGLE_ID=
+AUTH_GOOGLE_SECRET=
+AUTH_URL=https://YOUR_DOMAIN
+```
+
+Auth.js stores stable users and Google account links in PostgreSQL. Twilio phone addresses resolve to separate internal channel identities rather than being used directly as story owner IDs.
+
+## Twilio Setup
+
+Configure **HTTP POST** webhooks using the exact public HTTPS origin in `PUBLIC_BASE_URL`:
+
+```text
+SMS/MMS:  https://YOUR_DOMAIN/api/twilio/sms#rc=3&rp=5xx,ct,rt
+WhatsApp: https://YOUR_DOMAIN/api/twilio/whatsapp#rc=3&rp=5xx,ct,rt
+Voice:    https://YOUR_DOMAIN/api/twilio/voice#rc=3&rp=5xx,ct,rt
+```
+
+The fragment is Twilio's optional [HTTP webhook retry configuration](https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides). Twilio omits it from signature calculation. Each inbound `MessageSid` is stored once, so a retry does not request another comic. The application validates Twilio signatures for the inbound webhooks and automatically configures signed `/api/twilio/voice/action` and `/api/twilio/status` callbacks. You do not set those callbacks on the phone number.
+
+ConversationRelay connects to this WebSocket URL, **without** the HTTP retry fragment:
+
+```text
+wss://YOUR_DOMAIN/relay
+```
+
+This app uses ConversationRelay directly for speech and keeps the agent logic in the shared application. Twilio Agent Connect can be added later if the product needs its additional routing and agent services.
+
+Set `TWILIO_PHONE_NUMBER` to the real E.164 number used for selected SMS or Voice channels. SMS needs a text-capable number; Voice needs a call-capable number that can also send outbound SMS results to callers. To offer WhatsApp, set `TWILIO_WHATSAPP_NUMBER` to an approved sender with the `whatsapp:` prefix. Set `TWILIO_ENABLED_CHANNELS` on the public app to an ordered subset of `sms,whatsapp,voice`, or leave it unset to infer channels from the destinations. The first available listed channel gets the primary action and QR code. Setting the variable does not provision a number, approve a WhatsApp sender, or configure Twilio webhooks. Voice callers receive the result by SMS, with an MMS preview when available, at their caller number. The example `+15551234567` is a placeholder and must not appear in a live call to action.
+
+For Voice, accept Twilio's AI/ML Features Addendum under Voice privacy settings. US application-to-person SMS also requires the applicable A2P registration.
+
+## Reliability
+
+- Twilio inbound messages are deduplicated by `MessageSid`; voice submissions use the call ID and approved turn.
+- Queue messages contain only a version and receipt or job ID; prompts and recipient data remain in PostgreSQL.
+- The text worker saves turns and replies in PostgreSQL and processes them in order under a conversation lease.
+- Generation jobs use Postgres leases and deterministic story/page/blob IDs.
+- Free-tier quotas are reserved atomically before server-funded generation.
+- Queue retries reuse completed database/blob checkpoints. The scheduled recovery Job re-enqueues stale work every five minutes.
+- Outbound media is resized for MMS. If preview creation fails, the worker still sends the story link; signed Twilio delivery-status callbacks record later failures and attempt a link-only fallback.
+
+## Deployment
+
+Azure deployment is gated by the reusable `Validate` CI check. A successful push to `main` builds one immutable image, pushes it to ACR, updates the public Container App and both Jobs, and smoke-tests `/api/healthz`.
+
+- One-time Azure and GitHub setup: [`docs/INFRA_SETUP.md`](docs/INFRA_SETUP.md)
+- Deployment behavior and operations: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+- CI checks and dependency updates: [`docs/CICD.md`](docs/CICD.md)
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `pnpm dev` | Start local Next.js development |
+| `pnpm dev:voice` | Start local Next.js and the ConversationRelay WebSocket |
+| `pnpm build` | Build the production application |
+| `pnpm start` | Run the production web/voice server |
+| `pnpm start:worker` | Process one Azure Queue item; with `RECOVERY_MODE=1`, run a recovery sweep |
+| `pnpm test` | Run unit tests |
+| `pnpm typecheck` | Run TypeScript validation |
+| `pnpm lint` | Run ESLint |
+| `pnpm db:migrate` | Apply checked-in migrations to an empty or baselined database |
+| `pnpm drizzle-kit push` | Update a development database directly; baseline it before switching to migrations |
+
+## License
+
+This repository does not currently include a license file.

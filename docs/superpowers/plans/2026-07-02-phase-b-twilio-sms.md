@@ -1,6 +1,6 @@
 # Phase B: Twilio SMS/MMS Channel — Implementation Plan
 
-> Current status note: this is a historical implementation plan. The current app has since removed the previous secondary AI provider entirely; title/description generation now uses `lib/title-generation.ts` with OpenAI, and only OpenAI keys are required for AI generation.
+> **Superseded:** This is a historical implementation plan. Current architecture and setup are documented in the root README and `docs/INFRA_SETUP.md`; provider, storage, authentication, job, and deployment details below are not current instructions.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

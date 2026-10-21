@@ -13,9 +13,9 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useKeyboardShortcut } from "@/hooks/use-keyboard-shortcut";
 import { validateFileForUpload, generateFilePreview } from "@/lib/file-utils";
-import { useS3Upload } from "next-s3-upload";
+import { uploadFileToBlob } from "@/lib/blob-upload-client";
 import { isContentPolicyViolation } from "@/lib/utils";
-import { MAX_SYSTEM_LENGTH, MAX_USER_PROMPT } from "@/lib/prompt";
+import { MAX_USER_PROMPT } from "@/lib/prompt";
 
 interface CharacterItem {
   url: string;
@@ -59,7 +59,6 @@ export function GeneratePageModal({
   const [isGenerating, setIsGenerating] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
-  const { uploadToS3 } = useS3Upload();
 
   // Reset form and initialize characters when modal opens
   useEffect(() => {
@@ -256,8 +255,7 @@ export function GeneratePageModal({
       const characterUrls = await Promise.all(
         selectedCharacters.map(async (char) => {
           if (char.isNew && char.file) {
-            // Upload new file to S3
-            const { url } = await uploadToS3(char.file);
+            const { url } = await uploadFileToBlob(char.file);
             return url;
           } else {
             // Reuse existing URL

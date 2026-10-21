@@ -1,0 +1,295 @@
+import { and, asc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { sendInboundMessage } from "@/lib/generation-queue";
+import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
+import type { AgentCollected, ComicAgentSubmission } from "@/lib/comic-agent";
+import type { TwilioMessageChannel } from "@/lib/twilio";
+
+export type InboundMessageStatus = "pending" | "processing" | "reply_pending" | "completed";
+
+export interface StoredInboundMessage {
+  messageSid: string;
+  channel: TwilioMessageChannel;
+  fromAddress: string;
+  toAddress: string;
+  body: string;
+  mediaUrls: string[];
+  mediaContentTypes: string[];
+  status: InboundMessageStatus;
+  replyBody: string | null;
+  outboundSid: string | null;
+  submission: ComicAgentSubmission | null;
+  attemptCount: number;
+  createdAt: Date;
+}
+
+export interface RecordInboundMessageInput {
+  messageSid: string;
+  channel: TwilioMessageChannel;
+  fromAddress: string;
+  toAddress: string;
+  body: string;
+  mediaUrls: string[];
+  mediaContentTypes: string[];
+}
+
+function rowsOf<T>(result: unknown): T[] {
+  return (result as { rows?: T[] }).rows ?? (result as T[]);
+}
+
+function toStored(row: typeof twilioInboundMessages.$inferSelect): StoredInboundMessage {
+  if (row.channel !== "sms" && row.channel !== "whatsapp") {
+    throw new Error(`Unsupported inbound message channel: ${row.channel}`);
+  }
+  if (!["pending", "processing", "reply_pending", "completed"].includes(row.status)) {
+    throw new Error(`Unsupported inbound message status: ${row.status}`);
+  }
+  return {
+    messageSid: row.messageSid,
+    channel: row.channel,
+    fromAddress: row.fromAddress,
+    toAddress: row.toAddress,
+    body: row.body,
+    mediaUrls: row.mediaUrls,
+    mediaContentTypes: row.mediaContentTypes,
+    status: row.status as InboundMessageStatus,
+    replyBody: row.replyBody,
+    outboundSid: row.outboundSid,
+    submission: row.submission,
+    attemptCount: row.attemptCount,
+    createdAt: row.createdAt,
+  };
+}
+
+/** A duplicate pending receipt is deliberately publishable again after a queue outage. */
+export async function recordInboundMessage(
+  input: RecordInboundMessageInput,
+): Promise<{ shouldEnqueue: boolean }> {
+  const [inserted] = await db
+    .insert(twilioInboundMessages)
+    .values({ ...input, status: "pending" })
+    .onConflictDoNothing({ target: twilioInboundMessages.messageSid })
+    .returning({ messageSid: twilioInboundMessages.messageSid });
+  if (inserted) return { shouldEnqueue: true };
+
+  const [existing] = await db
+    .select({
+      messageSid: twilioInboundMessages.messageSid,
+      channel: twilioInboundMessages.channel,
+      fromAddress: twilioInboundMessages.fromAddress,
+      toAddress: twilioInboundMessages.toAddress,
+      status: twilioInboundMessages.status,
+    })
+    .from(twilioInboundMessages)
+    .where(eq(twilioInboundMessages.messageSid, input.messageSid))
+    .limit(1);
+  if (!existing) throw new Error("Inbound receipt disappeared after insert conflict");
+  if (
+    existing.channel !== input.channel ||
+    existing.fromAddress !== input.fromAddress ||
+    existing.toAddress !== input.toAddress
+  ) {
+    throw new Error("Inbound MessageSid conflicts with a different sender");
+  }
+  return { shouldEnqueue: existing.status !== "completed" };
+}
+
+export async function getInboundMessage(messageSid: string): Promise<StoredInboundMessage | null> {
+  const [row] = await db
+    .select()
+    .from(twilioInboundMessages)
+    .where(eq(twilioInboundMessages.messageSid, messageSid))
+    .limit(1);
+  return row ? toStored(row) : null;
+}
+
+export async function getOldestOpenInboundMessage(
+  channel: TwilioMessageChannel,
+  fromAddress: string,
+): Promise<StoredInboundMessage | null> {
+  const [row] = await db
+    .select()
+    .from(twilioInboundMessages)
+    .where(and(
+      eq(twilioInboundMessages.channel, channel),
+      eq(twilioInboundMessages.fromAddress, fromAddress),
+      ne(twilioInboundMessages.status, "completed"),
+    ))
+    .orderBy(asc(twilioInboundMessages.createdAt), asc(twilioInboundMessages.messageSid))
+    .limit(1);
+  return row ? toStored(row) : null;
+}
+
+export async function claimConversationLease(
+  channel: TwilioMessageChannel,
+  fromAddress: string,
+  leaseOwner: string,
+  leaseSeconds: number,
+): Promise<Conversation | null> {
+  await db
+    .insert(conversations)
+    .values({ phoneNumber: fromAddress, channel, state: "collecting", collected: {} })
+    .onConflictDoNothing({ target: [conversations.channel, conversations.phoneNumber] });
+
+  const [claimed] = await db
+    .update(conversations)
+    .set({
+      leaseOwner,
+      leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(conversations.channel, channel),
+      eq(conversations.phoneNumber, fromAddress),
+      or(isNull(conversations.leaseExpiresAt), sql`${conversations.leaseExpiresAt} <= NOW()`),
+    ))
+    .returning();
+  return claimed ?? null;
+}
+
+export async function renewConversationLease(
+  conversationId: string,
+  leaseOwner: string,
+  leaseSeconds: number,
+): Promise<Conversation | null> {
+  const [renewed] = await db
+    .update(conversations)
+    .set({
+      leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(conversations.id, conversationId),
+      eq(conversations.leaseOwner, leaseOwner),
+      sql`${conversations.leaseExpiresAt} > NOW()`,
+    ))
+    .returning();
+  return renewed ?? null;
+}
+
+export async function releaseConversationLease(
+  conversationId: string,
+  leaseOwner: string,
+): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ leaseOwner: null, leaseExpiresAt: null, updatedAt: new Date() })
+    .where(and(eq(conversations.id, conversationId), eq(conversations.leaseOwner, leaseOwner)));
+}
+
+export async function markInboundProcessing(messageSid: string): Promise<void> {
+  await db
+    .update(twilioInboundMessages)
+    .set({
+      status: "processing",
+      attemptCount: sql`${twilioInboundMessages.attemptCount} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(twilioInboundMessages.messageSid, messageSid),
+      or(
+        eq(twilioInboundMessages.status, "pending"),
+        eq(twilioInboundMessages.status, "processing"),
+      ),
+    ));
+}
+
+/** Update state and its outbox reply in one PostgreSQL statement. */
+export async function checkpointInboundTurn(input: {
+  messageSid: string;
+  conversationId: string;
+  leaseOwner: string;
+  state: string;
+  collected: AgentCollected;
+  activeStoryId: string | null;
+  replyBody: string;
+  submission: ComicAgentSubmission | null;
+}): Promise<void> {
+  const collected = JSON.stringify(input.collected);
+  const submission = input.submission ? JSON.stringify(input.submission) : null;
+  const result = await db.execute(sql`
+    WITH checkpointed_conversation AS (
+      UPDATE conversations
+      SET state = ${input.state},
+          collected = ${collected}::jsonb,
+          active_story_id = ${input.activeStoryId}::uuid,
+          updated_at = NOW()
+      WHERE id = ${input.conversationId}::uuid
+        AND lease_owner = ${input.leaseOwner}
+        AND lease_expires_at > NOW()
+      RETURNING id
+    ), checkpointed_message AS (
+      UPDATE twilio_inbound_messages
+      SET status = 'reply_pending',
+          reply_body = ${input.replyBody},
+          submission = ${submission}::jsonb,
+          updated_at = NOW()
+      WHERE message_sid = ${input.messageSid}
+        AND status <> 'completed'
+        AND EXISTS (SELECT 1 FROM checkpointed_conversation)
+      RETURNING message_sid
+    )
+    SELECT message_sid FROM checkpointed_message
+  `);
+  if (rowsOf<{ message_sid: string }>(result).length !== 1) {
+    throw new Error("Unable to checkpoint inbound turn: conversation lease lost");
+  }
+}
+
+export async function completeInboundReply(
+  messageSid: string,
+  outboundSid: string,
+): Promise<void> {
+  const [updated] = await db
+    .update(twilioInboundMessages)
+    .set({ status: "completed", outboundSid, updatedAt: new Date() })
+    .where(and(
+      eq(twilioInboundMessages.messageSid, messageSid),
+      eq(twilioInboundMessages.status, "reply_pending"),
+    ))
+    .returning({ messageSid: twilioInboundMessages.messageSid });
+  if (updated) return;
+
+  const [existing] = await db
+    .select({ status: twilioInboundMessages.status, outboundSid: twilioInboundMessages.outboundSid })
+    .from(twilioInboundMessages)
+    .where(eq(twilioInboundMessages.messageSid, messageSid))
+    .limit(1);
+  if (existing?.status === "completed" && existing.outboundSid === outboundSid) return;
+  throw new Error(`Unable to complete inbound reply for ${messageSid}`);
+}
+
+/** Scheduled safety net for a receipt saved while Azure Queue was unavailable. */
+export async function recoverPendingInboundMessages(limit = 50): Promise<number> {
+  const batchLimit = Number.isFinite(limit)
+    ? Math.max(1, Math.min(Math.trunc(limit), 100))
+    : 50;
+  const now = Date.now();
+  const pendingBefore = new Date(now - 30_000);
+  const replyBefore = new Date(now - 2 * 60_000);
+  const processingBefore = new Date(now - 6 * 60_000);
+  const rows = await db
+    .select({ messageSid: twilioInboundMessages.messageSid })
+    .from(twilioInboundMessages)
+    .where(or(
+      and(
+        eq(twilioInboundMessages.status, "pending"),
+        lt(twilioInboundMessages.createdAt, pendingBefore),
+      ),
+      and(
+        eq(twilioInboundMessages.status, "reply_pending"),
+        lt(twilioInboundMessages.updatedAt, replyBefore),
+      ),
+      and(
+        eq(twilioInboundMessages.status, "processing"),
+        lt(twilioInboundMessages.updatedAt, processingBefore),
+      ),
+    ))
+    .orderBy(asc(twilioInboundMessages.createdAt), asc(twilioInboundMessages.messageSid))
+    .limit(batchLimit);
+
+  for (const row of rows) {
+    await sendInboundMessage(row.messageSid);
+  }
+  return rows.length;
+}

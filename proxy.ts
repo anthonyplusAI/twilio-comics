@@ -1,12 +1,20 @@
-import { clerkMiddleware } from "@clerk/nextjs/server";
+import NextAuth from "next-auth";
+import { NextResponse } from "next/server";
+import authConfig from "./auth.config";
 
-export default clerkMiddleware();
+const { auth } = NextAuth(authConfig);
+
+export default auth((request) => {
+  if (request.auth?.user) return NextResponse.next();
+
+  const destination = new URL("/", request.url);
+  destination.searchParams.set(
+    "callbackUrl",
+    `${request.nextUrl.pathname}${request.nextUrl.search}`,
+  );
+  return NextResponse.redirect(destination);
+});
 
 export const config = {
-  matcher: [
-    // Skip Next.js internals and all static files, unless found in search params
-    "/((?!_next|[^?]*\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
-    // Always run for API routes
-    "/(api|trpc)(.*)",
-  ],
+  matcher: ["/stories/:path*"],
 };

@@ -20,7 +20,7 @@ export interface Advance {
 }
 
 const RESET_KEYWORDS = new Set(["new", "restart", "reset"]);
-const WELCOME = "Welcome to MakeComics! What's your name?";
+const WELCOME = "Welcome to Twilio Comics! What's your name?";
 
 export function advanceConversation(
   current: { state: ConversationState; collected: Collected },
@@ -60,7 +60,7 @@ export function advanceConversation(
       return {
         nextState: "generating",
         collected,
-        reply: `Got it${name}! Generating your comic now — this takes about a minute. I'll text it to you when it's ready. ✏️`,
+        reply: `Got it${name}! Generating your comic now — this takes about a minute. I'll send it when it's ready.`,
         action: "enqueue_generation",
       };
     }

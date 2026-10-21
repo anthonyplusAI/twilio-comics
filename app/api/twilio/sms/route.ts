@@ -1,121 +1,97 @@
 import { type NextRequest } from "next/server";
-import {
-  validateTwilioSignature,
-  parseInboundSms,
-  downloadTwilioMedia,
-} from "@/lib/twilio";
-import { advanceConversation, type Collected, type ConversationState } from "@/lib/conversation";
-import { publishGenerationJob } from "@/lib/qstash";
-import { getOrCreateConversation, updateConversation } from "@/lib/db-actions";
-import { uploadBufferToS3 } from "@/lib/s3-upload";
-import { freeTierRateLimit } from "@/lib/rate-limit";
+import { sendInboundMessage } from "@/lib/generation-queue";
+import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
+import { recordInboundMessage } from "@/lib/twilio-events";
+import { parseInboundMessage, validateTwilioSignature } from "@/lib/twilio";
 
 export const runtime = "nodejs";
 
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+
+// Twilio owns these control keywords and may already have sent its own reply.
+// CANCEL in particular opts an SMS recipient out, so the comic command is DISCARD.
+const TWILIO_CONTROL_KEYWORDS = new Set([
+  "STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "REVOKE", "OPTOUT",
+  "START", "UNSTOP", "YES", "HELP", "INFO",
+]);
+
+function emptyTwiml(): Response {
+  return new Response(EMPTY_TWIML, {
+    headers: { "Content-Type": "text/xml", "Cache-Control": "no-store" },
+  });
 }
 
-function twiml(message: string): Response {
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(message)}</Message></Response>`;
-  return new Response(xml, { headers: { "Content-Type": "text/xml" } });
-}
-
-export async function POST(request: NextRequest) {
+export async function POST(request: NextRequest): Promise<Response> {
   const rawBody = await request.text();
   const params: Record<string, string> = {};
-  new URLSearchParams(rawBody).forEach((v, k) => {
-    params[k] = v;
+  new URLSearchParams(rawBody).forEach((value, key) => {
+    params[key] = value;
   });
 
-  // Signature validation MUST happen before any DB work
-  const url = `${process.env.PUBLIC_BASE_URL?.replace(/\/$/, "")}/api/twilio/sms`;
+  const publicBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+  if (!publicBaseUrl) {
+    return new Response("Messaging service unavailable", { status: 503 });
+  }
+
   const signature = request.headers.get("x-twilio-signature");
+  const url = `${publicBaseUrl}${request.nextUrl.pathname}${request.nextUrl.search}`;
   if (!validateTwilioSignature({ signature, url, params })) {
     return new Response("Invalid signature", { status: 403 });
   }
 
-  const inbound = parseInboundSms(params);
-  if (!inbound.from) {
-    return twiml("Sorry, something went wrong. Please try again.");
+  const inbound = parseInboundMessage(params);
+  if (!inbound.messageSid || !inbound.from || !inbound.to) {
+    return new Response("Missing Twilio message fields", { status: 400 });
+  }
+
+  const expectedChannel = request.nextUrl.pathname === "/api/twilio/whatsapp"
+    ? "whatsapp"
+    : "sms";
+  if (inbound.channel !== expectedChannel) {
+    return new Response("Incorrect messaging channel", { status: 400 });
+  }
+
+  const contact = getMarketingContact(
+    process.env.TWILIO_PHONE_NUMBER,
+    process.env.TWILIO_WHATSAPP_NUMBER,
+  );
+  if (!getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes(inbound.channel)) {
+    return new Response("Messaging service unavailable", { status: 503 });
+  }
+  const configuredSender = inbound.channel === "whatsapp"
+    ? contact.whatsappNumber && `whatsapp:${contact.whatsappNumber}`
+    : contact.phoneNumber;
+  if (!configuredSender) {
+    return new Response("Messaging service unavailable", { status: 503 });
+  }
+  if (inbound.to !== configuredSender) {
+    return new Response("Unexpected messaging sender", { status: 403 });
+  }
+
+  if (
+    Object.hasOwn(params, "OptOutType") ||
+    TWILIO_CONTROL_KEYWORDS.has(inbound.body.toUpperCase())
+  ) {
+    return emptyTwiml();
   }
 
   try {
-    const convo = await getOrCreateConversation(inbound.from);
-    const collected = (convo.collected || {}) as Collected;
-
-    // Download + re-upload any attached images as character references
-    const newImageUrls: string[] = [];
-    for (let i = 0; i < inbound.mediaUrls.length; i++) {
-      const ct = inbound.mediaContentTypes[i] || "";
-      if (!ct.startsWith("image/")) continue;
-      try {
-        const { buffer, contentType } = await downloadTwilioMedia(inbound.mediaUrls[i]);
-        const ext = contentType.includes("png") ? "png" : "jpg";
-        const s3Url = await uploadBufferToS3(
-          buffer,
-          `chars/${inbound.from.replace(/[^0-9]/g, "")}/${Date.now()}-${i}.${ext}`,
-          contentType,
-        );
-        newImageUrls.push(s3Url);
-      } catch (mediaErr) {
-        console.error("Failed to ingest inbound media:", mediaErr);
-        // Non-fatal: continue processing other media items
-      }
-    }
-
-    const advance = advanceConversation(
-      { state: convo.state as ConversationState, collected },
-      { body: inbound.body, hasImage: newImageUrls.length > 0 },
-    );
-
-    // Merge new character images into collected, capped at 2 (matches web UI)
-    const mergedCollected: Collected = { ...advance.collected };
-    if (newImageUrls.length > 0) {
-      mergedCollected.characterImageUrls = [
-        ...(advance.collected.characterImageUrls || []),
-        ...newImageUrls,
-      ].slice(0, 2);
-    }
-
-    await updateConversation(inbound.from, {
-      state: advance.nextState,
-      collected: mergedCollected as Record<string, unknown>,
+    const receipt = await recordInboundMessage({
+      messageSid: inbound.messageSid,
+      channel: inbound.channel,
+      fromAddress: inbound.from,
+      toAddress: inbound.to,
+      body: inbound.body,
+      mediaUrls: inbound.mediaUrls,
+      mediaContentTypes: inbound.mediaContentTypes,
     });
 
-    if (advance.action === "enqueue_generation" && mergedCollected.prompt) {
-      // Image generation is server-funded, so gate free-tier usage BEFORE
-      // spending budget. Peek at remaining credits (the worker's
-      // freeTierRateLimit.limit() does the single consume on success).
-      const { remaining } = await freeTierRateLimit.getRemaining(inbound.from);
-      if (remaining <= 0) {
-        // Roll back to awaiting_prompt so the user can retry after the window
-        // resets, instead of being stuck in the "generating" state.
-        await updateConversation(inbound.from, {
-          state: "awaiting_prompt",
-          collected: mergedCollected as Record<string, unknown>,
-        });
-        return twiml(
-          "You've reached the free limit of 3 comics this week. Please try again in a few days!",
-        );
-      }
-
-      await publishGenerationJob({
-        phoneNumber: inbound.from,
-        prompt: mergedCollected.prompt,
-        style: mergedCollected.style || "noir",
-        characterImageUrls: mergedCollected.characterImageUrls,
-      });
+    if (receipt.shouldEnqueue) {
+      await sendInboundMessage(inbound.messageSid);
     }
-
-    return twiml(advance.reply);
-  } catch (err) {
-    console.error("Error in Twilio SMS webhook:", err);
-    return twiml("Sorry, something went wrong on our end. Text 'new' to start over.");
+    return emptyTwiml();
+  } catch (error) {
+    console.error("Twilio messaging webhook failed", error);
+    return new Response("Temporary messaging failure", { status: 503 });
   }
 }
