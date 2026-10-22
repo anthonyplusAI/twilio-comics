@@ -203,7 +203,12 @@ async function withConnectedClient<T>(client: SqlClient, run: (connected: SqlCli
   }
 }
 
-export async function bootstrapRoles(store: SecretStore, createClient: SqlClientFactory): Promise<void> {
+export async function bootstrapRoles(
+  store: SecretStore,
+  createClient: SqlClientFactory,
+  reportStage: (stage: string) => void = () => {},
+): Promise<void> {
+  reportStage("administrator-secret-read");
   const adminPassword = await store.get(POSTGRES_BOOTSTRAP.adminSecret);
   const adminPasswordLength = adminPassword ? [...adminPassword].length : 0;
   if (
@@ -216,11 +221,14 @@ export async function bootstrapRoles(store: SecretStore, createClient: SqlClient
   }
 
   const admin = createClient(POSTGRES_BOOTSTRAP.adminUser, adminPassword);
+  reportStage("administrator-database-connect");
   await withConnectedClient(admin, async (connectedAdmin) => {
     // A session lock protects SQL changes and Key Vault writes together. If a
     // replica crashes, PostgreSQL releases the lock with its connection.
+    reportStage("database-advisory-lock");
     await connectedAdmin.query("SELECT pg_advisory_lock(8669012028)");
     try {
+      reportStage("role-secret-read");
       const storedMigrationUrl = await store.get(POSTGRES_BOOTSTRAP.migratorUrlSecret);
       const storedRuntimeUrl = await store.get(POSTGRES_BOOTSTRAP.runtimeUrlSecret);
       const migrationPassword = storedMigrationUrl
@@ -230,11 +238,14 @@ export async function bootstrapRoles(store: SecretStore, createClient: SqlClient
         ? parseStoredRolePassword(storedRuntimeUrl, POSTGRES_BOOTSTRAP.runtimeUser)
         : generateRolePassword();
 
+      reportStage("role-sql-transaction");
       await provisionSqlRoles(connectedAdmin, migrationPassword, runtimePassword);
+      reportStage("migrator-database-verification");
       await withConnectedClient(
         createClient(POSTGRES_BOOTSTRAP.migratorUser, migrationPassword),
         configureMigratorGrants,
       );
+      reportStage("runtime-database-verification");
       await withConnectedClient(
         createClient(POSTGRES_BOOTSTRAP.runtimeUser, runtimePassword),
         verifyRuntimePrivileges,
@@ -243,12 +254,14 @@ export async function bootstrapRoles(store: SecretStore, createClient: SqlClient
       // A retry preserves existing secret values; a crash between SQL commit
       // and the first write simply leads to a new credential on the next run.
       if (!storedMigrationUrl) {
+        reportStage("migration-url-secret-write");
         await store.put(
           POSTGRES_BOOTSTRAP.migratorUrlSecret,
           buildDatabaseUrl(POSTGRES_BOOTSTRAP.migratorUser, migrationPassword),
         );
       }
       if (!storedRuntimeUrl) {
+        reportStage("runtime-url-secret-write");
         await store.put(
           POSTGRES_BOOTSTRAP.runtimeUrlSecret,
           buildDatabaseUrl(POSTGRES_BOOTSTRAP.runtimeUser, runtimePassword),
@@ -358,18 +371,32 @@ function createPgClient(user: string, password: string): SqlClient {
 }
 
 async function main(): Promise<void> {
-  const clientId = process.env.AZURE_CLIENT_ID;
-  if (!clientId || !/^[0-9a-f]{8}-[0-9a-f-]{27,36}$/i.test(clientId)) {
-    throw new Error("AZURE_CLIENT_ID must identify the bootstrap Job's managed identity");
+  let stage = "startup";
+  try {
+    const clientId = process.env.AZURE_CLIENT_ID;
+    if (!clientId || !/^[0-9a-f]{8}-[0-9a-f-]{27,36}$/i.test(clientId)) {
+      throw new Error("AZURE_CLIENT_ID must identify the bootstrap Job's managed identity");
+    }
+    await bootstrapRoles(
+      new KeyVaultSecrets(clientId),
+      createPgClient,
+      (currentStage) => { stage = currentStage; },
+    );
+    console.log("PostgreSQL runtime and migration roles verified; Key Vault connection URLs are ready.");
+  } catch (error) {
+    // Azure SDK and PostgreSQL errors can contain connection details. Report
+    // only our fixed stage name and an allowlisted machine error code.
+    const rawCode = typeof error === "object" && error !== null && "code" in error
+      ? error.code
+      : undefined;
+    const code = typeof rawCode === "string" && /^(?:[0-9A-Z]{5}|E[A-Z]{3,12})$/.test(rawCode)
+      ? ` (code ${rawCode})`
+      : "";
+    console.error(`PostgreSQL role bootstrap failed at ${stage}${code}.`);
+    process.exitCode = 1;
   }
-  await bootstrapRoles(new KeyVaultSecrets(clientId), createPgClient);
-  console.log("PostgreSQL runtime and migration roles verified; Key Vault connection URLs are ready.");
 }
 
 if (process.argv[1]?.endsWith("bootstrap-azure-postgres-roles.ts")) {
-  main().catch(() => {
-    // PostgreSQL and Azure SDK error objects can carry connection details.
-    console.error("PostgreSQL role bootstrap failed. Inspect role ownership, private DNS, Key Vault RBAC, and Job status.");
-    process.exitCode = 1;
-  });
+  void main();
 }
