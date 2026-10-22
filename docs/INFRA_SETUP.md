@@ -119,6 +119,7 @@ ACA_NAME='twilio-comics-v2' \
 ACA_JOB_NAME='twilio-comics-generation-v2' \
 ACA_RECOVERY_JOB_NAME='twilio-comics-recovery-v2' \
 ACA_MIGRATION_JOB_NAME='twilio-comics-migrate-v2' \
+GITHUB_OIDC_SUBJECT='repo:anthonyplusAI@26190505/twilio-comics@1286817910:environment:production' \
 PROVISION_AZURE_CONFIRM=yes \
 bash scripts/provision-azure.sh
 ```
@@ -159,13 +160,19 @@ For a service-principal Azure login, set `PROVISIONER_OBJECT_ID` and `PROVISIONE
 
 The V2 script does not grant Resource Group Contributor to GitHub. If the **same** deployment principal still has a direct Resource Group Contributor assignment from an older run, it stops and asks for a manual review and revocation; it does not delete an assignment automatically. The older V1 OIDC principal may have its own Resource Group Contributor grant. Audit that principal after V2 cutover and revoke its grant when V1 deployments are no longer needed. [Microsoft's built-in Container Apps roles](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/containers) include the app update and Job update/start operations used by this workflow. [Their wildcard actions can also read secrets](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets#permissions-for-managing-secrets) on the scoped app or Job, so restrict GitHub environment access to trusted release operators.
 
-Both Azure-login jobs in `deploy.yml` use the GitHub `production` environment. The script parses the **actual `origin` Git remote** to derive the repository, then trusts the [environment-specific OIDC subject](https://docs.github.com/en/actions/reference/security/oidc):
+Both Azure-login jobs in `deploy.yml` use the GitHub `production` environment. The script parses the **actual `origin` Git remote** to derive the repository. Without an override, it computes the usual [environment-specific OIDC subject](https://docs.github.com/en/actions/reference/security/oidc):
 
 ```text
 repo:<origin-owner>/<origin-repo>:environment:production
 ```
 
-If GitHub reports an immutable or customized subject for this repository, set `GITHUB_OIDC_SUBJECT` to that exact claim before rerunning. The script updates the existing `gha-production` federated credential when the subject changes. On every run it enforces a custom `main`-only deployment branch policy on the GitHub `production` environment, including one created earlier without restrictions; it preserves existing required reviewers and wait timers when switching policy modes. It removes other deployment branch patterns and verifies the final rule. **Before opening the release gate**, protect `main` with the `Validate` required check and require a production environment reviewer in GitHub Settings. Verify the reviewer rule after provisioning.
+This repository's production workflow emitted an ID-based `sub` claim, so its current override is:
+
+```bash
+GITHUB_OIDC_SUBJECT='repo:anthonyplusAI@26190505/twilio-comics@1286817910:environment:production'
+```
+
+Use that value with the V2 provisioning command above and on later reruns. The claim can change if the repository is transferred or replaced; verify the actual `sub` claim from a trusted production workflow before changing the override. If the existing `gha-production` credential subject differs from the computed default and `GITHUB_OIDC_SUBJECT` is absent, the script stops without updating the credential. An explicit override authorizes the script to update that credential when needed. On every completed run it enforces a custom `main`-only deployment branch policy on the GitHub `production` environment, including one created earlier without restrictions; it preserves existing required reviewers and wait timers when switching policy modes. It removes other deployment branch patterns and verifies the final rule. **Before opening the release gate**, protect `main` with the `Validate` required check and require a production environment reviewer in GitHub Settings. Verify the reviewer rule after provisioning.
 
 The original foundation run points the repository's `ACA_*` variables at the **placeholders**. Its V2 rerun repoints the web, runtime Job, and migration Job variables. Verify them with `gh variable list` and repair any mismatch using the values below:
 

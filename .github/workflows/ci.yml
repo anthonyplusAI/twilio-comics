@@ -61,6 +61,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: docker build --tag twilio-comics:test .
+      - name: Verify runtime image works as nextjs without network access
+        run: |
+          docker run --rm --network none twilio-comics:test \
+            sh -eu -c '
+              test "$(id -un)" = nextjs
+              test "$(pnpm --version)" = 10.20.0
+              pnpm exec tsx --version
+            '
       - run: docker build --file Dockerfile.migrate --tag twilio-comics-migrate:test .
 
   security:

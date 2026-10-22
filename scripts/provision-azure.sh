@@ -482,13 +482,19 @@ FEDERATED_UPDATE_PARAMETERS="$(jq -n --arg subject "$OIDC_SUBJECT" '{
 if [[ -z "$FEDERATED_CURRENT" ]]; then
   az ad app federated-credential create --id "$DEPLOY_APP_ID" \
     --parameters "$FEDERATED_PARAMETERS" --output none
-elif ! jq -e --arg subject "$OIDC_SUBJECT" '
+else
+  FEDERATED_SUBJECT="$(jq -r '.subject // empty' <<< "$FEDERATED_CURRENT")"
+  if [[ -z "${GITHUB_OIDC_SUBJECT:-}" && "$FEDERATED_SUBJECT" != "$OIDC_SUBJECT" ]]; then
+    die "Existing '$FEDERATED_NAME' OIDC subject is '${FEDERATED_SUBJECT:-<missing>}', but the derived default is '$OIDC_SUBJECT'. Set GITHUB_OIDC_SUBJECT to the exact GitHub OIDC token 'sub' claim before rerunning. The federated credential was not changed."
+  fi
+  if ! jq -e --arg subject "$OIDC_SUBJECT" '
     .subject == $subject and .issuer == "https://token.actions.githubusercontent.com"
       and (.audiences | index("api://AzureADTokenExchange") != null)
   ' <<< "$FEDERATED_CURRENT" >/dev/null; then
-  az ad app federated-credential update --id "$DEPLOY_APP_ID" \
-    --federated-credential-id "$FEDERATED_NAME" \
-    --parameters "$FEDERATED_UPDATE_PARAMETERS" --output none
+    az ad app federated-credential update --id "$DEPLOY_APP_ID" \
+      --federated-credential-id "$FEDERATED_NAME" \
+      --parameters "$FEDERATED_UPDATE_PARAMETERS" --output none
+  fi
 fi
 
 # Restrict production deployments to main on both first setup and reruns. The
