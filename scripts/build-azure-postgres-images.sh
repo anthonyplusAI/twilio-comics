@@ -53,9 +53,9 @@ cp lib/db.ts lib/schema.ts "$build_root/migration/lib/"
 git archive HEAD drizzle | tar -x -C "$build_root/migration"
 
 az acr build --registry "$acr_name" --image "twilio-comics-bootstrap:$release_sha" \
-  --file Dockerfile.bootstrap "$build_root/bootstrap" --only-show-errors --output none
+  --file Dockerfile.bootstrap --only-show-errors --output none "$build_root/bootstrap"
 az acr build --registry "$acr_name" --image "twilio-comics-migrate:$release_sha" \
-  --file Dockerfile.migrate "$build_root/migration" --only-show-errors --output none
+  --file Dockerfile.migrate --only-show-errors --output none "$build_root/migration"
 
 bootstrap_digest="$(az acr manifest show-metadata --registry "$acr_name" \
   --name "twilio-comics-bootstrap:$release_sha" --query digest --output tsv --only-show-errors)" \

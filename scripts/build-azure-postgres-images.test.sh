@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/twilio-comics-images-test.XXXXXXXX")"
+report_failure() {
+  local status="$1" line="$2" command="$3" capture
+  printf 'Image build mock test failed (exit %s) at line %s: %s\n' \
+    "$status" "$line" "$command" >&2
+  for capture in images.out untracked.out dirty.out; do
+    if [[ -s "$test_root/$capture" ]]; then
+      printf 'Captured %s:\n' "$capture" >&2
+      sed -n '1,20p' "$test_root/$capture" >&2
+    fi
+  done
+}
+trap 'report_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
 trap 'rm -rf "$test_root"' EXIT
 fixture="$test_root/project"
 mkdir -p "$fixture/scripts" "$fixture/lib" "$fixture/drizzle" "$test_root/bin"
@@ -32,14 +44,24 @@ if [[ "${1:-} ${2:-}" == 'account show' ]]; then
   printf '%s\n' 'b001fc6f-ea19-456a-8401-63971a1a1d98'
 elif [[ "${1:-} ${2:-}" == 'acr build' ]]; then
   context="${@: -1}"
-  [[ -d "$context" && ! -e "$context/.env" ]]
+  assert_context() {
+    printf 'ACR build mock rejected context: %s\n' "$1" >&2
+    exit 1
+  }
+  [[ -d "$context" ]] || assert_context 'the final argument must be a directory'
+  [[ ! -e "$context/.env" ]] || assert_context '.env must not be uploaded'
   if [[ "$*" == *'twilio-comics-bootstrap:'* ]]; then
-    [[ -f "$context/scripts/bootstrap-azure-postgres-roles.ts" ]]
-    [[ ! -d "$context/drizzle" ]]
+    [[ -f "$context/scripts/bootstrap-azure-postgres-roles.ts" ]] \
+      || assert_context 'bootstrap input is missing'
+    [[ ! -d "$context/drizzle" ]] \
+      || assert_context 'bootstrap context includes migrations'
   else
-    [[ -f "$context/scripts/check-migration-preflight.ts" ]]
-    [[ -f "$context/drizzle/0000_test.sql" ]]
-    [[ ! -e "$context/scripts/bootstrap-azure-postgres-roles.ts" ]]
+    [[ -f "$context/scripts/check-migration-preflight.ts" ]] \
+      || assert_context 'migration preflight input is missing'
+    [[ -f "$context/drizzle/0000_test.sql" ]] \
+      || assert_context 'committed migration is missing'
+    [[ ! -e "$context/scripts/bootstrap-azure-postgres-roles.ts" ]] \
+      || assert_context 'migration context includes bootstrap source'
   fi
 elif [[ "${1:-} ${2:-} ${3:-}" == 'acr manifest show-metadata' ]]; then
   if [[ "$*" == *'twilio-comics-bootstrap:'* ]]; then

@@ -41,6 +41,7 @@ jobs:
       - name: Azure deployment script contract tests
         run: |
           for test_file in scripts/*.test.sh; do
+            printf 'Running %s\n' "$test_file"
             bash "$test_file"
           done
 
