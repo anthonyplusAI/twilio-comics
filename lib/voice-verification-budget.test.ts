@@ -75,6 +75,9 @@ describe("Voice Verify SMS start budget", () => {
     expect(queries()[4].params).toEqual(expect.arrayContaining([
       request.fromAddress, request.toAddress, "voice.verification.requested", "reserved",
     ]));
+    const insert = queries()[4];
+    expect(insert.params.slice(-2)).toEqual([request.toAddress, null]);
+    expect(insert.sql).toMatch(/'toAddress', \$\d+::text, 'budgetLimit', \$\d+::text/);
   });
 
   it("denies a fifth start in the hour and records that denial", async () => {

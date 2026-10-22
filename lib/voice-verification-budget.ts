@@ -149,7 +149,7 @@ export async function reserveVoiceVerificationStart(
           ${eventKey}, statement_timestamp(), 'voice', ${kind}, 'inbound', ${input.fromAddress},
           ${input.callSid}, ${status},
           jsonb_strip_nulls(jsonb_build_object(
-            'toAddress', ${input.toAddress}, 'budgetLimit', ${limit}
+            'toAddress', ${input.toAddress}::text, 'budgetLimit', ${limit}::text
           ))
         )
         ON CONFLICT (event_key) DO NOTHING

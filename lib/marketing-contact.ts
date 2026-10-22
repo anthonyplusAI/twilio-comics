@@ -1,5 +1,6 @@
 const E164 = /^\+[1-9]\d{7,14}$/;
 const EXAMPLE_NUMBER = "+15551234567";
+export const COMIC_START_MESSAGE = "NEW";
 
 export interface MarketingContact {
   phoneNumber: string | null;
@@ -51,14 +52,15 @@ export function getMarketingContact(
   const whatsappNumber = trimmedWhatsAppSender?.startsWith("whatsapp:")
     ? publicPhoneNumber(trimmedWhatsAppSender.slice("whatsapp:".length))
     : null;
+  const starterText = encodeURIComponent(COMIC_START_MESSAGE);
 
   return {
     phoneNumber,
     whatsappNumber,
-    smsHref: phoneNumber ? `sms:${phoneNumber}` : null,
+    smsHref: phoneNumber ? `sms:${phoneNumber}?body=${starterText}` : null,
     callHref: phoneNumber ? `tel:${phoneNumber}` : null,
     whatsappHref: whatsappNumber
-      ? `https://wa.me/${whatsappNumber.slice(1)}`
+      ? `https://wa.me/${whatsappNumber.slice(1)}?text=${starterText}`
       : null,
   };
 }

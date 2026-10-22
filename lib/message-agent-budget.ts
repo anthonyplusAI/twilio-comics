@@ -166,9 +166,9 @@ export async function reserveMessageAgentTurn(
           ${eventKey}, statement_timestamp(), ${input.channel}, ${kind}, 'inbound',
           ${input.fromAddress}, ${input.messageSid}, ${status},
           jsonb_build_object(
-            'toAddress', ${input.toAddress},
-            'hourCount', ${hourCount}, 'dayCount', ${dayCount},
-            'globalCount', ${globalCount}, 'globalLimit', ${appDailyLimit}
+            'toAddress', ${input.toAddress}::text,
+            'hourCount', ${hourCount}::integer, 'dayCount', ${dayCount}::integer,
+            'globalCount', ${globalCount}::integer, 'globalLimit', ${appDailyLimit}::bigint
           )
         )
         ON CONFLICT (event_key) DO NOTHING

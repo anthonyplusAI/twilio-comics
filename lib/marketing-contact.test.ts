@@ -32,9 +32,9 @@ describe("getMarketingContact", () => {
     ).toEqual({
       phoneNumber: "+14155552671",
       whatsappNumber: "+447700900123",
-      smsHref: "sms:+14155552671",
+      smsHref: "sms:+14155552671?body=NEW",
       callHref: "tel:+14155552671",
-      whatsappHref: "https://wa.me/447700900123",
+      whatsappHref: "https://wa.me/447700900123?text=NEW",
     });
     expect(getMarketingContact("+14155552671", undefined).whatsappHref).toBeNull();
   });
@@ -45,7 +45,7 @@ describe("getMarketingContact", () => {
       whatsappNumber: "+447700900123",
       smsHref: null,
       callHref: null,
-      whatsappHref: "https://wa.me/447700900123",
+      whatsappHref: "https://wa.me/447700900123?text=NEW",
     });
   });
 
@@ -98,7 +98,7 @@ describe("public comic invitation", () => {
 
     const html = renderToStaticMarkup(createElement(Home));
 
-    expect(html).toContain('href="https://wa.me/447700900123"');
+    expect(html).toContain('href="https://wa.me/447700900123?text=NEW"');
     expect(html).toContain("Scan to start a WhatsApp chat");
     expect(html).not.toContain('href="sms:');
     expect(html).not.toContain('href="tel:');

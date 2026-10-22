@@ -24,7 +24,7 @@ describe("Twilio channel invitation", () => {
   it("discloses the SMS program and Voice result delivery beside the launch actions", () => {
     const html = renderPage("sms,voice");
 
-    expect(html).toContain(`href="sms:${PHONE}"`);
+    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
     expect(html).toContain(`href="tel:${PHONE}"`);
     expect(html).not.toContain("https://wa.me/");
     expect(html).toMatch(/Message frequency varies/i);
@@ -46,7 +46,8 @@ describe("Twilio channel invitation", () => {
   it("shows only SMS entry and SMS flow when SMS is selected", () => {
     const html = renderPage("sms");
 
-    expect(html).toContain(`href="sms:${PHONE}"`);
+    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
+    expect(html).toMatch(/send NEW.+(?:tap|press) Send/i);
     expect(html).not.toContain('href="tel:');
     expect(html).not.toContain("https://wa.me/");
     expect(html).toMatch(/Twilio SMS/);
@@ -73,17 +74,19 @@ describe("Twilio channel invitation", () => {
   it("does not advertise a Voice action before verification is configured", () => {
     const html = renderPage("sms,voice", false);
 
-    expect(html).toContain(`href="sms:${PHONE}"`);
+    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
     expect(html).not.toContain(`href="tel:${PHONE}"`);
   });
 
   it("shows only WhatsApp entry and chat delivery when WhatsApp is selected", () => {
     const html = renderPage("whatsapp");
 
-    expect(html).toContain('href="https://wa.me/447700900123"');
+    expect(html).toContain('href="https://wa.me/447700900123?text=NEW"');
     expect(html).not.toContain('href="sms:');
     expect(html).not.toContain('href="tel:');
     expect(html).toMatch(/Twilio WhatsApp/);
+    expect(html).toMatch(/For WhatsApp,\s*send NEW to start/);
+    expect(html).not.toMatch(/For SMS,\s*send NEW to start/);
     expect(html).toMatch(/send CREATE/);
     expect(html).toMatch(/comic link[^<]*same WhatsApp chat/);
     expect(html).toContain("Scan for WhatsApp");
@@ -93,8 +96,8 @@ describe("Twilio channel invitation", () => {
     const html = renderPage("voice,whatsapp,sms");
 
     expect(html).toContain(`href="tel:${PHONE}"`);
-    expect(html).toContain(`href="sms:${PHONE}"`);
-    expect(html).toContain('href="https://wa.me/447700900123"');
+    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
+    expect(html).toContain('href="https://wa.me/447700900123?text=NEW"');
     expect(html).toMatch(/Twilio Voice/);
     expect(html).toMatch(/Twilio WhatsApp/);
     expect(html).toMatch(/Twilio SMS/);
