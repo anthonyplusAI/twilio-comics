@@ -71,10 +71,23 @@ temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/twilio-comics-webhooks.XXXXXXXX")"
 trap 'rm -rf -- "$temp_dir"' EXIT
 
 fetch_number() {
+  local raw="$temp_dir/fetch-raw.json"
   twilio api:core:incoming-phone-numbers:fetch \
     --sid "$NUMBER_SID" --account-sid "$ACCOUNT_SID" \
-    -p "$PROFILE" -o json -l error > "$1" \
+    -p "$PROFILE" -o json -l error > "$raw" \
     || die 'Twilio CLI could not inspect the approved number. Check the selected profile.'
+  # The CLI can return either one object or a one-element array. Slurp first
+  # so multiple JSON documents are rejected as well as ambiguous arrays.
+  jq --exit-status --slurp '
+    if length != 1 then empty
+    elif (.[0] | type) == "object" then .[0]
+    elif (.[0] | type) == "array"
+      and (.[0] | length) == 1
+      and (.[0][0] | type) == "object" then .[0][0]
+    else empty
+    end
+  ' "$raw" > "$1" 2>/dev/null \
+    || die 'Twilio CLI returned a number response that is not exactly one object; inspect the number before proceeding.'
 }
 
 validate_number() {
