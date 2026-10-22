@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x # Never trace credential-file operations.
 
-# One-time SQL role bootstrap and workload wiring. The only administrator
-# password input is fetched by a manual Job inside the private ACA VNet from
-# Key Vault through its managed identity. This host script never reads it.
+# One-time SQL role bootstrap and workload wiring. The operator's Azure CLI
+# seeds role URLs in Key Vault through owner-only files; the private Job reads
+# those URLs and the administrator password with temporary, read-only access.
+# No database credential is passed through a command argument or environment.
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "Install '$1' before running this script."; }
 
-for command in az jq; do require "$command"; done
+for command in az jq python3; do require "$command"; done
 : "${SUBSCRIPTION_ID:?Set SUBSCRIPTION_ID to the approved Azure subscription ID}"
 : "${BOOTSTRAP_IMAGE:?Set BOOTSTRAP_IMAGE to the reviewed, digest-pinned bootstrap image}"
 : "${MIGRATION_IMAGE:?Set MIGRATION_IMAGE to the digest-pinned Drizzle migration image}"
@@ -209,38 +211,201 @@ ensure_role_assignment() {
 }
 ensure_role_assignment "$PULL_PRINCIPAL" "$ACR_ID" AcrPull
 
-# The bootstrap identity's vault-wide write access is temporary. It is
-# revoked on success, failure, or an interrupt; no host-side secret is read.
-bootstrap_assignment_json="$(az role assignment list \
-  --assignee-object-id "$BOOT_PRINCIPAL" --scope "$VAULT_ID" \
-  --role 'Key Vault Secrets Officer' --output json)" \
-  || die 'Cannot inspect bootstrap Key Vault RBAC.'
-BOOTSTRAP_ROLE_ASSIGNMENT_ID="$(jq -r --arg scope "$VAULT_ID" \
-  '[.[] | select((.scope | ascii_downcase) == ($scope | ascii_downcase)) | .id][0] // empty' \
-  <<< "$bootstrap_assignment_json")"
-if [[ -z "$BOOTSTRAP_ROLE_ASSIGNMENT_ID" ]]; then
-  BOOTSTRAP_ROLE_ASSIGNMENT_ID="$(az role assignment create \
-    --assignee-object-id "$BOOT_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-    --scope "$VAULT_ID" --role 'Key Vault Secrets Officer' \
-    --query id --output tsv --only-show-errors)" \
-    || die 'Cannot grant temporary Key Vault access to the private bootstrap Job.'
-fi
-[[ -n "$BOOTSTRAP_ROLE_ASSIGNMENT_ID" ]] || die 'Bootstrap Key Vault role assignment was not returned.'
+# The bootstrap identity needs only secret-scoped read access. Refuse to seed
+# credentials while a vault-wide write grant from an earlier run remains.
+for broad_role in 'Key Vault Secrets Officer' 'Key Vault Administrator'; do
+  broad_assignments="$(az role assignment list --assignee-object-id "$BOOT_PRINCIPAL" \
+    --scope "$VAULT_ID" --role "$broad_role" --output json)" \
+    || die 'Cannot inspect bootstrap identity Key Vault write grants.'
+  if jq --exit-status --arg scope "$VAULT_ID" '
+    any(.[]; (.scope | ascii_downcase) == ($scope | ascii_downcase))
+  ' >/dev/null <<< "$broad_assignments"; then
+    die "Bootstrap identity still has '$broad_role' on the vault; revoke it before retrying."
+  fi
+done
 
-revoke_bootstrap_access() {
+# The host CLI operator has Key Vault Secrets Officer. Keep the generated or
+# downloaded credentials only in this owner-only directory until both secret
+# values have been verified in Key Vault, then remove the files before the Job.
+umask 077
+ROLE_SECRET_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/twilio-comics-role-urls.XXXXXXXX")" \
+  || die 'Could not create an owner-only temporary directory for PostgreSQL URLs.'
+BOOTSTRAP_READ_ASSIGNMENT_IDS=()
+cleanup_bootstrap_access() {
   local previous_status=$?
   trap - EXIT
-  if [[ -n "${BOOTSTRAP_ROLE_ASSIGNMENT_ID:-}" ]]; then
-    if ! az role assignment delete --ids "$BOOTSTRAP_ROLE_ASSIGNMENT_ID" \
-      --only-show-errors --output none; then
-      printf 'ERROR: Could not revoke temporary Key Vault Secrets Officer from %s. Revoke assignment %s immediately.\n' \
-        "$BOOTSTRAP_IDENTITY" "$BOOTSTRAP_ROLE_ASSIGNMENT_ID" >&2
+  if [[ -n "${ROLE_SECRET_TEMP_DIR:-}" ]]; then
+    if ! rm -rf -- "$ROLE_SECRET_TEMP_DIR"; then
+      printf 'ERROR: Could not remove temporary PostgreSQL URL files.\n' >&2
       previous_status=1
     fi
   fi
+  local assignment_id
+  for assignment_id in "${BOOTSTRAP_READ_ASSIGNMENT_IDS[@]}"; do
+    if ! az role assignment delete --ids "$assignment_id" \
+      --only-show-errors --output none; then
+      printf 'ERROR: Could not revoke temporary Key Vault Secrets User from %s. Revoke assignment %s immediately.\n' \
+        "$BOOTSTRAP_IDENTITY" "$assignment_id" >&2
+      previous_status=1
+    fi
+  done
   exit "$previous_status"
 }
-trap revoke_bootstrap_access EXIT
+trap cleanup_bootstrap_access EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+secret_metadata="$(az keyvault secret list --vault-name "$VAULT" \
+  --output json --only-show-errors)" \
+  || die 'Cannot inspect existing PostgreSQL URL secrets in Key Vault.'
+if ! jq --exit-status 'type == "array"' >/dev/null <<< "$secret_metadata"; then
+  die 'Key Vault did not return a secret metadata list.'
+fi
+secret_exists_in_metadata() {
+  jq --exit-status --arg name "$1" '
+    any(.[]; .name == $name or ((.id // "") | test("/secrets/" + $name + "(/|$)")))
+  ' >/dev/null <<< "$secret_metadata"
+}
+
+validate_role_url_file() {
+  python3 - "$1" "$POSTGRES_FQDN" "$2" <<'PY'
+from pathlib import Path
+import re
+import sys
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+role, host, filename = sys.argv[1:]
+try:
+    value = Path(filename).read_text(encoding="utf-8")
+    if not value.startswith("postgresql://") or any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7f for character in value):
+        raise ValueError("invalid URL characters")
+    url = urlsplit(value)
+    password = unquote(url.password or "")
+    if (
+        url.scheme != "postgresql"
+        or url.hostname != host
+        or url.port is not None
+        or url.netloc.endswith(":")
+        or url.netloc.count("@") != 1
+        or url.username != role
+        or url.path != "/twilio_comics"
+        or url.fragment
+        or parse_qsl(url.query, keep_blank_values=True, strict_parsing=True) != [("sslmode", "verify-full")]
+        or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", password)
+    ):
+        raise ValueError("unexpected role, server, database, TLS mode, or password format")
+except (OSError, UnicodeError, ValueError):
+    print(f"ERROR: Existing {role} Key Vault URL is invalid; review it before retrying.", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+create_role_url_file() {
+  python3 - "$1" "$POSTGRES_FQDN" "$2" <<'PY'
+from pathlib import Path
+from urllib.parse import quote
+import base64
+import os
+import secrets
+import sys
+
+role, host, filename = sys.argv[1:]
+password = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode("ascii")
+value = f"postgresql://{role}:{quote(password, safe='')}@{host}/twilio_comics?sslmode=verify-full"
+path = Path(filename)
+path.write_text(value, encoding="utf-8")
+os.chmod(path, 0o600)
+PY
+}
+
+load_existing_role_url() {
+  local secret_name="$1" role="$2" file="$ROLE_SECRET_TEMP_DIR/$1"
+  if secret_exists_in_metadata "$secret_name"; then
+    az keyvault secret download --vault-name "$VAULT" --name "$secret_name" \
+      --file "$file" --overwrite --only-show-errors --output none \
+      || die "Cannot read existing Key Vault secret '$secret_name'."
+    chmod 600 "$file"
+    validate_role_url_file "$role" "$file" \
+      || die "Existing Key Vault URL '$secret_name' is invalid; no role password was rotated."
+    return 0
+  fi
+  return 1
+}
+
+migration_url_exists=false
+runtime_url_exists=false
+if load_existing_role_url "$MIGRATION_SECRET" comics_migrator; then migration_url_exists=true; fi
+if load_existing_role_url "$RUNTIME_SECRET" comics_runtime; then runtime_url_exists=true; fi
+
+seed_missing_role_url() {
+  local secret_name="$1" role="$2" file="$ROLE_SECRET_TEMP_DIR/$1"
+  # A second metadata read catches another operator's completed seed between
+  # our initial inventory and this write. Reuse that value rather than rotate.
+  secret_metadata="$(az keyvault secret list --vault-name "$VAULT" \
+    --output json --only-show-errors)" \
+    || die 'Cannot recheck PostgreSQL URL secrets before writing.'
+  jq --exit-status 'type == "array"' >/dev/null <<< "$secret_metadata" \
+    || die 'Key Vault did not return a secret metadata list before writing.'
+  if load_existing_role_url "$secret_name" "$role"; then
+    return 0
+  fi
+  create_role_url_file "$role" "$file" \
+    || die "Could not generate '$secret_name' in an owner-only file."
+  validate_role_url_file "$role" "$file" \
+    || die "Generated '$secret_name' failed URL validation."
+  az keyvault secret set --vault-name "$VAULT" --name "$secret_name" \
+    --file "$file" --encoding utf-8 --content-type 'application/x-postgresql-url' \
+    --only-show-errors --output none \
+    || die "Could not store '$secret_name' in Key Vault."
+}
+if [[ "$migration_url_exists" == false ]]; then
+  seed_missing_role_url "$MIGRATION_SECRET" comics_migrator
+fi
+if [[ "$runtime_url_exists" == false ]]; then
+  seed_missing_role_url "$RUNTIME_SECRET" comics_runtime
+fi
+
+# Fetch and validate both stored values before starting the private SQL Job.
+# A partial seed is safe to retry: an existing URL is preserved, never rotated.
+for role_spec in "$MIGRATION_SECRET:comics_migrator" "$RUNTIME_SECRET:comics_runtime"; do
+  secret_name="${role_spec%%:*}"
+  role="${role_spec##*:}"
+  verified_file="$ROLE_SECRET_TEMP_DIR/verified-$secret_name"
+  az keyvault secret download --vault-name "$VAULT" --name "$secret_name" \
+    --file "$verified_file" --overwrite --only-show-errors --output none \
+    || die "Cannot verify stored Key Vault secret '$secret_name'."
+  chmod 600 "$verified_file"
+  validate_role_url_file "$role" "$verified_file" \
+    || die "Stored Key Vault URL '$secret_name' failed verification."
+  cmp -s "$ROLE_SECRET_TEMP_DIR/$secret_name" "$verified_file" \
+    || die "Stored Key Vault URL '$secret_name' changed during bootstrap preparation."
+done
+rm -rf -- "$ROLE_SECRET_TEMP_DIR" \
+  || die 'Could not remove temporary PostgreSQL URL files before Job start.'
+ROLE_SECRET_TEMP_DIR=''
+
+# The bootstrap identity reads only its administrator password and the two
+# preseeded URL secrets. Every temporary grant is revoked on exit.
+grant_temporary_bootstrap_reader() {
+  local scope="$VAULT_ID/secrets/$1" assignments assignment_id
+  assignments="$(az role assignment list --assignee-object-id "$BOOT_PRINCIPAL" \
+    --scope "$scope" --role 'Key Vault Secrets User' --output json)" \
+    || die 'Cannot inspect bootstrap identity secret read grants.'
+  assignment_id="$(jq -r --arg scope "$scope" '
+    [.[] | select((.scope | ascii_downcase) == ($scope | ascii_downcase)) | .id][0] // empty
+  ' <<< "$assignments")"
+  if [[ -z "$assignment_id" ]]; then
+    assignment_id="$(az role assignment create --assignee-object-id "$BOOT_PRINCIPAL" \
+      --assignee-principal-type ServicePrincipal --scope "$scope" \
+      --role 'Key Vault Secrets User' --query id --output tsv --only-show-errors)" \
+      || die "Cannot grant temporary Key Vault read access for '$1'."
+  fi
+  [[ -n "$assignment_id" ]] || die "Temporary read assignment for '$1' was not returned."
+  BOOTSTRAP_READ_ASSIGNMENT_IDS+=("$assignment_id")
+}
+grant_temporary_bootstrap_reader postgres-bootstrap-password
+grant_temporary_bootstrap_reader "$MIGRATION_SECRET"
+grant_temporary_bootstrap_reader "$RUNTIME_SECRET"
 
 # Always store an executable startup command. Azure CLI turns empty quoted
 # values into literal [""] arrays, and its --args parser rejects leading -ec.
@@ -330,7 +495,7 @@ done
 [[ "$completed" == true ]] || die 'Role bootstrap execution did not succeed within the wait window.'
 
 # These are URI references only. No connection URL or password passes through
-# the host CLI, GitHub, shell history, or an ACA template.
+# command arguments, the process environment, GitHub, or an ACA template.
 runtime_uri="https://${VAULT}.vault.azure.net/secrets/${RUNTIME_SECRET}"
 migration_uri="https://${VAULT}.vault.azure.net/secrets/${MIGRATION_SECRET}"
 
@@ -427,4 +592,4 @@ else
     --only-show-errors --output none
 fi
 
-printf 'PostgreSQL role URLs are in Key Vault and V2 workloads reference the least-privilege credentials. Bootstrap vault access is being revoked.\n'
+printf 'PostgreSQL role URLs are in Key Vault and V2 workloads reference the least-privilege credentials. Bootstrap secret-read access is being revoked.\n'

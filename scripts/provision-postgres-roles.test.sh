@@ -4,7 +4,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/twilio-comics-roles-test.XXXXXXXX")"
 trap 'rm -rf "$test_root"' EXIT
-mkdir -p "$test_root/bin"
+mkdir -p "$test_root/bin" "$test_root/secrets"
 
 cat > "$test_root/bin/az" <<'AZ_MOCK'
 #!/usr/bin/env bash
@@ -95,6 +95,35 @@ JSON
     printf '{"registrationEnabled":false,"virtualNetwork":{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/%s"}}\n' "$target_vnet" ;;
   'keyvault show '*)
     printf '%s\n' '{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.KeyVault/vaults/kv-twilio-comics-1a1d98","properties":{"enableRbacAuthorization":true,"enablePurgeProtection":true,"networkAcls":{"defaultAction":"Deny"}}}' ;;
+  'keyvault secret list')
+    python3 - "$AZ_MOCK_SECRET_DIR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+print(json.dumps([
+    {"name": path.name, "id": f"https://kv-twilio-comics-1a1d98.vault.azure.net/secrets/{path.name}/mock-version"}
+    for path in root.iterdir() if path.is_file()
+]))
+PY
+    ;;
+  'keyvault secret download')
+    name="$(argument --name "$@")"
+    cp "$AZ_MOCK_SECRET_DIR/$name" "$(argument --file "$@")" ;;
+  'keyvault secret set')
+    name="$(argument --name "$@")"
+    [[ "${AZ_MOCK_FAIL_SECRET_SET:-}" != "$name" ]] || exit 95
+    python3 - "$(argument --file "$@")" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+path = Path(sys.argv[1])
+if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o077:
+    raise SystemExit("Secret source file must be owner-only")
+PY
+    cp "$(argument --file "$@")" "$AZ_MOCK_SECRET_DIR/$name" ;;
   'acr show '*)
     printf '%s\n' '/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.ContainerRegistry/registries/twiliocomicsacr1a1d98' ;;
   'acr manifest show-metadata')
@@ -124,10 +153,19 @@ JSON
     esac ;;
   'containerapp job create'|'containerapp job update')
     require_explicit_job_command "$(argument --name "$@")" "$@" ;;
-  'role assignment list') printf '%s\n' '[]' ;;
+  'role assignment list')
+    if [[ "${AZ_MOCK_BROAD_BOOTSTRAP_GRANT:-}" == 1 && \
+          "$(argument --assignee-object-id "$@")" == principal-id-twilio-comics-pg-bootstrap && \
+          "$(argument --role "$@")" == 'Key Vault Secrets Officer' ]]; then
+      scope="$(argument --scope "$@")"
+      printf '[{"scope":"%s","id":"/subscriptions/test/providers/Microsoft.Authorization/roleAssignments/old-officer"}]\n' "$scope"
+    else
+      printf '%s\n' '[]'
+    fi ;;
   'role assignment create')
     if [[ "$*" == *'--query id'* ]]; then
-      printf '%s\n' '/subscriptions/test/providers/Microsoft.Authorization/roleAssignments/bootstrap-assignment'
+      scope="$(argument --scope "$@")"
+      printf '/subscriptions/test/providers/Microsoft.Authorization/roleAssignments/%s\n' "${scope##*/}"
     fi ;;
   'containerapp job start')
     # Azure's --image start override produced an execution without the Job's
@@ -167,6 +205,7 @@ chmod 700 "$test_root/bin/sleep"
 
 export PATH="$test_root/bin:$PATH"
 export AZ_MOCK_LOG="$test_root/az.log"
+export AZ_MOCK_SECRET_DIR="$test_root/secrets"
 export AZ_MOCK_EXECUTION_COUNT_FILE="$test_root/execution-count"
 export SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
 BOOTSTRAP_IMAGE="twiliocomicsacr1a1d98.azurecr.io/twilio-comics-bootstrap@sha256:$(printf 'a%.0s' {1..64})"
@@ -177,7 +216,48 @@ export ROLE_BOOTSTRAP_POLL_SECONDS=0
 
 bash "$project_root/scripts/provision-postgres-roles.sh" > "$test_root/success.out" 2>&1
 grep -Fq 'PostgreSQL role URLs are in Key Vault' "$test_root/success.out"
-grep -Fq 'role assignment delete --ids /subscriptions/test/providers/Microsoft.Authorization/roleAssignments/bootstrap-assignment' "$AZ_MOCK_LOG"
+for secret in postgres-bootstrap-password postgres-comics-migration-url postgres-comics-runtime-url; do
+  grep -Fq "role assignment create --assignee-object-id principal-id-twilio-comics-pg-bootstrap --assignee-principal-type ServicePrincipal --scope /subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.KeyVault/vaults/kv-twilio-comics-1a1d98/secrets/$secret --role Key Vault Secrets User" "$AZ_MOCK_LOG"
+  grep -Fq "role assignment delete --ids /subscriptions/test/providers/Microsoft.Authorization/roleAssignments/$secret" "$AZ_MOCK_LOG"
+done
+grep -Fq 'keyvault secret set --vault-name kv-twilio-comics-1a1d98 --name postgres-comics-migration-url --file ' "$AZ_MOCK_LOG"
+grep -Fq 'keyvault secret set --vault-name kv-twilio-comics-1a1d98 --name postgres-comics-runtime-url --file ' "$AZ_MOCK_LOG"
+start_line="$(grep -n -m1 'containerapp job start --name twilio-comics-db-bootstrap-v2' "$AZ_MOCK_LOG" | cut -d: -f1)"
+[[ -n "$start_line" ]] || { printf 'Bootstrap Job never started\n' >&2; exit 1; }
+[[ "$(sed -n "1,${start_line}p" "$AZ_MOCK_LOG" | grep -c 'keyvault secret set')" == 2 ]] || {
+  printf 'Both URL secrets must be stored before starting the Job\n' >&2
+  exit 1
+}
+python3 - "$AZ_MOCK_SECRET_DIR" <<'PY'
+from pathlib import Path
+from urllib.parse import urlsplit
+import re
+import sys
+
+root = Path(sys.argv[1])
+for secret, role in [
+    ("postgres-comics-migration-url", "comics_migrator"),
+    ("postgres-comics-runtime-url", "comics_runtime"),
+]:
+    value = (root / secret).read_text()
+    parsed = urlsplit(value)
+    assert not value.endswith("\n"), "Role URL must be a single line without newline"
+    assert parsed.scheme == "postgresql" and parsed.username == role
+    assert parsed.hostname == "twilio-comics-pg-1a1d98.postgres.database.azure.com"
+    assert parsed.path == "/twilio_comics" and parsed.query == "sslmode=verify-full"
+    assert re.fullmatch(r"[A-Za-z0-9_-]{64}", parsed.password or ""), "Password must contain 48 random bytes as base64url"
+PY
+python3 - "$AZ_MOCK_LOG" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith("keyvault secret set ") or line.startswith("keyvault secret download "):
+        arguments = shlex.split(line)
+        secret_file = Path(arguments[arguments.index("--file") + 1])
+        assert not secret_file.exists(), "Temporary PostgreSQL URL file remained after bootstrap"
+PY
 grep -Fq 'containerapp secret set --name twilio-comics-v2' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job secret set --name twilio-comics-generation-v2' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job secret set --name twilio-comics-recovery-v2' "$AZ_MOCK_LOG"
@@ -189,10 +269,12 @@ grep -Fq 'id-twilio-comics-v2-acr-pull' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job create --name twilio-comics-db-bootstrap-v2' "$AZ_MOCK_LOG"
 grep -Fq -- '--replica-timeout 1200' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job create --name twilio-comics-migrate-v2' "$AZ_MOCK_LOG"
-if grep -Eq 'DATABASE_URL=postgresql:|postgres-bootstrap-password|id-twilio-comics-web|id-twilio-comics-worker' "$AZ_MOCK_LOG"; then
+if grep -Eq 'DATABASE_URL=postgresql:|postgresql://|role assignment create .*--role Key Vault Secrets Officer|id-twilio-comics-web|id-twilio-comics-worker' "$AZ_MOCK_LOG"; then
   printf 'Bootstrap mock saw a credential or V1 identity in Azure CLI arguments\n' >&2
   exit 1
 fi
+cp "$AZ_MOCK_SECRET_DIR/postgres-comics-migration-url" "$test_root/migration.original"
+cp "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url" "$test_root/runtime.original"
 
 : > "$AZ_MOCK_LOG"
 AZ_MOCK_EXISTING_JOBS=1 bash "$project_root/scripts/provision-postgres-roles.sh" \
@@ -201,8 +283,64 @@ grep -Fq 'PostgreSQL role URLs are in Key Vault' "$test_root/existing-jobs.out"
 grep -Fq 'containerapp job update --name twilio-comics-db-bootstrap-v2' "$AZ_MOCK_LOG"
 grep -Fq -- '--replica-timeout 1200' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job update --name twilio-comics-migrate-v2' "$AZ_MOCK_LOG"
+if grep -Fq 'keyvault secret set' "$AZ_MOCK_LOG"; then
+  printf 'A rerun rotated existing database URL secrets\n' >&2
+  exit 1
+fi
+cmp -s "$test_root/migration.original" "$AZ_MOCK_SECRET_DIR/postgres-comics-migration-url"
+cmp -s "$test_root/runtime.original" "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
 if grep -Eq 'containerapp job create --name (twilio-comics-db-bootstrap-v2|twilio-comics-migrate-v2)' "$AZ_MOCK_LOG"; then
   printf 'Existing role Jobs should be repaired by update, not recreated\n' >&2
+  exit 1
+fi
+
+: > "$AZ_MOCK_LOG"
+printf 'postgresql://wrong-host/invalid\n' > "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
+if bash "$project_root/scripts/provision-postgres-roles.sh" \
+    > "$test_root/invalid-existing-url.out" 2>&1; then
+  printf 'Bootstrap accepted an invalid existing database URL\n' >&2
+  exit 1
+fi
+if grep -Eq 'keyvault secret set|containerapp job start' "$AZ_MOCK_LOG"; then
+  printf 'Invalid existing URL caused a secret mutation or Job start\n' >&2
+  exit 1
+fi
+cp "$test_root/runtime.original" "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
+
+: > "$AZ_MOCK_LOG"
+rm "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
+bash "$project_root/scripts/provision-postgres-roles.sh" \
+  > "$test_root/partial-state.out" 2>&1
+grep -Fq 'keyvault secret set --vault-name kv-twilio-comics-1a1d98 --name postgres-comics-runtime-url --file ' "$AZ_MOCK_LOG"
+if grep -Fq 'keyvault secret set --vault-name kv-twilio-comics-1a1d98 --name postgres-comics-migration-url' "$AZ_MOCK_LOG"; then
+  printf 'Partial-state retry rotated the existing migration URL\n' >&2
+  exit 1
+fi
+cmp -s "$test_root/migration.original" "$AZ_MOCK_SECRET_DIR/postgres-comics-migration-url"
+
+: > "$AZ_MOCK_LOG"
+rm "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
+if AZ_MOCK_FAIL_SECRET_SET=postgres-comics-runtime-url \
+    bash "$project_root/scripts/provision-postgres-roles.sh" \
+    > "$test_root/failed-secret-set.out" 2>&1; then
+  printf 'Bootstrap proceeded after Key Vault refused a URL secret write\n' >&2
+  exit 1
+fi
+if grep -Fq 'containerapp job start' "$AZ_MOCK_LOG"; then
+  printf 'Job started without both URL secrets\n' >&2
+  exit 1
+fi
+cp "$test_root/runtime.original" "$AZ_MOCK_SECRET_DIR/postgres-comics-runtime-url"
+
+: > "$AZ_MOCK_LOG"
+if AZ_MOCK_BROAD_BOOTSTRAP_GRANT=1 bash "$project_root/scripts/provision-postgres-roles.sh" \
+    > "$test_root/broad-grant.out" 2>&1; then
+  printf 'Bootstrap accepted an old vault-wide write grant\n' >&2
+  exit 1
+fi
+grep -Fq 'still has' "$test_root/broad-grant.out"
+if grep -Eq 'keyvault secret set|containerapp job start' "$AZ_MOCK_LOG"; then
+  printf 'Credentials were changed or a Job started while bootstrap identity had vault-wide write access\n' >&2
   exit 1
 fi
 
@@ -236,7 +374,9 @@ if bash "$project_root/scripts/provision-postgres-roles.sh" > "$test_root/failur
   printf 'Failed role bootstrap execution unexpectedly succeeded\n' >&2
   exit 1
 fi
-grep -Fq 'role assignment delete --ids /subscriptions/test/providers/Microsoft.Authorization/roleAssignments/bootstrap-assignment' "$AZ_MOCK_LOG"
+for secret in postgres-bootstrap-password postgres-comics-migration-url postgres-comics-runtime-url; do
+  grep -Fq "role assignment delete --ids /subscriptions/test/providers/Microsoft.Authorization/roleAssignments/$secret" "$AZ_MOCK_LOG"
+done
 if grep -Fq 'containerapp secret set' "$AZ_MOCK_LOG"; then
   printf 'Runtime workloads were wired after the bootstrap Job failed\n' >&2
   exit 1
