@@ -27,6 +27,19 @@ value_after() {
   return 1
 }
 
+emit_fetch_response() {
+  case "$1" in
+    array) jq --slurp '.' "$TWILIO_MOCK_STATE" ;;
+    object) cat "$TWILIO_MOCK_STATE" ;;
+    empty-array) printf '[]\n' ;;
+    ambiguous-array) jq --slurp '.[0] as $number | [$number, $number]' "$TWILIO_MOCK_STATE" ;;
+    non-object-array) printf '[null]\n' ;;
+    multiple-json-objects) cat "$TWILIO_MOCK_STATE" "$TWILIO_MOCK_STATE" ;;
+    malformed-json) printf 'invalid-json https://private.example/path?token=do-not-leak\n' ;;
+    *) printf 'Unexpected mock fetch shape: %s\n' "$1" >&2; exit 99 ;;
+  esac
+}
+
 [[ "$(value_after --sid "$@")" == 'PN340b863b2059d85daeb2c3f81a5064c1' ]] || exit 90
 [[ "$(value_after --account-sid "$@")" == "$TWILIO_ACCOUNT_SID" ]] || exit 91
 [[ "$(value_after -p "$@")" == Demo ]] || exit 92
@@ -35,7 +48,11 @@ value_after() {
 case "$command_name" in
   api:core:incoming-phone-numbers:fetch)
     [[ "${TWILIO_MOCK_FETCH_FAIL:-}" != 1 ]] || exit 94
-    cat "$TWILIO_MOCK_STATE"
+    fetch_shape="${TWILIO_MOCK_FETCH_SHAPE:-array}"
+    if [[ -e "$TWILIO_MOCK_UPDATED_MARKER" ]]; then
+      fetch_shape="${TWILIO_MOCK_VERIFY_SHAPE:-$fetch_shape}"
+    fi
+    emit_fetch_response "$fetch_shape"
     ;;
   api:core:incoming-phone-numbers:update)
     [[ "${TWILIO_MOCK_UPDATE_FAIL:-}" != 1 ]] || exit 95
@@ -51,6 +68,7 @@ case "$command_name" in
       jq '.voiceMethod = "GET"' "$TWILIO_MOCK_STATE" > "$TWILIO_MOCK_STATE.next"
       mv "$TWILIO_MOCK_STATE.next" "$TWILIO_MOCK_STATE"
     fi
+    : > "$TWILIO_MOCK_UPDATED_MARKER"
     cat "$TWILIO_MOCK_STATE"
     ;;
   *) printf 'Unexpected Twilio CLI call: %s\n' "$command_name" >&2; exit 98 ;;
@@ -81,6 +99,7 @@ JSON
 export PATH="$test_root/bin:$PATH"
 export TWILIO_MOCK_STATE="$test_root/current.json"
 export TWILIO_MOCK_LOG="$test_root/calls.log"
+export TWILIO_MOCK_UPDATED_MARKER="$test_root/updated"
 export PUBLIC_BASE_URL='https://comics.test-demo.org'
 export TWILIO_PROFILE=Demo
 export CONFIGURE_TWILIO_WEBHOOKS_CONFIRM=yes
@@ -89,6 +108,7 @@ script="$project_root/scripts/configure-twilio-webhooks.sh"
 reset_state() {
   cp "$test_root/blank.json" "$TWILIO_MOCK_STATE"
   : > "$TWILIO_MOCK_LOG"
+  rm -f "$TWILIO_MOCK_UPDATED_MARKER"
 }
 
 expect_rejected_without_update() {
@@ -129,16 +149,46 @@ done
 
 reset_state
 bash "$script" > "$test_root/first.out" 2>&1
+grep -Fq 'Verified SMS and Voice POST webhooks' "$test_root/first.out"
 jq --exit-status '
   .smsUrl == "https://comics.test-demo.org/api/twilio/sms#rc=3&rp=5xx,ct,rt"
   and .voiceUrl == "https://comics.test-demo.org/api/twilio/voice#rc=3&rp=5xx,ct,rt"
   and .smsMethod == "POST" and .voiceMethod == "POST"
 ' "$TWILIO_MOCK_STATE" >/dev/null
 [[ "$(grep -Fc 'api:core:incoming-phone-numbers:update' "$TWILIO_MOCK_LOG")" == 1 ]]
+[[ "$(grep -Fc 'api:core:incoming-phone-numbers:fetch' "$TWILIO_MOCK_LOG")" == 2 ]]
 
 bash "$script" > "$test_root/repeat.out" 2>&1
 [[ "$(grep -Fc 'api:core:incoming-phone-numbers:update' "$TWILIO_MOCK_LOG")" == 1 ]]
 grep -Fq 'already configured' "$test_root/repeat.out"
+
+reset_state
+TWILIO_MOCK_FETCH_SHAPE=object TWILIO_MOCK_VERIFY_SHAPE=array \
+  bash "$script" > "$test_root/legacy-object.out" 2>&1
+grep -Fq 'Verified SMS and Voice POST webhooks' "$test_root/legacy-object.out"
+[[ "$(grep -Fc 'api:core:incoming-phone-numbers:fetch' "$TWILIO_MOCK_LOG")" == 2 ]]
+
+for fetch_shape in empty-array ambiguous-array non-object-array \
+    multiple-json-objects malformed-json; do
+  reset_state
+  TWILIO_MOCK_FETCH_SHAPE="$fetch_shape" \
+    expect_rejected_without_update "CLI $fetch_shape"
+  grep -Fq 'Twilio CLI returned' "$test_root/out"
+  if grep -Fq 'do-not-leak' "$test_root/out"; then
+    printf 'Leaked private webhook data from malformed CLI output\n' >&2
+    exit 1
+  fi
+done
+
+reset_state
+if TWILIO_MOCK_VERIFY_SHAPE=ambiguous-array \
+    bash "$script" > "$test_root/ambiguous-verify.out" 2>&1; then
+  printf 'Accepted an ambiguous post-update fetch\n' >&2
+  exit 1
+fi
+grep -Fq 'Twilio CLI returned' "$test_root/ambiguous-verify.out"
+[[ "$(grep -Fc 'api:core:incoming-phone-numbers:update' "$TWILIO_MOCK_LOG")" == 1 ]]
+[[ "$(grep -Fc 'api:core:incoming-phone-numbers:fetch' "$TWILIO_MOCK_LOG")" == 2 ]]
 
 for scenario in wrong-account wrong-number wrong-sid missing-sms missing-voice \
     unexpected-sms unexpected-voice sms-app voice-app trunk \
