@@ -13,7 +13,7 @@ The runtime workloads live in the East US 2 V2 Container Apps environment. The d
 
 ## Release Flow
 
-Every push to `main` runs `.github/workflows/deploy.yml`. It releases only when `PRODUCTION_RELEASE_READY=true` is set as a GitHub repository variable:
+Documentation-only pushes to `main` skip `.github/workflows/deploy.yml` through its `paths-ignore` filter; pull requests still run `.github/workflows/ci.yml`. Main-branch pushes that change runtime code or the deployment workflow, and manual `workflow_dispatch` runs, enter the flow below. A release occurs only when `PRODUCTION_RELEASE_READY=true` is set as a GitHub repository variable:
 
 1. Reuse `.github/workflows/ci.yml` and require `Validate` to pass.
 2. Authenticate to Azure through GitHub OIDC.
