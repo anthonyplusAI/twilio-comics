@@ -30,14 +30,14 @@ Internet egress from North America currently has the [first 100 GB/month free](h
 
 ## How Azure cost changes with usage
 
-These are independent examples using the same retail meters; they are **not** a forecast of user demand. The default `DAILY_GENERATION_JOB_LIMIT=25` admits at most 25 app-funded comic requests per UTC day across Twilio channels and browser studio tests, so the 1,000- and 10,000-job examples require a deliberately higher limit:
+These are independent examples using the same retail meters; they are **not** a forecast of user demand. The code default `DAILY_GENERATION_JOB_LIMIT=25` admits at most 25 app-funded comic requests per UTC day. The planned pilot setting of `5` admits at most 150 in a 30-day month, so the 1,000- and 10,000-job examples require a deliberately higher limit:
 
 | Change | Approximate Azure effect |
 | --- | ---: |
 | 1,000 comics/month, each generation Job running two minutes | $3.60/month for that Job |
 | 10,000 comics/month with the same two-minute Job duration | $36/month for that Job |
 | Second 0.5-vCPU/1-GiB web replica active all month | Add $38.88/month |
-| Default 25 admitted requests/day, if all are channel Jobs running two minutes | Up to $2.70/month for 750 Job executions in a 30-day month |
+| Pilot 5 admitted requests/day, if all are channel Jobs running two minutes | Up to $0.54/month for 150 Job executions in a 30-day month |
 | Move PostgreSQL to a larger Burstable or General Purpose SKU | Reprice Central US compute; the database may become the largest Azure line item |
 | Store 100 GB of Hot LRS comic images | About $1.84/month for blob capacity, plus transactions and egress |
 | Ingest 20 **billable** GB of Analytics Logs | About $55.20/month, plus retention beyond the included period |
@@ -50,11 +50,19 @@ The Azure total above does not include the channel or AI usage. At Twilio's publ
 
 The app defaults to OpenAI `gpt-image-2` for comic images and a text model for dialogue and titles. [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) depends on model, image size and quality, prompt/reference inputs, output tokens, and generated page count. Use the [image generation cost guide](https://developers.openai.com/api/docs/guides/image-generation) and actual API usage before setting a per-comic price or cap. At scale, Twilio and OpenAI charges can exceed Azure hosting.
 
-`DAILY_GENERATION_JOB_LIMIT` counts **new app-funded comic requests admitted each UTC day**, across all users and SMS, WhatsApp, Voice, and browser studio tests using the app's OpenAI key. Its default is 25; `0` pauses app-funded generation. Duplicate queue delivery and a retry of the same channel job consume one slot, while a failed job still occupies its original day's slot. A job can make up to three image-generation attempts before terminal failure. Studio requests made with a caller-owned API key do not use app-funded capacity. This setting is an admission control, **not a strict OpenAI or Twilio spending ceiling**: model calls for conversation turns, Verify texts, call minutes, and image retries can still incur charges. Set provider-side budget alerts as well.
+`DAILY_GENERATION_JOB_LIMIT` counts **new app-funded comic requests admitted each UTC day**, across all users and SMS, WhatsApp, Voice, and browser studio tests using the app's OpenAI key. Its code default is 25; the planned pilot value is 5, and `0` pauses app-funded generation. Duplicate queue delivery and a retry of the same channel job consume one slot, while a failed job still occupies its original day's slot. A job can make up to three image-generation attempts before terminal failure. Studio requests made with a caller-owned API key do not use app-funded capacity.
+
+| Pilot control | Code default | Launch value | Runtime placement | What it limits |
+| --- | ---: | ---: | --- | --- |
+| `DAILY_GENERATION_JOB_LIMIT` | 25 | 5 | V2 web app, generation Job, recovery Job | New app-funded comic admissions per UTC day |
+| `MESSAGE_AGENT_GLOBAL_DAILY_LIMIT` | 200 | 50 | V2 generation Job | SMS and WhatsApp agent turns across all phones per rolling 24 hours |
+| `VOICE_VERIFY_NUMBER_DAILY_LIMIT` | 40 | 4 | V2 web app | Verify SMS starts across the Twilio number per rolling 24 hours |
+
+The runtime setup script initially requires and sets `DAILY_GENERATION_JOB_LIMIT=25`; apply the pilot values **after** it finishes. The other two settings are new runtime overrides. These controls reduce exposure to model and Verify usage, but they are **not provider spending ceilings**: inbound messages, voice minutes, Relay speech, delivery texts, model retries, and other calls can still incur charges. See [runtime placement and verification](INFRA_SETUP.md#configure-v2-runtime-before-the-first-release). Set provider-side budget alerts as well.
 
 ## Cost controls for launch
 
-1. Create a **$150 monthly Azure budget** scoped to `rg-twilio-comics`, with actual and forecast notifications at 50%, 80%, and 100% to `adellavecchia@twilio.com`. It includes the legacy placeholder resources in the same group. [Budgets notify but never stop consumption](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets); cost data usually arrives 8–24 hours later and budgets are evaluated daily. Set separate provider alerts or limits for Twilio and OpenAI.
+1. The **`twilio-comics-launch` $150 monthly Azure budget** is created at the `rg-twilio-comics` resource-group scope. It sends actual-cost alerts at 50%, 80%, and 100%, plus a forecast alert at 100%, to `adellavecchia@twilio.com`. It includes legacy placeholder resources in that group. [Budgets notify but never stop consumption](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets); cost data usually arrives 8–24 hours later and budgets are evaluated daily. The budget excludes Twilio and OpenAI charges, which need their own alerts or limits.
 2. Measure B1ms CPU credits, memory, connections, and query latency after the first live traffic. Increase compute before sustained load exhausts burst credits; keep the V2 web replica warm for Twilio webhooks and ConversationRelay. Changing compute may briefly interrupt database connections.
 3. Watch recovery Job execution time and failures. If every five-minute run lasted the configured 900-second timeout, its execution bill could approach **$233/month**. Investigate slow sweeps or repeated failures immediately; shorten the timeout only after measuring normal and backlog runs.
 4. Watch Log Analytics ingestion, PostgreSQL **Backup Storage Used**, database storage autogrow, ACR image storage above its included 10 GB, and Blob usage. Keep operational logs useful and bounded. Retain user history and finished comics under the app's deletion policy; remove only abandoned temporary uploads and old unreferenced container images after the rollback window.

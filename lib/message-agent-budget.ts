@@ -6,6 +6,7 @@ const E164 = /^\+[1-9]\d{6,14}$/;
 const MESSAGE_SID = /^(?:SM|MM)[A-Za-z0-9-]{1,62}$/;
 const MAX_TURNS_PER_HOUR = 20;
 const MAX_TURNS_PER_24_HOURS = 80;
+const DEFAULT_GLOBAL_DAILY_LIMIT = 200;
 
 export interface MessageAgentTurnRequest {
   messageSid: string;
@@ -35,10 +36,25 @@ function phoneOf(input: MessageAgentTurnRequest): string | null {
   return E164.test(phone) && E164.test(sender) ? phone : null;
 }
 
+/** Zero pauses new turns. A malformed limit must never make the budget unlimited. */
+function globalDailyLimit(): number {
+  const configured = process.env.MESSAGE_AGENT_GLOBAL_DAILY_LIMIT;
+  if (configured === undefined) return DEFAULT_GLOBAL_DAILY_LIMIT;
+  if (!/^\d+$/.test(configured)) {
+    throw new Error("MESSAGE_AGENT_GLOBAL_DAILY_LIMIT must be a nonnegative whole number");
+  }
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("MESSAGE_AGENT_GLOBAL_DAILY_LIMIT must be a safe whole number");
+  }
+  return parsed;
+}
+
 /**
- * Reserve before invoking the agent. A sender-scoped PostgreSQL lock makes
- * SMS and WhatsApp use one rolling budget; the inbound SID makes worker
- * retries reuse the original decision without consuming another slot.
+ * Reserve before invoking the agent. The global PostgreSQL lock serializes
+ * senders before their phone locks, so concurrent senders cannot exceed the
+ * app-wide budget. The inbound SID makes worker retries reuse the original
+ * decision without consuming another slot.
  */
 export async function reserveMessageAgentTurn(
   input: MessageAgentTurnRequest,
@@ -49,7 +65,15 @@ export async function reserveMessageAgentTurn(
   }
 
   try {
+    const appDailyLimit = globalDailyLimit();
     return await db.transaction(async (tx): Promise<MessageAgentTurnReservation> => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtext('twilio-comics:message-agent-global-budget'),
+          0
+        )
+      `);
+
       // A hash collision only serializes unrelated callers. Usage always
       // matches the full phone address, never the hash.
       await tx.execute(sql`
@@ -95,8 +119,15 @@ export async function reserveMessageAgentTurn(
         hour_count: number | string;
         day_count: number | string;
         notice_count: number | string;
+        global_count: number | string;
       }>(await tx.execute(sql`
         SELECT
+          (SELECT COUNT(*)::integer
+           FROM activity_events
+           WHERE kind = 'message.agent_turn.reserved'
+             AND channel IN ('sms', 'whatsapp')
+             AND occurred_at >= statement_timestamp() - INTERVAL '24 hours'
+          ) AS global_count,
           COUNT(*) FILTER (
             WHERE kind = 'message.agent_turn.reserved'
               AND occurred_at >= statement_timestamp() - INTERVAL '1 hour'
@@ -117,12 +148,14 @@ export async function reserveMessageAgentTurn(
       const hourCount = Number(usage?.hour_count);
       const dayCount = Number(usage?.day_count);
       const noticeCount = Number(usage?.notice_count);
-      if (!usage || ![hourCount, dayCount, noticeCount].every((count) =>
+      const globalCount = Number(usage?.global_count);
+      if (!usage || ![hourCount, dayCount, noticeCount, globalCount].every((count) =>
         Number.isSafeInteger(count) && count >= 0)) {
         throw new Error("Invalid messaging budget count");
       }
 
-      const allowed = hourCount < MAX_TURNS_PER_HOUR && dayCount < MAX_TURNS_PER_24_HOURS;
+      const allowed = hourCount < MAX_TURNS_PER_HOUR &&
+        dayCount < MAX_TURNS_PER_24_HOURS && globalCount < appDailyLimit;
       const sendNotice = !allowed && noticeCount === 0;
       const kind = allowed ? "message.agent_turn.reserved" : "message.agent_turn.denied";
       const status = allowed ? "reserved" : sendNotice ? "notice_pending" : "silent";
@@ -134,7 +167,8 @@ export async function reserveMessageAgentTurn(
           ${input.fromAddress}, ${input.messageSid}, ${status},
           jsonb_build_object(
             'toAddress', ${input.toAddress},
-            'hourCount', ${hourCount}, 'dayCount', ${dayCount}
+            'hourCount', ${hourCount}, 'dayCount', ${dayCount},
+            'globalCount', ${globalCount}, 'globalLimit', ${appDailyLimit}
           )
         )
         ON CONFLICT (event_key) DO NOTHING

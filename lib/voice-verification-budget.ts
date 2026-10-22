@@ -6,7 +6,7 @@ const E164 = /^\+[1-9]\d{6,14}$/;
 const MAX_STARTS_PER_HOUR = 4;
 const MAX_STARTS_PER_DAY = 10;
 const MAX_NUMBER_STARTS_PER_HOUR = 12;
-const MAX_NUMBER_STARTS_PER_DAY = 40;
+const DEFAULT_MAX_NUMBER_STARTS_PER_DAY = 40;
 
 export interface VoiceVerificationRequest {
   callSid: string;
@@ -30,6 +30,14 @@ function numericCount(value: unknown): number {
   return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
 }
 
+function numberDailyLimit(): number | null {
+  const configured = process.env.VOICE_VERIFY_NUMBER_DAILY_LIMIT;
+  if (configured === undefined) return DEFAULT_MAX_NUMBER_STARTS_PER_DAY;
+  if (!/^(0|[1-9]\d*)$/.test(configured)) return null;
+  const limit = Number(configured);
+  return Number.isSafeInteger(limit) ? limit : null;
+}
+
 /**
  * Bound Verify SMS starts before calling Twilio. Recipient and caller advisory
  * locks serialize both budgets across app replicas. A CallSid key makes webhook
@@ -41,6 +49,12 @@ export async function reserveVoiceVerificationStart(
   if (!CALL_SID.test(input.callSid) || !E164.test(input.fromAddress) ||
       !E164.test(input.toAddress)) {
     return { allowed: false, reason: "invalid" };
+  }
+
+  const maxNumberStartsPerDay = numberDailyLimit();
+  if (maxNumberStartsPerDay === null) {
+    console.error("Voice verification budget unavailable: invalid VOICE_VERIFY_NUMBER_DAILY_LIMIT");
+    return { allowed: false, reason: "unavailable" };
   }
 
   try {
@@ -124,7 +138,7 @@ export async function reserveVoiceVerificationStart(
       if (callerHourCount >= MAX_STARTS_PER_HOUR) limit = "caller_hour";
       else if (callerDayCount >= MAX_STARTS_PER_DAY) limit = "caller_day";
       else if (numberHourCount >= MAX_NUMBER_STARTS_PER_HOUR) limit = "number_hour";
-      else if (numberDayCount >= MAX_NUMBER_STARTS_PER_DAY) limit = "number_day";
+      else if (numberDayCount >= maxNumberStartsPerDay) limit = "number_day";
       const allowed = limit === null;
       const kind = allowed ? "voice.verification.requested" : "voice.verification.denied";
       const status = allowed ? "reserved" : "denied";

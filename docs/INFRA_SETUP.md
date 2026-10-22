@@ -220,7 +220,7 @@ az keyvault secret download --vault-name kv-twilio-comics-1a1d98 \
 | `openai-api-key` | When supplied | When supplied | Comic and conversation models |
 | `twilio-auth-token` | When supplied | When supplied | Twilio API and signed webhook validation |
 
-The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, operator name/contact, and shared 25-per-day generation limit are configured as ordinary environment settings. `TWILIO_ENABLED_CHANNELS` is explicitly empty, so the number does not appear as an available action yet. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses the existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
+The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, operator name/contact, and initial shared 25-per-day generation limit are configured as ordinary environment settings. `TWILIO_ENABLED_CHANNELS` is explicitly empty, so the number does not appear as an available action yet. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses the existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
 
 The OpenAI API key and Twilio Auth Token are not in this repository. When available, put each value in its own owner-only (`0600`), single-line local file and rerun with file **paths**, not credential values, in the command. Either file can be supplied independently. The script copies the value through a short-lived owner-only file into Key Vault, then wires only the workloads that need it. If a Key Vault secret already exists, a supplied file must match it exactly; a different value is rejected without rotation. Existing `auth-secret`, `media-signing-secret`, admin credentials, and their expiry dates are also reused. Without the OpenAI and Twilio credentials, `/api/readyz` remains closed and the release gate must stay unset.
 
@@ -243,7 +243,31 @@ Google OAuth is optional for `/studio`; if enabled in production, store its clie
 
 The V2 rerun of `provision-azure.sh` sets the Storage endpoints, container/queue names, workload-specific `AZURE_CLIENT_ID`, web/worker identities, and ACR pull identity on the web app and both runtime Jobs. Verify those settings before release; they are independent of the old placeholders. The PostgreSQL role provisioner creates and configures the manual migration Job, including its dedicated Key Vault identity and ACR pull access. Production Storage access uses managed identity, not `AZURE_STORAGE_CONNECTION_STRING`. The image listens on `PORT=8080` and `HOSTNAME=0.0.0.0`; the worker creates a unique `WORKER_ID` when needed.
 
-Keep `DAILY_GENERATION_JOB_LIMIT` the same on all three runtime workloads. The default is 25 new app-funded comic admissions per UTC day across users, Twilio channel jobs, and browser studio requests using the app's OpenAI key; `0` pauses these requests. PostgreSQL serializes admissions so retries and duplicate queue deliveries do not consume another slot. Studio requests also retain their per-user quota, while requests using a caller-owned API key do not use the app-funded pool. This limit does not impose a strict OpenAI or Twilio billing ceiling. See [cost controls](AZURE_COSTS.md#cost-controls-for-launch).
+Keep `DAILY_GENERATION_JOB_LIMIT` the same on all three runtime workloads. The code and runtime-setup default is 25 new app-funded comic admissions per UTC day across users, Twilio channel jobs, and browser studio requests using the app's OpenAI key; `0` pauses these requests. PostgreSQL serializes admissions so retries and duplicate queue deliveries do not consume another slot. Studio requests also retain their per-user quota, while requests using a caller-owned API key do not use the app-funded pool. Set the low-cost pilot values **after** `configure-runtime-secrets.sh` finishes:
+
+```bash
+az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars 'DAILY_GENERATION_JOB_LIMIT=5' 'VOICE_VERIFY_NUMBER_DAILY_LIMIT=4'
+
+az containerapp job update --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars 'DAILY_GENERATION_JOB_LIMIT=5' 'MESSAGE_AGENT_GLOBAL_DAILY_LIMIT=50'
+
+az containerapp job update --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars 'DAILY_GENERATION_JOB_LIMIT=5'
+```
+
+The web app handles Voice Verify starts; the generation Job handles SMS and WhatsApp agent turns. The recovery Job needs only the shared generation limit. The new limits default to 40 Verify starts per number and 200 message-agent turns globally per rolling 24 hours when unset. `0` pauses new starts or turns. The runtime setup script currently requires `DAILY_GENERATION_JOB_LIMIT=25` on every workload, so do not rerun it against the pilot values; follow the [rotation procedure](#runtime-secret-expiry-and-rotation) for later credentials. These limits reduce usage but do not cap OpenAI or Twilio billing. See [cost controls](AZURE_COSTS.md#cost-controls-for-launch).
+
+Verify the three non-secret settings before release and after each runtime update:
+
+```bash
+az containerapp show --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" --output json \
+  | jq -r '.properties.template.containers[].env[]? | select(.name == "DAILY_GENERATION_JOB_LIMIT" or .name == "VOICE_VERIFY_NUMBER_DAILY_LIMIT") | "\(.name)=\(.value)"'
+az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" --output json \
+  | jq -r '.properties.template.containers[].env[]? | select(.name == "DAILY_GENERATION_JOB_LIMIT" or .name == "MESSAGE_AGENT_GLOBAL_DAILY_LIMIT") | "\(.name)=\(.value)"'
+az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" --output json \
+  | jq -r '.properties.template.containers[].env[]? | select(.name == "DAILY_GENERATION_JOB_LIMIT") | "\(.name)=\(.value)"'
+```
 
 Set the final public origin on the V2 app and runtime Jobs. The worker uses it to build story links. The V2 ACA domain can be used for a prelaunch smoke test; use the chosen final HTTPS domain before configuring Twilio webhooks. During prelaunch, leave `TWILIO_ENABLED_CHANNELS` empty **or unset**. Either state shows no SMS/call/WhatsApp action or QR code and rejects inbound channel conversations; a configured number alone never enables a channel.
 
@@ -270,7 +294,7 @@ az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
   --set-env-vars "CONVERSATION_RELAY_WS_URL=wss://${PUBLIC_BASE_URL#https://}/relay"
 ```
 
-The initial Voice Verify budget allows 4 starts per caller per hour and 10 per day, plus 12 starts per app number per hour and 40 per day. PostgreSQL locks make these rolling limits apply across replicas; denied starts are recorded in admin history. The number limit contains costs if caller IDs rotate, but may also turn away legitimate callers at higher traffic. Review actual demand and denied events before raising it. Enable [Verify SMS Fraud Guard](https://www.twilio.com/docs/verify/preventing-toll-fraud/sms-fraud-guard) and restrict [Verify Geo Permissions](https://www.twilio.com/docs/verify/preventing-toll-fraud/verify-geo-permissions) to launch countries.
+The Voice Verify budget allows 4 starts per caller per hour and 10 per rolling 24 hours, plus 12 starts per app number per hour. `VOICE_VERIFY_NUMBER_DAILY_LIMIT` defaults to 40 starts per number per rolling 24 hours; the pilot sets 4 on the web app. PostgreSQL locks make these rolling limits apply across replicas; denied starts are recorded in admin history. The number limit contains costs if caller IDs rotate, but may also turn away legitimate callers at higher traffic. Review actual demand and denied events before raising it. Enable [Verify SMS Fraud Guard](https://www.twilio.com/docs/verify/preventing-toll-fraud/sms-fraud-guard) and restrict [Verify Geo Permissions](https://www.twilio.com/docs/verify/preventing-toll-fraud/verify-geo-permissions) to launch countries.
 
 The app-specific `/privacy` and `/terms` pages name **Anthony Dellavecchia** and **adellavecchia@twilio.com** for support and deletion requests. Review their content before launch. The linked [Twilio privacy notice](https://www.twilio.com/en-us/legal/privacy) and [Twilio terms](https://www.twilio.com/en-us/legal/tos) describe the provider and do not replace the app's own pages.
 
@@ -322,4 +346,4 @@ At phone and desktop widths, verify the two `/start` actions and QR codes lead t
 
 To close entry without clearing the sender number, set `TWILIO_ENABLED_CHANNELS=` on the V2 web app. Unset is also closed. This changes the public actions and inbound channel acceptance, not the sender's Twilio capabilities or webhook settings. Keep the database and backup policy active so admin history survives deploys; use the [deletion procedure](DATA_DELETION.md) for explicit user requests.
 
-Keep initial capacity modest: web `0.5` CPU and `1Gi`, each runtime Job `1` CPU and `2Gi`, generation `minExecutions: 0` and `maxExecutions: 1`, recovery every five minutes with one replica. Create an Azure budget and lifecycle policy for abandoned Blob uploads after observing actual usage. No ACR admin password or Azure service-principal secret is stored in GitHub.
+Keep initial capacity modest: web `0.5` CPU and `1Gi`, each runtime Job `1` CPU and `2Gi`, generation `minExecutions: 0` and `maxExecutions: 1`, recovery every five minutes with one replica. The `twilio-comics-launch` $150 monthly budget is already configured for `rg-twilio-comics`, with actual alerts at 50%, 80%, and 100% and a forecast alert at 100% emailed to `adellavecchia@twilio.com`; it does not stop spending or cover Twilio and OpenAI. Add a lifecycle policy for abandoned Blob uploads after observing actual usage. No ACR admin password or Azure service-principal secret is stored in GitHub.

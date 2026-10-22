@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
@@ -42,8 +42,11 @@ function queries(): Array<{ sql: string; params: unknown[] }> {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", undefined);
   h.transaction.mockImplementation(async (run) => run({ execute: h.execute }));
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("Voice Verify SMS start budget", () => {
   it("reserves the fourth caller start with recipient and caller locks and durable CallSid", async () => {
@@ -133,6 +136,63 @@ describe("Voice Verify SMS start budget", () => {
       "voice.verification.denied", "number_day",
     ]));
   });
+
+  it("allows a pilot number's fourth start in 24 hours", async () => {
+    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "4");
+    mockFreshReservation({
+      caller_hour_count: 0,
+      caller_day_count: 0,
+      number_hour_count: 3,
+      number_day_count: 3,
+    });
+
+    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
+      allowed: true, sendCode: true,
+    });
+  });
+
+  it("denies the next pilot start once the number reaches four in 24 hours", async () => {
+    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "4");
+    mockFreshReservation({
+      caller_hour_count: 0,
+      caller_day_count: 0,
+      number_hour_count: 4,
+      number_day_count: 4,
+    });
+
+    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
+      allowed: false, reason: "rate_limit",
+    });
+    expect(queries()[4].params).toContain("number_day");
+  });
+
+  it("pauses new Verify starts when the number's daily limit is zero", async () => {
+    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "0");
+    mockFreshReservation({
+      caller_hour_count: 0,
+      caller_day_count: 0,
+      number_hour_count: 0,
+      number_day_count: 0,
+    });
+
+    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
+      allowed: false, reason: "rate_limit",
+    });
+    expect(queries()[0].sql).toContain("pg_advisory_xact_lock");
+    expect(queries()[4].params).toContain("number_day");
+  });
+
+  it.each(["", "-1", "4.5", "abc", "9007199254740992"])(
+    "fails closed for invalid daily number limit %j",
+    async (configuredLimit) => {
+      vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", configuredLimit);
+
+      await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
+        allowed: false, reason: "unavailable",
+      });
+      expect(h.transaction).not.toHaveBeenCalled();
+    },
+  );
 
   it("takes the same number lock for different caller IDs", async () => {
     const secondCaller = {
