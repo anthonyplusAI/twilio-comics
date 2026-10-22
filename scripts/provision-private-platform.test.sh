@@ -157,7 +157,13 @@ PY
   'keyvault secret list') exit 0 ;;
   'keyvault secret show') [[ -e "$AZ_TEST_SECRET_FILE" ]] ;;
   'keyvault secret set')
+    expiration="$(arg_after --expires "$@")"
+    [[ -n "$expiration" ]] || {
+      printf 'PostgreSQL bootstrap secret needs an expiration\n' >&2
+      exit 95
+    }
     cp "$(arg_after --file "$@")" "$AZ_TEST_SECRET_FILE"
+    printf '%s\n' "$expiration" >> "$AZ_TEST_SECRET_EXPIRATIONS"
     printf 'set\n' >> "$AZ_TEST_SECRET_WRITES" ;;
   'keyvault secret download') cp "$AZ_TEST_SECRET_FILE" "$(arg_after --file "$@")" ;;
   'deployment group what-if')
@@ -202,6 +208,7 @@ AZ_TEST_VAULT_FILE="$TEST_ROOT/vault-created"
 AZ_TEST_ROLE_FILE="$TEST_ROOT/role-created"
 AZ_TEST_SECRET_FILE="$TEST_ROOT/secret-created"
 AZ_TEST_SECRET_WRITES="$TEST_ROOT/secret-writes"
+AZ_TEST_SECRET_EXPIRATIONS="$TEST_ROOT/secret-expirations"
 AZ_TEST_PREVIEW_LOG="$TEST_ROOT/preview-arguments"
 AZ_TEST_IP_RULE_FILE="$TEST_ROOT/ip-rule"
 AZ_TEST_VNET_RULE_FILE="$TEST_ROOT/vnet-rule"
@@ -209,7 +216,7 @@ AZ_TEST_RULE_ADDS="$TEST_ROOT/network-rule-adds"
 PASSWORD_FILE="$TEST_ROOT/admin-password"
 printf '%s\n' 'a-safe-test-password-of-32-characters' > "$PASSWORD_FILE"
 chmod 600 "$PASSWORD_FILE"
-export AZ_TEST_ARGUMENT_LOG AZ_TEST_VAULT_FILE AZ_TEST_ROLE_FILE AZ_TEST_SECRET_FILE AZ_TEST_SECRET_WRITES AZ_TEST_PREVIEW_LOG AZ_TEST_IP_RULE_FILE AZ_TEST_VNET_RULE_FILE AZ_TEST_RULE_ADDS
+export AZ_TEST_ARGUMENT_LOG AZ_TEST_VAULT_FILE AZ_TEST_ROLE_FILE AZ_TEST_SECRET_FILE AZ_TEST_SECRET_WRITES AZ_TEST_SECRET_EXPIRATIONS AZ_TEST_PREVIEW_LOG AZ_TEST_IP_RULE_FILE AZ_TEST_VNET_RULE_FILE AZ_TEST_RULE_ADDS
 
 run_provision() {
   PATH="$TEST_ROOT/bin:$PATH" \
@@ -232,6 +239,16 @@ run_provision > "$TEST_ROOT/success-output"
 parameters_file="$(awk '$0 == "--parameters" { getline; if (substr($0, 1, 1) == "@") { print substr($0, 2); exit } }' "$AZ_TEST_ARGUMENT_LOG")"
 [[ -n "$parameters_file" && ! -e "$parameters_file" ]]
 [[ "$(wc -l < "$AZ_TEST_SECRET_WRITES")" == 1 ]]
+python3 - "$AZ_TEST_SECRET_EXPIRATIONS" <<'PY'
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+
+expirations = Path(sys.argv[1]).read_text(encoding='utf-8').splitlines()
+assert len(expirations) == 1
+expiration = datetime.strptime(expirations[0], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+assert timedelta(days=364) < expiration - datetime.now(timezone.utc) <= timedelta(days=365)
+PY
 
 # Deployment readback must reject a peering that has not connected yet.
 set +e
@@ -244,6 +261,7 @@ grep -q 'not connected to its intended peer' "$TEST_ROOT/disconnected-peering-ou
 # Rerunning must use the existing Key Vault secret and avoid a second write.
 run_provision > "$TEST_ROOT/repeat-output"
 [[ "$(wc -l < "$AZ_TEST_SECRET_WRITES")" == 1 ]]
+[[ "$(wc -l < "$AZ_TEST_SECRET_EXPIRATIONS")" == 1 ]]
 [[ "$(cat "$AZ_TEST_RULE_ADDS")" == vnet ]]
 
 # A protected operator file may end with one LF. Key Vault and the ARM secure
@@ -258,6 +276,7 @@ import sys
 assert Path(sys.argv[1]).read_bytes() == b'a-Safe!Test#Password_WithPunct+2026'
 PY
 [[ "$(wc -l < "$AZ_TEST_SECRET_WRITES")" == 2 ]]
+[[ "$(wc -l < "$AZ_TEST_SECRET_EXPIRATIONS")" == 2 ]]
 
 # A manually changed vault secret with a newline must fail before ARM deploys.
 # Trimming it here would make PostgreSQL and Key Vault disagree again.

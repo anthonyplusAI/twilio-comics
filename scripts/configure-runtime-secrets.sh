@@ -375,9 +375,18 @@ download_secret() {
     --file "$2" --overwrite --only-show-errors --output none \
     || die "Cannot read existing Key Vault secret '$1'."
 }
+# Azure policy requires a UTC expiry on new secrets. Reruns leave existing
+# versions and expiry dates untouched; rotate credentials before they expire.
+SECRET_EXPIRATION_UTC="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+
+print((datetime.now(timezone.utc) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
 set_secret() {
   az keyvault secret set --vault-name "$VAULT" --name "$1" --file "$2" \
-    --encoding utf-8 --content-type "$3" --only-show-errors --output none \
+    --encoding utf-8 --content-type "$3" --expires "$SECRET_EXPIRATION_UTC" \
+    --only-show-errors --output none \
     || die "Cannot store Key Vault secret '$1'."
 }
 validate_stored_secret() {

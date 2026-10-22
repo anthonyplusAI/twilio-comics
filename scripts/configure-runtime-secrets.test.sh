@@ -43,9 +43,14 @@ PY
     ;;
   'keyvault secret set')
     name="$(argument --name "$@")"
+    expiration="$(argument --expires "$@")" || {
+      printf 'Secret %s was created without an expiration\n' "$name" >&2
+      exit 91
+    }
     [[ "${AZ_MOCK_FAIL_HASH_SET:-}" != 1 || "$name" != admin-password-hash ]] || exit 88
     cp "$(argument --file "$@")" "$AZ_MOCK_STATE/secrets/$name"
     printf '%s\n' "$name" >> "$AZ_MOCK_STATE/secret-set.log"
+    printf '%s\t%s\n' "$name" "$expiration" >> "$AZ_MOCK_STATE/secret-expiration.tsv"
     ;;
   'keyvault secret download')
     name="$(argument --name "$@")"
@@ -194,6 +199,7 @@ grep -Fq 'Set TWILIO_ACCOUNT_SID' "$test_root/invalid-sid.out"
 bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/first.out" 2>&1
 grep -Fq 'Channels remain closed; web app remains internal' "$test_root/first.out"
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 4 ]]
+[[ "$(wc -l < "$AZ_MOCK_STATE/secret-expiration.tsv" | tr -d ' ')" == 4 ]]
 jq --exit-status '
   .properties.configuration.ingress.external == false
   and .properties.template.scale.minReplicas == 0
@@ -230,6 +236,7 @@ password_before="$(cat "$AZ_MOCK_STATE/secrets/admin-initial-password")"
 hash_before="$(cat "$AZ_MOCK_STATE/secrets/admin-password-hash")"
 bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/repeat.out" 2>&1
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 4 ]]
+[[ "$(wc -l < "$AZ_MOCK_STATE/secret-expiration.tsv" | tr -d ' ')" == 4 ]]
 [[ "$(cat "$AZ_MOCK_STATE/secrets/admin-initial-password")" == "$password_before" ]]
 [[ "$(cat "$AZ_MOCK_STATE/secrets/admin-password-hash")" == "$hash_before" ]]
 
@@ -239,6 +246,24 @@ chmod 600 "$test_root/openai.key" "$test_root/twilio.key"
 OPENAI_API_KEY_FILE="$test_root/openai.key" TWILIO_AUTH_TOKEN_FILE="$test_root/twilio.key" \
   bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/optional.out" 2>&1
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 6 ]]
+python3 - "$AZ_MOCK_STATE/secret-expiration.tsv" <<'PY'
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+
+rows = [line.split("\t") for line in Path(sys.argv[1]).read_text().splitlines()]
+expected_names = {
+    "auth-secret", "media-signing-secret", "admin-initial-password",
+    "admin-password-hash", "openai-api-key", "twilio-auth-token",
+}
+assert len(rows) == len(expected_names)
+assert {name for name, _ in rows} == expected_names
+now = datetime.now(timezone.utc)
+for name, value in rows:
+    expires = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    remaining = expires - now
+    assert timedelta(days=364, hours=23) < remaining < timedelta(days=365, hours=1), name
+PY
 for workload in twilio-comics-v2 twilio-comics-generation-v2 twilio-comics-recovery-v2; do
   jq --exit-status '
     [.properties.template.containers[0].env[] | select(.name == "OPENAI_API_KEY")][0].secretRef == "openai-api-key"

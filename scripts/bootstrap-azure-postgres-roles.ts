@@ -277,8 +277,18 @@ export async function bootstrapRoles(
 const KEY_VAULT_AUTHORIZATION_WINDOW_MS = 12 * 60_000;
 const KEY_VAULT_RETRY_INTERVAL_MS = 5_000;
 const KEY_VAULT_MAX_OTHER_FAILURES = 12;
+const KEY_VAULT_SECRET_TTL_SECONDS = 365 * 24 * 60 * 60;
 const RETRYABLE_KEY_VAULT_STATUSES = new Set([403, 408, 429, 500, 502, 503, 504]);
 const REPORTABLE_KEY_VAULT_STATUSES = new Set([400, 401, 403, 404, 408, 429, 500, 502, 503, 504]);
+
+export function buildKeyVaultSecretPayload(value: string, now: Date = new Date()) {
+  // The vault's governance policy requires an explicit UTC expiry on every
+  // new version. Existing secrets are read and reused without changing it.
+  return {
+    value,
+    attributes: { exp: Math.floor(now.getTime() / 1000) + KEY_VAULT_SECRET_TTL_SECONDS },
+  };
+}
 
 export class KeyVaultHttpError extends Error {
   constructor(readonly status: number) {
@@ -317,7 +327,7 @@ export class KeyVaultRetryWindow {
             typeof payload.error === "object" && payload.error !== null && "code" in payload.error
             ? payload.error.code
             : undefined;
-          if (errorCode === "ForbiddenByFirewall") {
+          if (errorCode === "ForbiddenByFirewall" || errorCode === "ForbiddenByGovernancePolicy") {
             throw new KeyVaultHttpError(403);
           }
         } else {
@@ -351,6 +361,11 @@ class KeyVaultSecrets implements SecretStore {
 
   private async request(name: string, method: "GET" | "PUT", value?: string): Promise<Response> {
     const endpoint = `${this.baseUrl}/secrets/${name}?api-version=7.4`;
+    let body: string | undefined;
+    if (method === "PUT") {
+      if (value === undefined) throw new Error("Key Vault secret value is required");
+      body = JSON.stringify(buildKeyVaultSecretPayload(value));
+    }
     // Azure RBAC can take up to 10 minutes to propagate. The first request
     // starts a shared 12-minute monotonic window, including both URL writes.
     return this.retry.request(method, async () => {
@@ -362,7 +377,7 @@ class KeyVaultSecrets implements SecretStore {
           Authorization: `Bearer ${token.token}`,
           ...(method === "PUT" ? { "Content-Type": "application/json" } : {}),
         },
-        body: method === "PUT" ? JSON.stringify({ value }) : undefined,
+        body,
         signal: AbortSignal.timeout(10_000),
       });
     });

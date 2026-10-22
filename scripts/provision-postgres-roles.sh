@@ -241,14 +241,16 @@ cleanup_bootstrap_access() {
     fi
   fi
   local assignment_id
-  for assignment_id in "${BOOTSTRAP_READ_ASSIGNMENT_IDS[@]}"; do
-    if ! az role assignment delete --ids "$assignment_id" \
-      --only-show-errors --output none; then
-      printf 'ERROR: Could not revoke temporary Key Vault Secrets User from %s. Revoke assignment %s immediately.\n' \
-        "$BOOTSTRAP_IDENTITY" "$assignment_id" >&2
-      previous_status=1
-    fi
-  done
+  if ((${#BOOTSTRAP_READ_ASSIGNMENT_IDS[@]} > 0)); then
+    for assignment_id in "${BOOTSTRAP_READ_ASSIGNMENT_IDS[@]}"; do
+      if ! az role assignment delete --ids "$assignment_id" \
+        --only-show-errors --output none; then
+        printf 'ERROR: Could not revoke temporary Key Vault Secrets User from %s. Revoke assignment %s immediately.\n' \
+          "$BOOTSTRAP_IDENTITY" "$assignment_id" >&2
+        previous_status=1
+      fi
+    done
+  fi
   exit "$previous_status"
 }
 trap cleanup_bootstrap_access EXIT
@@ -353,8 +355,16 @@ seed_missing_role_url() {
     || die "Could not generate '$secret_name' in an owner-only file."
   validate_role_url_file "$role" "$file" \
     || die "Generated '$secret_name' failed URL validation."
+  local expires_at
+  expires_at="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+
+print((datetime.now(timezone.utc) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)" || die "Could not calculate '$secret_name' Key Vault expiration."
   az keyvault secret set --vault-name "$VAULT" --name "$secret_name" \
     --file "$file" --encoding utf-8 --content-type 'application/x-postgresql-url' \
+    --expires "$expires_at" \
     --only-show-errors --output none \
     || die "Could not store '$secret_name' in Key Vault."
 }

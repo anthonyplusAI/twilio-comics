@@ -282,9 +282,19 @@ while True:
 Path(sys.argv[1]).write_text(password, encoding='utf-8')
 PY
   fi
+  # The vault's governance policy requires an expiration on every new secret.
+  # Keep the bootstrap credential available for repeat deployments, and rotate
+  # it deliberately before this one-year Key Vault version expires.
+  SECRET_EXPIRATION_UTC="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+
+print((datetime.now(timezone.utc) + timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+PY
+)"
   az keyvault secret set --vault-name "$KEY_VAULT_NAME" \
     --name "$ADMIN_SECRET_NAME" --file "$PASSWORD_FILE" --encoding utf-8 \
     --content-type 'Twilio Comics PostgreSQL bootstrap administrator password' \
+    --expires "$SECRET_EXPIRATION_UTC" \
     --only-show-errors --output none
 fi
 

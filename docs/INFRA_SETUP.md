@@ -83,7 +83,25 @@ PROVISION_PRIVATE_PLATFORM_CONFIRM=yes \
 bash scripts/provision-private-platform.sh
 ```
 
-The active `az` subscription must match `SUBSCRIPTION_ID`. The preview covers the Bicep resources; the Key Vault is created only by the actual provisioning run. Tenant policy requires Key Vault purge protection and a deny by default firewall. The script detects the operator's public IPv4 address and allows that single address for Azure CLI secret operations; set `OPERATOR_PUBLIC_IPV4` explicitly if automatic detection sees a different egress address. It enables the `Microsoft.KeyVault` service endpoint on the V2 Container Apps subnet, then adds that subnet to the vault firewall for managed-identity Jobs. The vault also needs a Key Vault Secrets User role assignment for each Job identity that reads it. A protected, single-line `POSTGRES_ADMIN_PASSWORD_FILE` with mode `0600` is an optional first-run override; omit it for secure generation and storage in Key Vault.
+The active `az` subscription must match `SUBSCRIPTION_ID`. The preview covers the Bicep resources; the Key Vault is created only by the actual provisioning run. Tenant policy requires Key Vault purge protection, a deny by default firewall, and an expiry on **every new secret version**. New secrets created by these scripts expire 365 days after creation; reruns keep existing values and expiry dates. The script detects the operator's public IPv4 address and allows that single address for Azure CLI secret operations; set `OPERATOR_PUBLIC_IPV4` explicitly if automatic detection sees a different egress address. It enables the `Microsoft.KeyVault` service endpoint on the V2 Container Apps subnet, then adds that subnet to the vault firewall for managed-identity Jobs. The vault also needs a Key Vault Secrets User role assignment for each Job identity that reads it. A protected, single-line `POSTGRES_ADMIN_PASSWORD_FILE` with mode `0600` is an optional first-run override; omit it for secure generation and storage in Key Vault.
+
+The existing `postgres-bootstrap-password` version has `expires: null`; provisioning will reuse it and will **not** repair that metadata. After ensuring the operator can reach the vault and has permission to set secret attributes, assign the current version a UTC expiry. This updates metadata without fetching or changing the password:
+
+```bash
+bootstrap_expires_utc="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) + timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+PY
+)"
+az keyvault secret set-attributes --vault-name kv-twilio-comics-1a1d98 \
+  --name postgres-bootstrap-password --expires "$bootstrap_expires_utc" \
+  --only-show-errors --output none
+az keyvault secret show --vault-name kv-twilio-comics-1a1d98 \
+  --name postgres-bootstrap-password \
+  --query '{name:name,expires:attributes.expires}' --output json
+```
+
+The expiry is a deadline for a planned password rotation, not an automatic refresh. Set a Key Vault near-expiry alert and follow the [database credential rotation procedure](AZURE_POSTGRES.md#key-vault-expiry-and-database-credential-rotation) before that date.
 
 The script creates the private PostgreSQL DNS zone with links to both VNets, global peerings in both directions, `cae-twilio-comics-v2` as a workload-profile environment in East US 2, a `Standard_B1ms` PostgreSQL Flexible Server in Central US with private access and public network access disabled, and the `twilio_comics` database. It does **not** create the V2 web app or Jobs, runtime/migration SQL roles or URLs, GitHub configuration, or Twilio webhooks. The existing managed-network ACA environment cannot provide the private database route.
 
@@ -204,7 +222,7 @@ az keyvault secret download --vault-name kv-twilio-comics-1a1d98 \
 
 The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, operator name/contact, and shared 25-per-day generation limit are configured as ordinary environment settings. `TWILIO_ENABLED_CHANNELS` is explicitly empty, so the number does not appear as an available action yet. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses the existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
 
-The OpenAI API key and Twilio Auth Token are not in this repository. When available, put each value in its own owner-only (`0600`), single-line local file and rerun with file **paths**, not credential values, in the command. Either file can be supplied independently. The script copies the value through a short-lived owner-only file into Key Vault, then wires only the workloads that need it. If a Key Vault secret already exists, a supplied file must match it exactly; a different value is rejected without rotation. Without these two credentials, `/api/readyz` remains closed and the release gate must stay unset.
+The OpenAI API key and Twilio Auth Token are not in this repository. When available, put each value in its own owner-only (`0600`), single-line local file and rerun with file **paths**, not credential values, in the command. Either file can be supplied independently. The script copies the value through a short-lived owner-only file into Key Vault, then wires only the workloads that need it. If a Key Vault secret already exists, a supplied file must match it exactly; a different value is rejected without rotation. Existing `auth-secret`, `media-signing-secret`, admin credentials, and their expiry dates are also reused. Without the OpenAI and Twilio credentials, `/api/readyz` remains closed and the release gate must stay unset.
 
 ```bash
 SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98' \
@@ -214,6 +232,12 @@ TWILIO_AUTH_TOKEN_FILE='/secure/path/twilio-auth-token' \
 CONFIGURE_RUNTIME_CONFIRM=yes \
 bash scripts/configure-runtime-secrets.sh
 ```
+
+### Runtime secret expiry and rotation
+
+Inventory the latest Key Vault expiry dates for `auth-secret`, `media-signing-secret`, `admin-initial-password`, `admin-password-hash`, `openai-api-key`, and `twilio-auth-token` with the metadata-only command in the [database guide](AZURE_POSTGRES.md#key-vault-expiry-and-database-credential-rotation). Set an owned alert for `Microsoft.KeyVault.SecretNearExpiry` (30 days before expiry), review expiries at least monthly, and plan changes 60 days before expiry. The setup script creates new versions with a 365-day UTC expiry but intentionally **does not rotate or extend existing versions**. Rerunning it, including with a new OpenAI key or Twilio token file, cannot renew an existing secret.
+
+For each planned rotation, obtain or generate the replacement through its issuing system, stage it in an owner-only local file, and write a new Key Vault version using `az keyvault secret set --file ... --expires <UTC timestamp>`. Coordinate the provider cutover for OpenAI and Twilio with the matching vault version; a new Twilio Auth Token must still validate signed SMS and Voice webhooks. Rotate the admin password and its app-compatible scrypt hash as a matched pair; rotating only one breaks `/admin/login`. Rotating `auth-secret` ends current sessions, and rotating `media-signing-secret` invalidates outstanding signed media links, so schedule both when users can be informed. Roll or restart the V2 web app and affected Jobs to load the new versions, test `/api/readyz`, one admin login, and both SMS and Voice flows, and confirm the new expiry metadata before retiring the old provider credentials. Keep channels closed if any required secret or credential is expired or out of sync. Expiry metadata can be changed with `az keyvault secret set-attributes --expires` without changing a value, but that action does **not** rotate the credential.
 
 Google OAuth is optional for `/studio`; if enabled in production, store its client ID and secret as V2 web app secrets, set `AUTH_GOOGLE_ID` and `AUTH_GOOGLE_SECRET` secret references, and set `STUDIO_TESTER_EMAILS` to a comma-separated email allowlist. An empty allowlist denies studio sign-in. SMS, Voice, and the admin dashboard do not require Google OAuth.
 

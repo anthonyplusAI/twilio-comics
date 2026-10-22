@@ -114,6 +114,19 @@ PY
   'keyvault secret set')
     name="$(argument --name "$@")"
     [[ "${AZ_MOCK_FAIL_SECRET_SET:-}" != "$name" ]] || exit 95
+    expires="$(argument --expires "$@" || true)"
+    python3 - "$expires" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+try:
+    expiration = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+except ValueError:
+    raise SystemExit("Key Vault policy requires an explicit UTC secret expiration")
+days_remaining = (expiration - datetime.now(timezone.utc)).total_seconds() / 86_400
+if not 364 <= days_remaining <= 366:
+    raise SystemExit("Key Vault role URL expiration must be about one year from creation")
+PY
     python3 - "$(argument --file "$@")" <<'PY'
 from pathlib import Path
 import stat
@@ -214,7 +227,10 @@ export BOOTSTRAP_IMAGE MIGRATION_IMAGE
 export PROVISION_POSTGRES_ROLES_CONFIRM=yes
 export ROLE_BOOTSTRAP_POLL_SECONDS=0
 
-bash "$project_root/scripts/provision-postgres-roles.sh" > "$test_root/success.out" 2>&1
+if ! bash "$project_root/scripts/provision-postgres-roles.sh" > "$test_root/success.out" 2>&1; then
+  cat "$test_root/success.out" >&2
+  exit 1
+fi
 grep -Fq 'PostgreSQL role URLs are in Key Vault' "$test_root/success.out"
 for secret in postgres-bootstrap-password postgres-comics-migration-url postgres-comics-runtime-url; do
   grep -Fq "role assignment create --assignee-object-id principal-id-twilio-comics-pg-bootstrap --assignee-principal-type ServicePrincipal --scope /subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.KeyVault/vaults/kv-twilio-comics-1a1d98/secrets/$secret --role Key Vault Secrets User" "$AZ_MOCK_LOG"
@@ -324,6 +340,10 @@ if AZ_MOCK_FAIL_SECRET_SET=postgres-comics-runtime-url \
     bash "$project_root/scripts/provision-postgres-roles.sh" \
     > "$test_root/failed-secret-set.out" 2>&1; then
   printf 'Bootstrap proceeded after Key Vault refused a URL secret write\n' >&2
+  exit 1
+fi
+if grep -Fq 'unbound variable' "$test_root/failed-secret-set.out"; then
+  printf 'Bootstrap cleanup referenced an empty assignment array after Key Vault refused a write\n' >&2
   exit 1
 fi
 if grep -Fq 'containerapp job start' "$AZ_MOCK_LOG"; then

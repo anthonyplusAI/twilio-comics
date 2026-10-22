@@ -5,6 +5,7 @@ import {
   KeyVaultRetryWindow,
   bootstrapRoles,
   buildDatabaseUrl,
+  buildKeyVaultSecretPayload,
   formatBootstrapFailure,
   generateRolePassword,
   parseStoredRolePassword,
@@ -135,6 +136,26 @@ describe("private PostgreSQL role bootstrap", () => {
     await expect(retry.request("GET", async () => {
       attempts++;
       return new Response(JSON.stringify({ error: { code: "ForbiddenByFirewall" } }), { status: 403 });
+    })).rejects.toBeInstanceOf(KeyVaultHttpError);
+    expect(attempts).toBe(1);
+  });
+
+  it("sets a UTC expiration one year ahead on a new Key Vault secret version", () => {
+    const now = new Date("2026-10-21T03:00:00.000Z");
+    const payload = buildKeyVaultSecretPayload("sample-secret", now);
+    expect(payload).toEqual({
+      value: "sample-secret",
+      attributes: { exp: Math.floor(now.getTime() / 1000) + 365 * 24 * 60 * 60 },
+    });
+    expect(new Date(payload.attributes.exp * 1000).toISOString()).toBe("2027-10-21T03:00:00.000Z");
+  });
+
+  it("fails immediately on an explicit Key Vault governance denial", async () => {
+    let attempts = 0;
+    const retry = new KeyVaultRetryWindow(() => 0, async () => undefined);
+    await expect(retry.request("PUT", async () => {
+      attempts++;
+      return new Response(JSON.stringify({ error: { code: "ForbiddenByGovernancePolicy" } }), { status: 403 });
     })).rejects.toBeInstanceOf(KeyVaultHttpError);
     expect(attempts).toBe(1);
   });
