@@ -21,10 +21,13 @@ interface PageData {
 interface PageInfoSheetProps {
   isOpen: boolean;
   onClose: () => void;
-  page: PageData;
+  page?: PageData;
+  isOwner: boolean;
 }
 
-export function PageInfoSheet({ isOpen, onClose, page }: PageInfoSheetProps) {
+export function PageInfoSheet({ isOpen, onClose, page, isOwner }: PageInfoSheetProps) {
+  if (!isOwner || !page) return null;
+
   const styleName = COMIC_STYLES.find((s) => s.id === page.style)?.name || page.style;
 
   return (

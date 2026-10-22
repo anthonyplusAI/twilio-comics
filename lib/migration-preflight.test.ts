@@ -1,13 +1,56 @@
-import { describe, expect, it } from "vitest";
+import { Pool } from "pg";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   assessMigrationPreflight,
   buildBaselineSql,
+  inspectDatabase,
   loadMigrationPlan,
   type DatabaseState,
   type MigrationPlanEntry,
   type SchemaShape,
 } from "../scripts/check-migration-preflight";
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("live PostgreSQL inspection", () => {
+  it("uses one read-only snapshot and closes the connection", async () => {
+    const commands: string[] = [];
+    const release = vi.fn();
+    const query = vi.fn(async (text: string) => {
+      commands.push(text);
+      return { rows: text.includes("to_regclass") ? [{ journal_exists: false }] : [] };
+    });
+    vi.spyOn(Pool.prototype, "connect").mockResolvedValue({ query, release } as never);
+    const end = vi.spyOn(Pool.prototype, "end").mockResolvedValue();
+
+    const state = await inspectDatabase(
+      "postgresql://migrator:secret@localhost/comics?sslmode=disable",
+    );
+
+    expect(state).toEqual({
+      journalExists: false,
+      journalRows: [],
+      schema: {},
+      duplicatePageGroups: [],
+      orphanActiveStoryCount: 0,
+    });
+    expect(commands[0]).toMatch(/BEGIN.*READ ONLY/i);
+    expect(commands.at(-1)).toBe("COMMIT");
+    expect(release).toHaveBeenCalledOnce();
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("closes the pool if connecting fails", async () => {
+    vi.spyOn(Pool.prototype, "connect").mockRejectedValue(new Error("database unavailable"));
+    const end = vi.spyOn(Pool.prototype, "end").mockResolvedValue();
+
+    await expect(inspectDatabase(
+      "postgresql://migrator:secret@localhost/comics?sslmode=disable",
+    )).rejects.toThrow("database unavailable");
+    expect(end).toHaveBeenCalledOnce();
+  });
+});
 
 const initialShape: SchemaShape = {
   stories: {

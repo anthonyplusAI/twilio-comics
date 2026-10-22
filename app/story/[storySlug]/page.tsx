@@ -2,6 +2,10 @@ import { Metadata } from "next";
 import { getStoryWithPagesBySlug } from "@/lib/db-actions";
 import { StoryEditorClient } from "./story-editor-client";
 
+// Deleted comics should stop resolving through the page and its metadata.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function generateMetadata({
   params,
 }: {

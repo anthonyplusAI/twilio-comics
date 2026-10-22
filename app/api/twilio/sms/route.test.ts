@@ -5,6 +5,8 @@ const h = vi.hoisted(() => ({
   validateTwilioSignature: vi.fn(),
   recordInboundMessage: vi.fn(),
   sendInboundMessage: vi.fn(),
+  recordActivityEvent: vi.fn(),
+  getOrCreateChannelIdentity: vi.fn(),
 }));
 
 vi.mock("@/lib/twilio", async (importOriginal) => {
@@ -23,8 +25,11 @@ vi.mock("@/lib/twilio-events", () => ({
 vi.mock("@/lib/generation-queue", () => ({
   sendInboundMessage: h.sendInboundMessage,
 }));
+vi.mock("@/lib/activity-events", () => ({
+  recordActivityEvent: h.recordActivityEvent,
+}));
 vi.mock("@/lib/channel-identities", () => ({
-  getOrCreateChannelIdentity: vi.fn().mockResolvedValue({ userId: "twilio-user" }),
+  getOrCreateChannelIdentity: h.getOrCreateChannelIdentity,
 }));
 vi.mock("@/lib/db-actions", () => ({
   getOrCreateConversation: vi.fn().mockResolvedValue({
@@ -44,10 +49,12 @@ beforeEach(() => {
   vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
   vi.stubEnv("TWILIO_PHONE_NUMBER", "+15553334444");
   vi.stubEnv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886");
-  vi.stubEnv("TWILIO_ENABLED_CHANNELS", undefined);
+  vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice,whatsapp");
   h.validateTwilioSignature.mockReturnValue(true);
   h.recordInboundMessage.mockResolvedValue({ shouldEnqueue: true });
   h.sendInboundMessage.mockResolvedValue(undefined);
+  h.recordActivityEvent.mockResolvedValue(undefined);
+  h.getOrCreateChannelIdentity.mockResolvedValue({ userId: "twilio-user" });
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -64,6 +71,18 @@ function request(pathname: string, form = "MessageSid=SM123&From=%2B15551112222&
 }
 
 describe("Twilio messaging webhook", () => {
+  it("rejects an oversized form before signature validation or persistence", async () => {
+    const response = await POST(request(
+      "/api/twilio/sms",
+      `MessageSid=SM-large&From=%2B15551112222&To=%2B15553334444&Body=${"x".repeat(64 * 1024)}`,
+    ));
+
+    expect(response.status).toBe(413);
+    expect(h.validateTwilioSignature).not.toHaveBeenCalled();
+    expect(h.getOrCreateChannelIdentity).not.toHaveBeenCalled();
+    expect(h.recordInboundMessage).not.toHaveBeenCalled();
+  });
+
   it("stores a signed SMS idea, queues its SID, and responds without waiting for an agent", async () => {
     const response = await POST(request("/api/twilio/sms?campaign=fall"));
 
@@ -90,6 +109,17 @@ describe("Twilio messaging webhook", () => {
       mediaContentTypes: [],
     });
     expect(h.sendInboundMessage).toHaveBeenCalledWith("SM123");
+    expect(h.getOrCreateChannelIdentity).toHaveBeenCalledWith("sms", "+15551112222");
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SM123:inbound",
+      channel: "sms",
+      kind: "message.inbound",
+      direction: "inbound",
+      address: "+15551112222",
+      messageSid: "SM123",
+      content: "A robot detective",
+      userId: "twilio-user",
+    }));
   });
 
   it("keeps WhatsApp image metadata with the durable receipt", async () => {
@@ -229,6 +259,14 @@ describe("Twilio messaging webhook", () => {
     expect(h.validateTwilioSignature).toHaveBeenCalledOnce();
     expect(h.recordInboundMessage).not.toHaveBeenCalled();
     expect(h.sendInboundMessage).not.toHaveBeenCalled();
+    expect(h.getOrCreateChannelIdentity).toHaveBeenCalledWith("sms", "+15551112222");
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SM-keyword:inbound",
+      kind: "message.inbound",
+      status: "control",
+      content: keyword.toLowerCase(),
+      userId: "twilio-user",
+    }));
   });
 
   it("acknowledges a custom Advanced Opt-Out keyword identified by OptOutType", async () => {
@@ -265,6 +303,17 @@ describe("Twilio messaging webhook", () => {
     expect(response.status).toBe(403);
     expect(h.recordInboundMessage).not.toHaveBeenCalled();
     expect(h.sendInboundMessage).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges an accepted message when activity history is unavailable", async () => {
+    h.recordActivityEvent.mockRejectedValue(new Error("analytics unavailable"));
+
+    const response = await POST(request("/api/twilio/sms"));
+
+    expect(response.status).toBe(200);
+    expect(h.recordInboundMessage).toHaveBeenCalledOnce();
+    expect(h.sendInboundMessage).toHaveBeenCalledWith("SM123");
   });
 
   it("does not queue a completed duplicate", async () => {

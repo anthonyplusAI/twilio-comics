@@ -42,11 +42,11 @@ function resultFromRow(row: QuotaRow): QuotaResult {
   };
 }
 
-export async function getFreeTierQuota(subject: string): Promise<{
+export async function getFreeTierQuota(subject: string, executor: Pick<typeof db, "execute"> = db): Promise<{
   remaining: number;
   reset: number | null;
 }> {
-  const result = await db.execute(sql`
+  const result = await executor.execute(sql`
     SELECT used, window_started_at
     FROM free_tier_quotas
     WHERE subject = ${subject}
@@ -67,10 +67,11 @@ export async function getFreeTierQuota(subject: string): Promise<{
 export async function reserveFreeTierQuota(
   subject: string,
   claimKey: string,
+  executor: Pick<typeof db, "execute"> = db,
 ): Promise<QuotaResult> {
   // PostgreSQL cannot UPDATE a claim inserted by a sibling data-modifying
   // CTE. A separate INSERT makes the claim visible to the reservation query.
-  await db.execute(sql`
+  await executor.execute(sql`
     INSERT INTO free_tier_quota_claims
       (claim_key, subject, window_started_at, status, created_at, updated_at)
     VALUES (${claimKey}, ${subject}, NOW(), 'pending', NOW(), NOW())
@@ -79,7 +80,7 @@ export async function reserveFreeTierQuota(
 
   // Lock the existing claim to serialize retries for one idempotency key.
   // The quota upsert and claim finalization share this statement's transaction.
-  const result = await db.execute(sql`
+  const result = await executor.execute(sql`
     WITH locked_claim AS MATERIALIZED (
       SELECT claim_key, subject, status, window_started_at
       FROM free_tier_quota_claims
@@ -162,7 +163,7 @@ export async function reserveFreeTierQuota(
 
   // A duplicate or rejected claim has no quota_result row. Read in a new
   // statement so its allowance reflects concurrent reservations and releases.
-  const quota = await getFreeTierQuota(subject);
+  const quota = await getFreeTierQuota(subject, executor);
   return {
     allowed: row.status === "reserved" || row.status === "consumed",
     remaining: quota.remaining,
@@ -179,8 +180,11 @@ export async function consumeFreeTierQuota(claimKey: string): Promise<void> {
   `);
 }
 
-export async function releaseFreeTierQuota(claimKey: string): Promise<void> {
-  await db.execute(sql`
+export async function releaseFreeTierQuota(
+  claimKey: string,
+  executor: Pick<typeof db, "execute"> = db,
+): Promise<void> {
+  await executor.execute(sql`
     WITH released AS (
       UPDATE free_tier_quota_claims
       SET status = 'released', updated_at = NOW()

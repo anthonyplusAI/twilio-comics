@@ -125,6 +125,47 @@ describe("sendComicMms", () => {
     });
   });
 
+  it("sets a bounded Twilio queue lifetime only on SMS when requested", async () => {
+    const { sendChannelMessage } = await import("@/lib/twilio");
+    await sendChannelMessage({
+      channel: "sms",
+      to: "+15551112222",
+      body: "ready",
+      validityPeriod: 120,
+    });
+    expect(h.create).toHaveBeenCalledWith({
+      to: "+15551112222",
+      from: "+15550000000",
+      body: "ready",
+      validityPeriod: 120,
+    });
+
+    await sendChannelMessage({
+      channel: "whatsapp",
+      to: "+15551112222",
+      body: "ready",
+      validityPeriod: 120,
+    });
+    expect(h.create).toHaveBeenLastCalledWith({
+      to: "whatsapp:+15551112222",
+      from: "whatsapp:+14155238886",
+      body: "ready",
+    });
+  });
+
+  it("rejects an invalid SMS queue lifetime before calling Twilio", async () => {
+    const { sendChannelMessage } = await import("@/lib/twilio");
+    for (const validityPeriod of [0, 36001, 1.5, Number.NaN]) {
+      await expect(sendChannelMessage({
+        channel: "sms",
+        to: "+15551112222",
+        body: "ready",
+        validityPeriod,
+      })).rejects.toThrow("validityPeriod");
+    }
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
   it("uses an explicit sender without requiring a default sender environment variable", async () => {
     delete process.env.TWILIO_PHONE_NUMBER;
     delete process.env.TWILIO_WHATSAPP_NUMBER;

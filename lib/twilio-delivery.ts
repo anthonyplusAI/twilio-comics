@@ -1,6 +1,7 @@
-import { and, eq, inArray, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { recordActivityEvent } from "@/lib/activity-events";
 import { db } from "@/lib/db";
-import { generationJobs } from "@/lib/schema";
+import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { getStoryById } from "@/lib/db-actions";
 import { sendChannelMessage, type TwilioMessageChannel } from "@/lib/twilio";
 
@@ -46,6 +47,23 @@ const terminalStatuses = [
 const mediaFallbackErrorCodes = [
   "11751", "21620", "21621", "21622", "30008", "30011", "63019", "63021",
 ] as const;
+const RESULT_DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TWILIO_VALIDITY_SAFETY_SECONDS = 10;
+const MIN_TWILIO_VALIDITY_SECONDS = 6;
+
+function resultDeliveryValiditySeconds(job: Pick<GenerationJob, "createdAt">): number | null {
+  const createdAt = job.createdAt instanceof Date ? job.createdAt.getTime() : NaN;
+  if (!Number.isFinite(createdAt)) return null;
+  const seconds = Math.floor(
+    (createdAt + RESULT_DELIVERY_MAX_AGE_MS - Date.now()) / 1000,
+  ) - TWILIO_VALIDITY_SAFETY_SECONDS;
+  return seconds >= MIN_TWILIO_VALIDITY_SECONDS ? Math.min(seconds, 36000) : null;
+}
+
+function deliveryCutoff(now: Date): Date {
+  return new Date(now.getTime() - RESULT_DELIVERY_MAX_AGE_MS +
+    (TWILIO_VALIDITY_SAFETY_SECONDS + MIN_TWILIO_VALIDITY_SECONDS) * 1000);
+}
 
 export function isMediaDeliveryFailure(errorCode: string | null): boolean {
   return errorCode !== null &&
@@ -71,6 +89,41 @@ export interface GeneratedMessageStatus {
   messageSid: string;
   status: DeliveryStatus;
   errorCode: string | null;
+}
+
+type DeliveryContext = Pick<
+  GenerationJob,
+  "id" | "userId" | "source" | "recipientAddress" | "storyId" | "attemptCount"
+>;
+
+async function logMessageDelivery(
+  job: DeliveryContext,
+  messageSid: string,
+  status: DeliveryStatus,
+  errorCode: string | null,
+  fallback: boolean,
+): Promise<void> {
+  try {
+    await recordActivityEvent({
+      eventKey: `message:${messageSid}:status:${status}`,
+      userId: job.userId,
+      channel: job.source === "voice" ? "sms" : job.source,
+      kind: "message.delivery",
+      direction: "outbound",
+      address: job.recipientAddress,
+      messageSid,
+      jobId: job.id,
+      storyId: job.storyId,
+      status,
+      details: { source: job.source, fallback, errorCode, attemptCount: job.attemptCount },
+    });
+  } catch (error) {
+    console.error("Delivery history failed", {
+      jobId: job.id,
+      messageSid,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 /** Atomically reject stale callbacks and callbacks for a different Message SID. */
@@ -117,8 +170,56 @@ export async function recordGeneratedMessageStatus({
         transition,
       ),
     )
-    .returning({ id: generationJobs.id });
+    .returning({
+      id: generationJobs.id,
+      userId: generationJobs.userId,
+      source: generationJobs.source,
+      recipientAddress: generationJobs.recipientAddress,
+      storyId: generationJobs.storyId,
+      attemptCount: generationJobs.attemptCount,
+    });
+  if (updated) await logMessageDelivery(updated, messageSid, status, errorCode, false);
   return Boolean(updated);
+}
+
+/** A failure notice is a separate SMS, never the generated comic delivery. */
+export async function recordFailedGenerationNoticeStatus({
+  jobId,
+  messageSid,
+  status,
+  errorCode,
+}: GeneratedMessageStatus): Promise<boolean> {
+  const [job] = await db
+    .select({
+      id: generationJobs.id,
+      userId: generationJobs.userId,
+      source: generationJobs.source,
+      recipientAddress: generationJobs.recipientAddress,
+      attemptCount: generationJobs.attemptCount,
+    })
+    .from(generationJobs)
+    .where(and(eq(generationJobs.id, jobId), eq(generationJobs.status, "failed")))
+    .limit(1);
+  if (!job) return false;
+
+  await recordActivityEvent({
+    eventKey: `message:${messageSid}:status:${status}`,
+    userId: job.userId,
+    channel: job.source === "voice" ? "sms" : job.source,
+    kind: "message.delivery",
+    direction: "outbound",
+    address: job.recipientAddress,
+    messageSid,
+    jobId,
+    status,
+    details: {
+      source: job.source,
+      purpose: "generation_failure_notice",
+      errorCode,
+      attemptCount: job.attemptCount,
+    },
+  });
+  return true;
 }
 
 /** Track the independent text-only fallback without overwriting the MMS result. */
@@ -175,7 +276,15 @@ export async function recordFallbackMessageStatus({
         transition,
       ),
     )
-    .returning({ id: generationJobs.id });
+    .returning({
+      id: generationJobs.id,
+      userId: generationJobs.userId,
+      source: generationJobs.source,
+      recipientAddress: generationJobs.recipientAddress,
+      storyId: generationJobs.storyId,
+      attemptCount: generationJobs.attemptCount,
+    });
+  if (updated) await logMessageDelivery(updated, messageSid, status, errorCode, true);
   return Boolean(updated);
 }
 
@@ -185,6 +294,10 @@ function eligibleForTextFallback(now: Date) {
     inArray(generationJobs.deliveryStatus, ["failed", "undelivered"]),
     inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
     isNull(generationJobs.deliveryFallbackSid),
+    or(
+      isNull(generationJobs.deliveryFallbackStatus),
+      notInArray(generationJobs.deliveryFallbackStatus, ["suppressed"]),
+    ),
     lt(generationJobs.deliveryFallbackAttempts, 2),
     or(
       isNull(generationJobs.deliveryFallbackLeaseExpiresAt),
@@ -193,8 +306,65 @@ function eligibleForTextFallback(now: Date) {
   );
 }
 
+/** Keep expired fallback attempts visible in history without messaging an old number. */
+async function suppressExpiredTextFallback(jobId: string, now = new Date()): Promise<void> {
+  const [job] = await db
+    .update(generationJobs)
+    .set({
+      deliveryFallbackStatus: "suppressed",
+      deliveryFallbackLeaseExpiresAt: null,
+      deliveryFallbackUpdatedAt: now,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(generationJobs.id, jobId),
+      eq(generationJobs.deliveryHadMedia, true),
+      inArray(generationJobs.deliveryStatus, ["failed", "undelivered"]),
+      inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
+      isNull(generationJobs.deliveryFallbackSid),
+      or(
+        isNull(generationJobs.deliveryFallbackStatus),
+        notInArray(generationJobs.deliveryFallbackStatus, ["suppressed"]),
+      ),
+      lte(generationJobs.createdAt, deliveryCutoff(now)),
+    ))
+    .returning({
+      id: generationJobs.id,
+      userId: generationJobs.userId,
+      source: generationJobs.source,
+      recipientAddress: generationJobs.recipientAddress,
+      storyId: generationJobs.storyId,
+      attemptCount: generationJobs.attemptCount,
+    });
+  if (!job) return;
+  try {
+    await recordActivityEvent({
+      eventKey: `job:${job.id}:fallback:suppressed`,
+      userId: job.userId,
+      channel: job.source === "voice" ? "sms" : job.source,
+      kind: "generation.delivery",
+      direction: "internal",
+      address: job.recipientAddress,
+      jobId: job.id,
+      storyId: job.storyId,
+      status: "suppressed",
+      details: {
+        reason: "delivery_window_expired",
+        fallback: true,
+        attemptCount: job.attemptCount,
+      },
+    });
+  } catch (error) {
+    console.error("Fallback suppression history failed", {
+      jobId,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
+}
+
 /** Claim at most two text-link attempts across duplicate callbacks and recovery runs. */
 export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean> {
+  const now = new Date();
   const [job] = await db
     .update(generationJobs)
     .set({
@@ -204,9 +374,16 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
       deliveryFallbackUpdatedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(and(eq(generationJobs.id, jobId), eligibleForTextFallback(new Date())))
+    .where(and(
+      eq(generationJobs.id, jobId),
+      eligibleForTextFallback(now),
+      gt(generationJobs.createdAt, deliveryCutoff(now)),
+    ))
     .returning();
-  if (!job) return false;
+  if (!job) {
+    await suppressExpiredTextFallback(jobId, now);
+    return false;
+  }
 
   let acceptedSid: string | undefined;
   try {
@@ -216,13 +393,47 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
     const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!baseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
     const body = `Your comic "${story.title.slice(0, 100)}" is ready. View it here: ${baseUrl}/story/${story.slug}`;
+    const validityPeriod = resultDeliveryValiditySeconds(job);
+    if (validityPeriod === null) {
+      await suppressExpiredTextFallback(jobId);
+      return false;
+    }
+    const channel = (job.source === "voice" ? "sms" : job.source) as TwilioMessageChannel;
     acceptedSid = await sendChannelMessage({
-      channel: (job.source === "voice" ? "sms" : job.source) as TwilioMessageChannel,
+      channel,
       to: job.recipientAddress,
       from: job.senderAddress,
       body,
+      ...(channel === "sms" ? { validityPeriod } : {}),
       statusCallback: `${baseUrl}/api/twilio/status?jobId=${encodeURIComponent(job.id)}&fallback=1#rc=3&rp=5xx,ct,rt`,
     });
+
+    try {
+      await recordActivityEvent({
+        eventKey: `job:${job.id}:fallback:${acceptedSid}:accepted`,
+        userId: job.userId,
+        channel: job.source === "voice" ? "sms" : job.source,
+        kind: "generation.delivery",
+        direction: "outbound",
+        address: job.recipientAddress,
+        messageSid: acceptedSid,
+        jobId: job.id,
+        storyId: job.storyId,
+        content: body,
+        status: "accepted",
+        details: {
+          fallback: true,
+          hadMedia: false,
+          attemptCount: job.attemptCount,
+          fallbackAttempt: job.deliveryFallbackAttempts,
+        },
+      });
+    } catch (error) {
+      console.error("Text fallback history failed", {
+        jobId: job.id,
+        error: error instanceof Error ? error.name : "unknown",
+      });
+    }
 
     await db
       .update(generationJobs)

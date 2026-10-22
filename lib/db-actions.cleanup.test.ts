@@ -11,7 +11,10 @@ vi.mock("@/lib/db", () => ({
   db: { delete: h.delete },
 }));
 
-import { deleteBlankContinuationPage } from "@/lib/db-actions";
+import {
+  deleteBlankContinuationPage,
+  deleteBlankFailedGenerationStory,
+} from "@/lib/db-actions";
 
 const pageId = "11111111-1111-4111-8111-111111111111";
 const storyId = "22222222-2222-4222-8222-222222222222";
@@ -49,5 +52,34 @@ describe("failed continuation page cleanup", () => {
     const deleted = await deleteBlankContinuationPage({ pageId, storyId, userId });
 
     expect(deleted).toBe(false);
+  });
+});
+
+describe("failed first-page story cleanup", () => {
+  it("deletes only a blank channel story for the terminal failed job and owner", async () => {
+    h.returning.mockResolvedValue([{ id: storyId }]);
+
+    const deleted = await deleteBlankFailedGenerationStory({ jobId: storyId, userId });
+
+    expect(deleted).toBe(true);
+    const where = dialect.sqlToQuery(h.where.mock.calls[0][0]);
+    const sql = where.sql.toLowerCase();
+    expect(sql).toContain('"stories"."id" =');
+    expect(sql).toContain('"stories"."user_id" =');
+    expect(sql).toContain('"stories"."source" in');
+    expect(sql).toContain('"generation_jobs"."status" =');
+    expect(sql).toContain('"generation_jobs"."story_id" is null');
+    expect(sql).toContain('"generation_jobs"."target_story_id" is null');
+    expect(sql).toContain('"generation_jobs"."image_url" is null');
+    expect(sql).toContain('"generation_jobs"."delivery_sid" is null');
+    expect(sql).toContain('"pages"."generated_image_url" is not null');
+    expect(where.params).toEqual(expect.arrayContaining([storyId, userId, "failed"]));
+  });
+
+  it("leaves an absent, active, or generated story untouched", async () => {
+    h.returning.mockResolvedValue([]);
+
+    await expect(deleteBlankFailedGenerationStory({ jobId: storyId, userId }))
+      .resolves.toBe(false);
   });
 });

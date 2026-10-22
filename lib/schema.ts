@@ -252,33 +252,104 @@ export const generationJobs = pgTable(
       job.status,
       job.leaseExpiresAt,
     ),
+    index("generation_jobs_user_created_idx").on(job.userId, job.createdAt),
+    index("generation_jobs_source_created_idx").on(job.source, job.createdAt),
+    index("generation_jobs_recipient_created_idx").on(job.recipientAddress, job.createdAt),
   ],
 );
 
-export const twilioInboundMessages = pgTable("twilio_inbound_messages", {
-  messageSid: text("message_sid").primaryKey(),
-  channel: text("channel").notNull(),
-  fromAddress: text("from_address").notNull(),
-  toAddress: text("to_address").notNull(),
-  body: text("body").default("").notNull(),
-  mediaUrls: jsonb("media_urls").$type<string[]>().default([]).notNull(),
-  mediaContentTypes: jsonb("media_content_types")
-    .$type<string[]>()
-    .default([])
-    .notNull(),
-  status: text("status").default("pending").notNull(),
-  replyBody: text("reply_body"),
-  outboundSid: text("outbound_sid"),
-  submission: jsonb("submission").$type<{
-    prompt: string;
-    style: string;
-    characterImageUrls: string[];
-    targetStoryId?: string;
-  } | null>(),
-  responseTwiml: text("response_twiml"),
-  attemptCount: integer("attempt_count").default(0).notNull(),
-  leaseExpiresAt: timestamp("lease_expires_at"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
+export const twilioInboundMessages = pgTable(
+  "twilio_inbound_messages",
+  {
+    messageSid: text("message_sid").primaryKey(),
+    channel: text("channel").notNull(),
+    fromAddress: text("from_address").notNull(),
+    toAddress: text("to_address").notNull(),
+    body: text("body").default("").notNull(),
+    mediaUrls: jsonb("media_urls").$type<string[]>().default([]).notNull(),
+    mediaContentTypes: jsonb("media_content_types")
+      .$type<string[]>()
+      .default([])
+      .notNull(),
+    status: text("status").default("pending").notNull(),
+    replyBody: text("reply_body"),
+    outboundSid: text("outbound_sid"),
+    submission: jsonb("submission").$type<{
+      prompt: string;
+      style: string;
+      characterImageUrls: string[];
+      targetStoryId?: string;
+    } | null>(),
+    responseTwiml: text("response_twiml"),
+    attemptCount: integer("attempt_count").default(0).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (message) => [
+    index("twilio_inbound_channel_created_idx").on(message.channel, message.createdAt),
+    index("twilio_inbound_from_created_idx").on(message.fromAddress, message.createdAt),
+  ],
+);
+
+/** Append-only operational history. The Container Apps image never owns this data. */
+export const activityEvents = pgTable(
+  "activity_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventKey: text("event_key").notNull(),
+    occurredAt: timestamp("occurred_at").defaultNow().notNull(),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    channel: text("channel").notNull(),
+    kind: text("kind").notNull(),
+    direction: text("direction"),
+    address: text("address"),
+    callSid: text("call_sid"),
+    messageSid: text("message_sid"),
+    jobId: uuid("job_id"),
+    storyId: uuid("story_id"),
+    content: text("content"),
+    status: text("status"),
+    details: jsonb("details").$type<Record<string, unknown>>(),
+  },
+  (event) => [
+    uniqueIndex("activity_events_event_key_idx").on(event.eventKey),
+    index("activity_events_occurred_at_idx").on(event.occurredAt),
+    index("activity_events_user_time_idx").on(event.userId, event.occurredAt),
+    index("activity_events_address_time_idx").on(event.address, event.occurredAt),
+    index("activity_events_call_time_idx").on(event.callSid, event.occurredAt),
+    index("activity_events_job_time_idx").on(event.jobId, event.occurredAt),
+  ],
+);
+
+export const voiceCalls = pgTable(
+  "voice_calls",
+  {
+    callSid: text("call_sid").primaryKey(),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    fromAddress: text("from_address").notNull(),
+    toAddress: text("to_address").notNull(),
+    status: text("status").default("active").notNull(),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    endedAt: timestamp("ended_at"),
+    durationSeconds: integer("duration_seconds"),
+    turnCount: integer("turn_count").default(0).notNull(),
+    errorCode: text("error_code"),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (call) => [
+    index("voice_calls_started_at_idx").on(call.startedAt),
+    index("voice_calls_from_started_idx").on(call.fromAddress, call.startedAt),
+    index("voice_calls_user_started_idx").on(call.userId, call.startedAt),
+    index("voice_calls_status_idx").on(call.status),
+  ],
+);
+
+export const adminLoginAttempts = pgTable("admin_login_attempts", {
+  key: text("key").primaryKey(),
+  windowStartedAt: timestamp("window_started_at").defaultNow().notNull(),
+  failedCount: integer("failed_count").default(0).notNull(),
+  blockedUntil: timestamp("blocked_until"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
@@ -313,3 +384,6 @@ export type Conversation = typeof conversations.$inferSelect;
 export type NewConversation = typeof conversations.$inferInsert;
 export type ChannelIdentity = typeof channelIdentities.$inferSelect;
 export type GenerationJob = typeof generationJobs.$inferSelect;
+export type ActivityEvent = typeof activityEvents.$inferSelect;
+export type NewActivityEvent = typeof activityEvents.$inferInsert;
+export type VoiceCall = typeof voiceCalls.$inferSelect;

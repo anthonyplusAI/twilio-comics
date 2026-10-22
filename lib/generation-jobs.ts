@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { recordActivityEvent } from "@/lib/activity-events";
 import { db } from "@/lib/db";
 import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { sendGenerationJob } from "@/lib/generation-queue";
-import { reserveFreeTierQuota } from "@/lib/quota";
+import { releaseFreeTierQuota, reserveFreeTierQuota } from "@/lib/quota";
+import { DAILY_GENERATION_CAPACITY_REASON } from "@/lib/generation-policy";
+import { reserveDailyGenerationCapacity } from "@/lib/generation-capacity";
 import type { MessagingChannel } from "@/lib/channel-identities";
 
 export interface SubmitGenerationJobInput {
@@ -32,6 +35,37 @@ function assertProcessingLeaseUpdated(rows: { id: string }[], jobId: string): vo
 
 function rowsOf<T>(result: unknown): T[] {
   return (result as { rows?: T[] }).rows ?? (result as T[]);
+}
+
+async function logGenerationEvent(
+  job: GenerationJob,
+  kind: string,
+  suffix: string,
+  status: string,
+  details: Record<string, unknown>,
+  content?: string,
+): Promise<void> {
+  try {
+    await recordActivityEvent({
+      eventKey: `job:${job.id}:${suffix}`,
+      userId: job.userId,
+      channel: job.source,
+      kind,
+      direction: "internal",
+      address: job.recipientAddress,
+      jobId: job.id,
+      storyId: job.targetStoryId || null,
+      content,
+      status,
+      details,
+    });
+  } catch (error) {
+    console.error("Generation history failed", {
+      jobId: job.id,
+      kind,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 export async function getGenerationJob(
@@ -65,6 +99,7 @@ export async function submitGenerationJob(
       characterImageUrls: input.characterImageUrls || [],
       targetStoryId: input.targetStoryId || null,
       quotaClaimKey,
+      status: "admitting",
       leaseOwner: publisherId,
       leaseExpiresAt: sql`NOW() + INTERVAL '2 minutes'`,
     })
@@ -73,6 +108,12 @@ export async function submitGenerationJob(
 
   let job = inserted || (await getGenerationJobByIdempotencyKey(input.idempotencyKey));
   if (!job) throw new Error("Failed to create generation job");
+
+  await logGenerationEvent(job, "generation.requested", "requested", "received", {
+    style: job.style,
+    referenceCount: job.characterImageUrls.length,
+    continuation: Boolean(job.targetStoryId),
+  }, job.prompt);
 
   if (["queued", "processing", "succeeded"].includes(job.status)) {
     return { job, accepted: true, remaining: 0 };
@@ -83,7 +124,7 @@ export async function submitGenerationJob(
   if (job.status === "failed") {
     return { job, accepted: false, remaining: 0 };
   }
-  if (!inserted && job.status === "pending") {
+  if (!inserted && ["admitting", "pending"].includes(job.status)) {
     const [claimed] = await db
       .update(generationJobs)
       .set({
@@ -94,7 +135,7 @@ export async function submitGenerationJob(
       .where(
         and(
           eq(generationJobs.id, job.id),
-          eq(generationJobs.status, "pending"),
+          eq(generationJobs.status, job.status),
           or(
             isNull(generationJobs.leaseExpiresAt),
             lt(generationJobs.leaseExpiresAt, new Date()),
@@ -107,7 +148,7 @@ export async function submitGenerationJob(
       if (!current) throw new Error("Generation job disappeared during publish");
       return {
         job: current,
-        accepted: current.status !== "quota_rejected" && current.status !== "failed",
+        accepted: ["queued", "processing", "succeeded"].includes(current.status),
         remaining: 0,
       };
     }
@@ -119,7 +160,7 @@ export async function submitGenerationJob(
       .update(generationJobs)
       .set({
         quotaClaimKey: `generation-job:${job.id}:${randomUUID()}`,
-        status: "pending",
+        status: "admitting",
         leaseOwner: publisherId,
         leaseExpiresAt: sql`NOW() + INTERVAL '2 minutes'`,
         lastError: null,
@@ -140,33 +181,69 @@ export async function submitGenerationJob(
       }
       return {
         job: current,
-        accepted: current.status !== "quota_rejected",
+        accepted: ["queued", "processing", "succeeded"].includes(current.status),
         remaining: 0,
       };
     }
     job = retryable;
   }
 
-  const reservation = await reserveFreeTierQuota(job.userId, job.quotaClaimKey);
-  if (!reservation.allowed) {
-    const [rejected] = await db
-      .update(generationJobs)
-      .set({
-        status: "quota_rejected",
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
+  // The user reservation, app-wide admission, and terminal rejection share a
+  // transaction. A capacity denial releases the user's weekly slot before the
+  // transaction commits. Any database error rolls all three changes back.
+  const admission = await db.transaction(async (tx) => {
+    const reservation = await reserveFreeTierQuota(job.userId, job.quotaClaimKey, tx);
+    let rejectionReason: "free_tier_quota" | typeof DAILY_GENERATION_CAPACITY_REASON | null = null;
+    if (!reservation.allowed) {
+      rejectionReason = "free_tier_quota";
+    } else if (!(await reserveDailyGenerationCapacity(job.id, tx))) {
+      if (reservation.status !== "reserved") {
+        throw new Error("Cannot release a consumed quota claim after capacity denial");
+      }
+      await releaseFreeTierQuota(job.quotaClaimKey, tx);
+      rejectionReason = DAILY_GENERATION_CAPACITY_REASON;
+    }
+    if (rejectionReason) {
+      const [rejected] = await tx
+        .update(generationJobs)
+        .set({
+          status: "quota_rejected",
+          lastError: rejectionReason === DAILY_GENERATION_CAPACITY_REASON
+            ? DAILY_GENERATION_CAPACITY_REASON : null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: new Date(),
+        })
+        .where(and(
           eq(generationJobs.id, job.id),
-          eq(generationJobs.status, "pending"),
+          eq(generationJobs.status, job.status),
           eq(generationJobs.leaseOwner, publisherId),
-        ),
-      )
+        ))
+        .returning();
+      if (!rejected) throw new Error("Generation job lease changed during admission");
+      return { accepted: false as const, job: rejected, remaining: reservation.remaining, rejectionReason };
+    }
+    const [ready] = await tx
+      .update(generationJobs)
+      .set({ status: "pending", updatedAt: new Date() })
+      .where(and(
+        eq(generationJobs.id, job.id),
+        eq(generationJobs.status, job.status),
+        eq(generationJobs.leaseOwner, publisherId),
+      ))
       .returning();
-    return { job: rejected || job, accepted: false, remaining: 0 };
+    if (!ready) throw new Error("Generation job lease changed during admission");
+    return { accepted: true as const, job: ready, remaining: reservation.remaining };
+  });
+  if (!admission.accepted) {
+    await logGenerationEvent(admission.job, "generation.rejected", "rejected", "quota_rejected", {
+      reason: admission.rejectionReason,
+      remaining: admission.remaining,
+    });
+    return { job: admission.job, accepted: false, remaining: admission.remaining };
   }
+  const reservation = admission;
+  job = admission.job;
 
   try {
     await sendGenerationJob(job.id);
@@ -198,6 +275,9 @@ export async function submitGenerationJob(
     }
     throw error;
   }
+  await logGenerationEvent(job, "generation.queued", "queued", "queued", {
+    queueAcceptedAt: new Date().toISOString(),
+  });
   let queued: GenerationJob | undefined;
   try {
     [queued] = await db
@@ -251,6 +331,13 @@ export async function recoverUnpublishedGenerationJobs(limit = 50): Promise<numb
     .where(
       or(
         and(
+          eq(generationJobs.status, "admitting"),
+          or(
+            isNull(generationJobs.leaseExpiresAt),
+            lt(generationJobs.leaseExpiresAt, now),
+          ),
+        ),
+        and(
           eq(generationJobs.status, "pending"),
           or(
             isNull(generationJobs.leaseExpiresAt),
@@ -274,7 +361,7 @@ export async function recoverUnpublishedGenerationJobs(limit = 50): Promise<numb
   let recovered = 0;
   for (const candidate of candidates) {
     try {
-      if (candidate.status === "pending" || candidate.status === "enqueue_failed") {
+      if (["admitting", "pending", "enqueue_failed"].includes(candidate.status)) {
         const retry = await submitGenerationJob({
           idempotencyKey: candidate.idempotencyKey,
           userId: candidate.userId,
@@ -336,10 +423,14 @@ export async function reconcileTerminalGenerationConversations(limit = 50): Prom
     SET state = CASE
           WHEN ready.status = 'succeeded' AND ready.story_id IS NOT NULL
             THEN 'done'
+          WHEN ready.status = 'failed' AND ready.story_id IS NOT NULL
+            THEN 'done'
           ELSE 'confirming'
         END,
         active_story_id = CASE
           WHEN ready.status = 'succeeded' AND ready.story_id IS NOT NULL
+            THEN ready.story_id
+          WHEN ready.status = 'failed' AND ready.story_id IS NOT NULL
             THEN ready.story_id
           ELSE c.active_story_id
         END,
@@ -444,17 +535,26 @@ export async function checkpointGenerationOutput(
   assertProcessingLeaseUpdated(rows, jobId);
 }
 
-export async function markGenerationJobFailed(
+async function transitionGenerationJobFailed(
   jobId: string,
   workerId: string,
   error: string,
+  savedStoryId?: string,
 ): Promise<void> {
-  // A single PostgreSQL statement makes the terminal job transition and free
-  // quota release indivisible. A stale owner updates no job and no claim.
+  // A saved comic spends the weekly credit even when delivery is suppressed.
+  // The terminal transition, claim update, and any quota refund are atomic.
+  // A stale owner updates no job and no claim.
+  const savedStoryAssignment = savedStoryId
+    ? sql`story_id = COALESCE(j.story_id, ${savedStoryId}::uuid),`
+    : sql``;
+  const matchingStory = savedStoryId
+    ? sql`AND (j.story_id IS NULL OR j.story_id = ${savedStoryId}::uuid)`
+    : sql``;
   const result = await db.execute(sql`
     WITH failed_job AS (
       UPDATE generation_jobs AS j
       SET status = 'failed',
+          ${savedStoryAssignment}
           last_error = ${error.slice(0, 1000)},
           lease_owner = NULL,
           lease_expires_at = NULL,
@@ -464,7 +564,17 @@ export async function markGenerationJobFailed(
         AND j.status = 'processing'
         AND j.lease_owner = ${workerId}
         AND j.delivery_sid IS NULL
-      RETURNING j.id, j.quota_claim_key
+        ${matchingStory}
+      RETURNING j.id, j.quota_claim_key, j.story_id
+    ),
+    consumed_claim AS (
+      UPDATE free_tier_quota_claims AS claim
+      SET status = 'consumed', updated_at = NOW()
+      FROM failed_job
+      WHERE claim.claim_key = failed_job.quota_claim_key
+        AND claim.status = 'reserved'
+        AND failed_job.story_id IS NOT NULL
+      RETURNING claim.claim_key
     ),
     released_claim AS (
       UPDATE free_tier_quota_claims AS claim
@@ -472,6 +582,7 @@ export async function markGenerationJobFailed(
       FROM failed_job
       WHERE claim.claim_key = failed_job.quota_claim_key
         AND claim.status = 'reserved'
+        AND failed_job.story_id IS NULL
       RETURNING claim.subject, claim.window_started_at
     ),
     decremented_quota AS (
@@ -482,10 +593,31 @@ export async function markGenerationJobFailed(
         AND quota.window_started_at = released_claim.window_started_at
       RETURNING quota.subject
     )
-    SELECT failed_job.id, (SELECT COUNT(*) FROM decremented_quota) AS quota_rows
+    SELECT failed_job.id,
+      (SELECT COUNT(*) FROM consumed_claim) AS consumed_claims,
+      (SELECT COUNT(*) FROM decremented_quota) AS quota_rows
     FROM failed_job
   `);
   assertProcessingLeaseUpdated(rowsOf<{ id: string }>(result), jobId);
+}
+
+/** Terminal failure before a comic exists refunds quota; a saved result does not. */
+export async function markGenerationJobFailed(
+  jobId: string,
+  workerId: string,
+  error: string,
+): Promise<void> {
+  await transitionGenerationJobFailed(jobId, workerId, error);
+}
+
+/** Preserve the saved comic and its weekly credit when result delivery stops. */
+export async function markGenerationJobSuppressed(
+  jobId: string,
+  workerId: string,
+  error: string,
+  savedStoryId: string,
+): Promise<void> {
+  await transitionGenerationJobFailed(jobId, workerId, error, savedStoryId);
 }
 
 export async function returnGenerationJobToQueue(

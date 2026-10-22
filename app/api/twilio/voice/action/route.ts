@@ -1,6 +1,8 @@
 import { type NextRequest } from "next/server";
+import { recordVoiceCallEnd, recordVoiceTurn } from "@/lib/activity-events";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { validateTwilioSignature } from "@/lib/twilio";
+import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
 
 export const runtime = "nodejs";
 
@@ -22,17 +24,31 @@ function twiml(message?: string): Response {
   });
 }
 
-function handoffResult(raw: string | undefined): string | undefined {
-  if (!raw || raw.length > 256) return undefined;
+const CALL_SID = /^CA[0-9a-f]{32}$/i;
+
+function handoff(raw: string | undefined): { result?: string; turn?: number } {
+  if (!raw || raw.length > 256) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && "result" in parsed) {
-      return typeof parsed.result === "string" ? parsed.result : undefined;
+      const data = parsed as { result?: unknown; turn?: unknown };
+      return {
+        result: typeof data.result === "string" ? data.result : undefined,
+        turn: typeof data.turn === "number" && Number.isInteger(data.turn) && data.turn > 0 && data.turn <= 21
+          ? data.turn
+          : undefined,
+      };
     }
   } catch {
     // A dropped socket has no application handoff payload.
   }
-  return undefined;
+  return {};
+}
+
+function durationSeconds(value: string | undefined): number | null {
+  if (!value || !/^\d{1,6}$/.test(value)) return null;
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds <= 86_400 ? seconds : null;
 }
 
 function retryInstruction(): string {
@@ -60,10 +76,9 @@ export async function POST(request: NextRequest): Promise<Response> {
     return new Response("Voice service unavailable", { status: 503 });
   }
 
-  const params: Record<string, string> = {};
-  new URLSearchParams(await request.text()).forEach((value, key) => {
-    params[key] = value;
-  });
+  const form = await readTwilioWebhookForm(request);
+  if (!form.ok) return form.response;
+  const { params } = form;
   const signature = request.headers.get("x-twilio-signature");
   const signedUrl = `${publicBaseUrl}/api/twilio/voice/action`;
   try {
@@ -75,24 +90,82 @@ export async function POST(request: NextRequest): Promise<Response> {
     return new Response("Voice service unavailable", { status: 503 });
   }
 
-  if (params.CallStatus === "completed") return twiml();
+  const handoffData = handoff(params.HandoffData);
+  const callDuration = durationSeconds(params.CallDuration);
+  const relayDuration = durationSeconds(params.SessionDuration);
+  const duration = callDuration ?? relayDuration;
+  const knownResults = new Set([
+    "queued", "quota_rejected", "capacity_rejected", "checking", "invalid_setup", "stale", "service_error", "limit_reached",
+  ]);
+  const result = handoffData.result && knownResults.has(handoffData.result)
+    ? handoffData.result
+    : params.CallStatus === "completed" ? "completed" : "disconnected";
 
   const retry = retryInstruction();
-
-  switch (handoffResult(params.HandoffData)) {
+  let spoken: string | undefined;
+  switch (params.CallStatus === "completed" ? "completed" : result) {
     case "queued":
-      return twiml("Your comic is being created. I'll text your comic to this number when it's ready. Goodbye.");
+      spoken = "Your comic is being created. I'll text your comic to this number when it's ready. Goodbye.";
+      break;
     case "quota_rejected":
-      return twiml("You've reached the free comic limit for this week. Please try again later. Goodbye.");
+      spoken = "You've reached the free comic limit for this week. Please try again later. Goodbye.";
+      break;
+    case "capacity_rejected":
+      spoken = "Today's comic studio is full. Your idea is saved. Please call again tomorrow. Goodbye.";
+      break;
     case "checking":
-      return twiml("I'm checking your comic request. If it started, I'll text the result when it's ready. Please call again for status if nothing arrives.");
+      spoken = "I'm checking your comic request. If it started, I'll text the result when it's ready. Please call again for status if nothing arrives.";
+      break;
     case "invalid_setup":
-      return twiml("I couldn't set up this call. Please call again from a number that can receive text messages.");
+      spoken = "I couldn't set up this call. Please call again from a number that can receive text messages.";
+      break;
     case "stale":
-      return twiml("Another call changed this comic conversation. Please call again from this number.");
+      spoken = "Another call changed this comic conversation. Please call again from this number.";
+      break;
     case "service_error":
-      return twiml(`I couldn't connect to your comic conversation right now. Please ${retry}.`);
+      spoken = `I couldn't connect to your comic conversation right now. Please ${retry}.`;
+      break;
+    case "limit_reached":
+      spoken = "This call has reached its time limit. Your saved idea is still here. Please call again to continue. Goodbye.";
+      break;
+    case "completed":
+      break;
     default:
-      return twiml(`The call connection was lost. If you approved a comic, we'll text it when it's ready. Otherwise, please ${retry}.`);
+      spoken = `The call connection was lost. If you approved a comic, we'll text it when it's ready. Otherwise, please ${retry}.`;
   }
+
+  if (CALL_SID.test(params.CallSid || "") && params.From && params.To) {
+    try {
+      await recordVoiceCallEnd({
+        callSid: params.CallSid,
+        fromAddress: params.From,
+        toAddress: params.To,
+        status: result,
+        durationSeconds: duration,
+        durationSource: callDuration !== null ? "call"
+          : relayDuration !== null ? "conversation_relay" : "measured",
+        errorCode: /^\d{1,8}$/.test(params.ErrorCode || "") ? params.ErrorCode : null,
+        sessionStatus: params.SessionStatus?.slice(0, 32) || null,
+        callStatus: params.CallStatus?.slice(0, 32) || null,
+      });
+    } catch (error) {
+      console.error("Voice action summary failed", error instanceof Error ? error.name : "unknown");
+    }
+    if (spoken) {
+      try {
+        await recordVoiceTurn({
+          callSid: params.CallSid,
+          address: params.From,
+          sequence: handoffData.turn || 0,
+          role: "agent",
+          phase: "action",
+          content: spoken,
+        });
+      } catch (error) {
+        console.error("Voice action transcript failed", error instanceof Error ? error.name : "unknown");
+      }
+    }
+  }
+
+  return twiml(spoken);
 }

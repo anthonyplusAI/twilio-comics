@@ -38,6 +38,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - name: Azure deployment script contract tests
+        run: |
+          for test_file in scripts/*.test.sh; do
+            printf 'Running %s\n' "$test_file"
+            bash "$test_file"
+          done
 
   build:
     name: Production build
@@ -55,6 +61,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: docker build --tag twilio-comics:test .
+      - run: docker build --file Dockerfile.migrate --tag twilio-comics-migrate:test .
 
   security:
     name: Security checks

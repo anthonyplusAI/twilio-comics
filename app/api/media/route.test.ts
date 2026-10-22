@@ -57,7 +57,7 @@ describe("signed media endpoint", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("image/jpeg");
     expect(response.headers.get("content-length")).toBe("1234");
-    expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await response.text()).toBe("");
     expect(h.getBlockBlobClient).toHaveBeenCalledWith("preview/page-1.jpg");
@@ -78,6 +78,7 @@ describe("signed media endpoint", () => {
     ]) {
       const response = await HEAD(new NextRequest(url, { method: "HEAD" }));
       expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
       expect(await response.text()).toBe("");
     }
     expect(h.getBlockBlobClient).not.toHaveBeenCalled();
@@ -91,6 +92,7 @@ describe("signed media endpoint", () => {
     const response = await HEAD(new NextRequest(getBlobPublicUrl("missing.jpg"), { method: "HEAD" }));
 
     expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
     expect(await response.text()).toBe("");
     expect(h.downloadToBuffer).not.toHaveBeenCalled();
   });
@@ -103,6 +105,7 @@ describe("signed media endpoint", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("image/jpeg");
+    expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
     expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("test image"));
     expect(h.downloadToBuffer).toHaveBeenCalledOnce();
   });

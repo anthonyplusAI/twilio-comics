@@ -7,11 +7,13 @@ const h = vi.hoisted(() => ({
   createComicStory: vi.fn(),
   createComicContinuationPage: vi.fn(),
   cleanupFailedContinuationPage: vi.fn(),
+  deleteBlankFailedGenerationStory: vi.fn(),
   checkpointGenerationDelivery: vi.fn(),
   checkpointGenerationOutput: vi.fn(),
   claimGenerationJob: vi.fn(),
   getGenerationJob: vi.fn(),
   markGenerationJobFailed: vi.fn(),
+  markGenerationJobSuppressed: vi.fn(),
   markGenerationJobSucceeded: vi.fn(),
   returnGenerationJobToQueue: vi.fn(),
   consumeFreeTierQuota: vi.fn(),
@@ -22,6 +24,7 @@ const h = vi.hoisted(() => ({
   completeConversationForGeneration: vi.fn(),
   failConversationForGeneration: vi.fn(),
   createMmsPreview: vi.fn(),
+  recordActivityEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/blob-storage", () => ({
@@ -55,6 +58,7 @@ vi.mock("@/lib/generation-jobs", () => ({
   claimGenerationJob: h.claimGenerationJob,
   getGenerationJob: h.getGenerationJob,
   markGenerationJobFailed: h.markGenerationJobFailed,
+  markGenerationJobSuppressed: h.markGenerationJobSuppressed,
   markGenerationJobSucceeded: h.markGenerationJobSucceeded,
   returnGenerationJobToQueue: h.returnGenerationJobToQueue,
 }));
@@ -70,8 +74,10 @@ vi.mock("@/lib/twilio", () => ({
 vi.mock("@/lib/db-actions", () => ({
   completeConversationForGeneration: h.completeConversationForGeneration,
   failConversationForGeneration: h.failConversationForGeneration,
+  deleteBlankFailedGenerationStory: h.deleteBlankFailedGenerationStory,
 }));
 vi.mock("@/lib/mms-preview", () => ({ createMmsPreview: h.createMmsPreview }));
+vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
 import { ComicServiceError } from "@/lib/comic-service";
 import { GenerationJobLeaseLostError } from "@/lib/generation-jobs";
@@ -91,6 +97,9 @@ const job = {
   quotaClaimKey: "generation-job:one",
   deliverySid: null,
   attemptCount: 1,
+  createdAt: new Date(Date.now() - 60_000),
+  queuedAt: new Date(Date.now() - 55_000),
+  updatedAt: new Date(Date.now() - 50_000),
 };
 
 beforeEach(() => {
@@ -114,9 +123,298 @@ beforeEach(() => {
   h.failConversationForGeneration.mockResolvedValue(true);
   h.blobExists.mockResolvedValue(false);
   h.getBlobPublicUrl.mockReturnValue("https://comics.example.com/api/media?key=ref");
+  h.recordActivityEvent.mockResolvedValue(undefined);
 });
 
 describe("processGenerationJob", () => {
+  it("releases quota when a delivery window expires before any comic exists", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      storyId: null,
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Result delivery expired after 24 hours",
+    );
+    expect(h.markGenerationJobSuppressed).not.toHaveBeenCalled();
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ id: job.id }));
+  });
+
+  it("expires an undelivered job after 24 hours without generating or texting an old number", async () => {
+    const expired = {
+      ...job,
+      createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      storyId: "story-already-generated",
+      imageUrl: "https://comics.example.com/api/media?key=page1",
+    };
+    h.claimGenerationJob.mockResolvedValue(expired);
+
+    await processGenerationJob(job.id);
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.createComicContinuationPage).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+      job.id,
+      expect.any(String),
+      "Result delivery expired after 24 hours",
+      "story-already-generated",
+    );
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:delivery:expired`,
+      kind: "generation.delivery",
+      status: "suppressed",
+      storyId: "story-already-generated",
+      details: expect.objectContaining({ reason: "delivery_window_expired" }),
+    }));
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
+    expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(expired, "story-already-generated");
+  });
+
+  it("preserves a completed comic if generation crosses the 24-hour delivery cutoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt });
+      h.createComicStory.mockImplementation(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 + 1000));
+        return {
+          story: { id: "story-1", slug: "mars-dragon", title: "Mars Dragon" },
+          page: { id: job.id, pageNumber: 1 },
+          imageUrl: "https://comics.example.com/api/media?key=page1",
+        };
+      });
+
+      await processGenerationJob(job.id);
+
+      expect(h.checkpointGenerationOutput).toHaveBeenCalledWith(job.id, expect.any(String), {
+        storyId: "story-1",
+        imageUrl: "https://comics.example.com/api/media?key=page1",
+        deliveryHadMedia: false,
+      });
+      expect(h.sendChannelMessage).not.toHaveBeenCalled();
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "Result delivery expired after 24 hours", "story-1",
+      );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+      expect(h.markGenerationJobSucceeded).not.toHaveBeenCalled();
+      expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+      expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ id: job.id }), "story-1",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not send a failure notice or reactivate a draft after the delivery window", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt, attemptCount: 3 });
+      h.createComicStory.mockImplementation(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 + 1000));
+        throw new Error("Image service failed");
+      });
+
+      await processGenerationJob(job.id);
+
+      expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+      expect(h.sendChannelMessage).not.toHaveBeenCalled();
+      expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry rejected MMS as SMS after the delivery deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt });
+      h.sendChannelMessage.mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 + 1000));
+        throw Object.assign(new Error("Invalid media URL"), { code: 21620 });
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await processGenerationJob(job.id);
+      } finally {
+        warn.mockRestore();
+      }
+
+      expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+        job.id,
+        expect.any(String),
+        "Result delivery expired after 24 hours",
+        "story-1",
+      );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+      expect(h.markGenerationJobSucceeded).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconciles an accepted result even after 24 hours without texting twice", async () => {
+    const delivered = {
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      storyId: "story-1",
+      imageUrl: "https://comics.example.com/api/media?key=page1",
+      deliverySid: "SMalreadyaccepted",
+    };
+    h.claimGenerationJob.mockResolvedValue(delivered);
+
+    await processGenerationJob(job.id);
+
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(h.markGenerationJobSucceeded).toHaveBeenCalledWith(
+      job.id,
+      expect.any(String),
+      { storyId: delivered.storyId, imageUrl: delivered.imageUrl, deliverySid: delivered.deliverySid },
+    );
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+  });
+
+  it("bounds Twilio queue time to the remaining job lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt });
+
+      await processGenerationJob(job.id);
+
+      expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+        validityPeriod: 20,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("suppresses a result when too little queue time remains", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 15_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt });
+
+      await processGenerationJob(job.id);
+
+      expect(h.sendChannelMessage).not.toHaveBeenCalled();
+      expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+        job.id,
+        expect.any(String),
+        "Result delivery expired after 24 hours",
+      );
+      expect(h.markGenerationJobSuppressed).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records processing attempt, accepted delivery, and completed comic details", async () => {
+    await processGenerationJob(job.id);
+
+    expect(h.sendChannelMessage.mock.calls[0][0].body).toContain("CONTINUE within 14 days");
+
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:attempt:1:started`,
+      kind: "generation.started",
+      userId: "user-1",
+      details: expect.objectContaining({ attemptCount: 1 }),
+    }));
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:delivery:SMresult`,
+      kind: "generation.delivery",
+      messageSid: "SMresult",
+      status: "accepted",
+      details: expect.objectContaining({ hadMedia: true, attemptCount: 1 }),
+    }));
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:succeeded`,
+      kind: "generation.succeeded",
+      storyId: "story-1",
+      status: "succeeded",
+      details: expect.objectContaining({
+        attemptCount: 1,
+        deliverySid: "SMresult",
+        totalDurationMs: expect.any(Number),
+      }),
+    }));
+  });
+
+  it("records a terminal image failure with attempt and error category", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError("api_error", "OpenAI unavailable", 503));
+
+    await processGenerationJob(job.id);
+
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:failed`,
+      kind: "generation.failed",
+      status: "failed",
+      details: expect.objectContaining({
+        attemptCount: 3,
+        errorType: "api_error",
+        httpStatus: 503,
+      }),
+    }));
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining("couldn't create your comic"),
+      validityPeriod: 36000,
+      statusCallback: `https://comics.example.com/api/twilio/status?jobId=${job.id}&failure=1#rc=3&rp=5xx,ct,rt`,
+    }));
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SMresult:outbound",
+      kind: "message.outbound",
+      channel: "sms",
+      direction: "outbound",
+      messageSid: "SMresult",
+      jobId: job.id,
+      status: "accepted",
+      details: expect.objectContaining({ purpose: "generation_failure_notice" }),
+    }));
+  });
+
+  it("records a transient retry without exposing the raw error message", async () => {
+    h.createComicStory.mockRejectedValue(new Error("provider request included secret detail"));
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow();
+
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${job.id}:attempt:1:retry`,
+      kind: "generation.retry",
+      details: expect.objectContaining({ attemptCount: 1, errorType: "Error" }),
+    }));
+    expect(JSON.stringify(h.recordActivityEvent.mock.calls)).not.toContain("provider request included secret detail");
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
+  });
+
+  it("finishes a delivered comic when optional analytics fails", async () => {
+    h.recordActivityEvent.mockRejectedValue(new Error("analytics unavailable"));
+
+    await expect(processGenerationJob(job.id)).resolves.toBeUndefined();
+
+    expect(h.recordActivityEvent).toHaveBeenCalled();
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+  });
+
   it("creates and delivers the first page with a tracked MMS preview", async () => {
     await processGenerationJob(job.id);
 
@@ -132,6 +430,7 @@ describe("processGenerationJob", () => {
     expect(h.sendChannelMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         mediaUrl: "https://comics.example.com/api/media?key=preview",
+        validityPeriod: 36000,
         statusCallback: `https://comics.example.com/api/twilio/status?jobId=${job.id}#rc=3&rp=5xx,ct,rt`,
       }),
     );
@@ -167,6 +466,16 @@ describe("processGenerationJob", () => {
     h.claimGenerationJob.mockResolvedValue(null);
     h.getGenerationJob.mockResolvedValue({ ...job, status: "processing" });
     await expect(processGenerationJob(job.id)).resolves.toBeUndefined();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not process a job before its capacity admission commits", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({ ...job, status: "admitting" });
+
+    await expect(processGenerationJob(job.id)).resolves.toBeUndefined();
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -246,6 +555,68 @@ describe("processGenerationJob", () => {
     expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
   });
 
+  it.each(["sms", "voice"])(
+    "suppresses %s result delivery after Twilio reports recipient opt-out",
+    async (source) => {
+      h.claimGenerationJob.mockResolvedValue({ ...job, source, targetStoryId: "story-1" });
+      h.sendChannelMessage.mockRejectedValue(Object.assign(
+        new Error("Recipient opted out"),
+        { code: 21610, status: 400 },
+      ));
+
+      await processGenerationJob(job.id);
+
+      expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+      expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: "sms",
+      }));
+      expect(h.checkpointGenerationOutput).toHaveBeenCalledWith(job.id, expect.any(String), {
+        storyId: "story-1",
+        imageUrl: "https://comics.example.com/api/media?key=page2",
+        deliveryHadMedia: true,
+      });
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "recipient_opted_out", "story-1",
+      );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+      expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+      expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+      expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ source }), "story-1",
+      );
+      expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+        eventKey: `job:${job.id}:delivery:opted-out`,
+        kind: "generation.delivery",
+        status: "suppressed",
+        storyId: "story-1",
+        details: expect.objectContaining({
+          reason: "recipient_opted_out", errorCode: "21610", resultGenerated: true,
+        }),
+      }));
+    },
+  );
+
+  it("keeps the weekly credit when a generated comic cannot be delivered permanently", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.sendChannelMessage.mockRejectedValue(new Error("Twilio permanently unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processGenerationJob(job.id);
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Twilio permanently unavailable", "story-1",
+    );
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), "story-1",
+    );
+  });
+
   it("does not report generation failure after Twilio accepted the result", async () => {
     h.checkpointGenerationDelivery.mockRejectedValue(new Error("DB temporarily unavailable"));
     h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
@@ -255,6 +626,16 @@ describe("processGenerationJob", () => {
     expect(h.releaseFreeTierQuota).not.toHaveBeenCalled();
     expect(h.sendChannelMessage).toHaveBeenCalledOnce();
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+  });
+
+  it("does not claim generation succeeded before the durable job checkpoint", async () => {
+    h.markGenerationJobSucceeded.mockRejectedValue(new Error("DB temporarily unavailable"));
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("DB temporarily unavailable");
+
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(h.returnGenerationJobToQueue).toHaveBeenCalledOnce();
+    expect(h.recordActivityEvent.mock.calls.map(([event]) => event.kind)).not.toContain("generation.succeeded");
   });
 
   it("stops before sending when a newer worker owns the output checkpoint", async () => {
@@ -291,7 +672,57 @@ describe("processGenerationJob", () => {
 
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
     expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+  });
+
+  it("removes only the blank first-page story after terminal generation failure", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError("content_policy", "Rejected"));
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(job.id, expect.any(String), "Rejected");
+    expect(h.deleteBlankFailedGenerationStory).toHaveBeenCalledWith({
+      jobId: job.id,
+      userId: job.userId,
+    });
+    expect(h.markGenerationJobFailed.mock.invocationCallOrder[0])
+      .toBeLessThan(h.deleteBlankFailedGenerationStory.mock.invocationCallOrder[0]);
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+  });
+
+  it("removes a prior blank first-page story when its delivery window expires", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.deleteBlankFailedGenerationStory).toHaveBeenCalledWith({
+      jobId: job.id,
+      userId: job.userId,
+    });
+  });
+
+  it("removes a prior blank continuation page when its delivery window expires", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      targetStoryId: "story-1",
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.cleanupFailedContinuationPage).toHaveBeenCalledWith({
+      userId: job.userId,
+      storyId: "story-1",
+      pageId: job.id,
+    });
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
   });
 
   it("removes only the blank continuation page after terminal generation failure", async () => {

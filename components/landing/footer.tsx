@@ -4,6 +4,7 @@ import { useState } from "react";
 import { OPENAI_LINK } from "@/lib/utils";
 import { MessageSquare } from "lucide-react";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { FeedbackModal } from "@/components/feedback-modal";
 
 function GithubIcon({ className }: { className?: string }) {
@@ -24,6 +25,8 @@ function XIcon({ className }: { className?: string }) {
 
 export function Footer() {
   const [showFeedback, setShowFeedback] = useState(false);
+  const { data: session } = useSession();
+  const canSendFeedback = session?.user?.role === "user" && Boolean(session.user.id);
 
   return (
     <>
@@ -54,15 +57,17 @@ export function Footer() {
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowFeedback(true)}
-            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-border/50 hover:border-border hover:text-white transition-colors cursor-pointer"
-          >
-            <MessageSquare className="w-3 h-3" />
-            Got ideas? Tell us
-          </button>
+          {canSendFeedback && (
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-border/50 hover:border-border hover:text-white transition-colors cursor-pointer"
+            >
+              <MessageSquare className="w-3 h-3" />
+              Got ideas? Tell us
+            </button>
+          )}
           <Link
-            href="https://github.com/anthonyjdella/twilio-comics"
+            href="https://github.com/anthonyplusAI/twilio-comics"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-white transition-colors"
@@ -80,7 +85,9 @@ export function Footer() {
         </div>
       </footer>
 
-      <FeedbackModal isOpen={showFeedback} onClose={() => setShowFeedback(false)} />
+      {canSendFeedback && (
+        <FeedbackModal isOpen={showFeedback} onClose={() => setShowFeedback(false)} />
+      )}
     </>
   );
 }

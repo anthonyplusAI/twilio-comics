@@ -1,5 +1,5 @@
 import { db } from './db';
-import { stories, pages, feedback, conversations, generationJobs, type Story, type Page, type Feedback, type Conversation } from './schema';
+import { stories, pages, conversations, generationJobs, type Story, type Page, type Conversation } from './schema';
 import { and, eq, gt, gte, isNotNull, isNull, sql } from 'drizzle-orm';
 import { generateComicSlug } from './slug-generator';
 
@@ -202,13 +202,46 @@ export async function deleteBlankContinuationPage({
   return Boolean(deleted);
 }
 
-export async function deleteStory(storyId: string): Promise<void> {
-  await db.delete(stories).where(eq(stories.id, storyId));
+/**
+ * Remove the first-page placeholder only after its channel job fails for good.
+ * The database guard preserves any page with an image, additional pages, or a
+ * job that saved a story, even if the caller lost its processing lease.
+ */
+export async function deleteBlankFailedGenerationStory({
+  jobId,
+  userId,
+}: {
+  jobId: string;
+  userId: string;
+}): Promise<boolean> {
+  const [deleted] = await db
+    .delete(stories)
+    .where(and(
+      eq(stories.id, jobId),
+      eq(stories.userId, userId),
+      sql`${stories.source} IN ('sms', 'whatsapp', 'voice')`,
+      sql`EXISTS (
+        SELECT 1 FROM ${generationJobs}
+        WHERE ${generationJobs.id} = ${jobId}
+          AND ${generationJobs.userId} = ${userId}
+          AND ${generationJobs.status} = ${"failed"}
+          AND ${generationJobs.storyId} IS NULL
+          AND ${generationJobs.targetStoryId} IS NULL
+          AND ${generationJobs.imageUrl} IS NULL
+          AND ${generationJobs.deliverySid} IS NULL
+      )`,
+      sql`NOT EXISTS (
+        SELECT 1 FROM ${pages}
+        WHERE ${pages.storyId} = ${stories.id}
+          AND (${pages.id} <> ${jobId} OR ${pages.generatedImageUrl} IS NOT NULL)
+      )`,
+    ))
+    .returning({ id: stories.id });
+  return Boolean(deleted);
 }
 
-export async function createFeedback(data: { message: string; userId?: string }): Promise<Feedback> {
-  const [entry] = await db.insert(feedback).values(data).returning();
-  return entry;
+export async function deleteStory(storyId: string): Promise<void> {
+  await db.delete(stories).where(eq(stories.id, storyId));
 }
 
 export async function getPagesGeneratedLast24Hours(): Promise<number> {

@@ -1,6 +1,7 @@
 .git
 .github
 .next
+.playwright-mcp
 node_modules
 voice-server
 coverage

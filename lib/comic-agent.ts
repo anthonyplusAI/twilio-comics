@@ -1,4 +1,5 @@
 import { COMIC_STYLES } from "@/lib/constants";
+import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
 import { proposeComicTurn } from "@/lib/comic-agent-model";
 
@@ -174,7 +175,7 @@ export async function advanceComicAgent(
   if (command === "STATUS") {
     const reply =
       state === "done"
-        ? `Your comic is ready. ${commandVerb(turn.channel)} CONTINUE to make another page, or NEW for a new story.`
+        ? `Your comic is ready. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days to make another page, or NEW for a new story.`
         : state === "confirming"
           ? `Your comic idea is ready. ${approvalInstruction(turn.channel)}`
           : `I'm ready for your comic idea. ${ideaInvitation(turn.channel)}`;
@@ -198,7 +199,7 @@ export async function advanceComicAgent(
       emptyAgentCollected(),
       activeStoryId,
       activeStoryId
-        ? `Draft cancelled. ${commandVerb(turn.channel)} CONTINUE whenever you want another page, or NEW for a new story.`
+        ? `Draft cancelled. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new story.`
         : "Draft cancelled. Tell me a new comic idea whenever you're ready.",
     );
   }

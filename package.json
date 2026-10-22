@@ -9,6 +9,7 @@
   "scripts": {
     "build": "next build --webpack",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:safe": "node --import tsx scripts/check-migration-preflight.ts && pnpm db:migrate",
     "dev": "next dev",
     "dev:voice": "tsx watch server/index.ts",
     "lint": "eslint .",
@@ -23,7 +24,6 @@
     "@azure/storage-blob": "12.33.0",
     "@azure/storage-queue": "12.31.0",
     "@hookform/resolvers": "^5.4.0",
-    "@neondatabase/serverless": "^1.1.0",
     "@next/env": "16.3.8",
     "@radix-ui/react-accordion": "1.2.14",
     "@radix-ui/react-alert-dialog": "1.1.17",
@@ -67,6 +67,7 @@
     "next-auth": "5.0.0-beta.32",
     "next-themes": "^0.4.6",
     "openai": "6.45.0",
+    "pg": "^8.23.1",
     "qrcode.react": "4.2.0",
     "react": "19.2.7",
     "react-day-picker": "^10.0.1",
@@ -88,6 +89,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.1",
     "@types/node": "^22",
+    "@types/pg": "^8.16.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/ws": "8.18.1",

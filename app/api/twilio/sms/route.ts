@@ -1,8 +1,11 @@
 import { type NextRequest } from "next/server";
+import { recordActivityEvent } from "@/lib/activity-events";
+import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { sendInboundMessage } from "@/lib/generation-queue";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { recordInboundMessage } from "@/lib/twilio-events";
 import { parseInboundMessage, validateTwilioSignature } from "@/lib/twilio";
+import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
 
 export const runtime = "nodejs";
 
@@ -22,11 +25,9 @@ function emptyTwiml(): Response {
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
-  const rawBody = await request.text();
-  const params: Record<string, string> = {};
-  new URLSearchParams(rawBody).forEach((value, key) => {
-    params[key] = value;
-  });
+  const form = await readTwilioWebhookForm(request);
+  if (!form.ok) return form.response;
+  const { params } = form;
 
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
   if (!publicBaseUrl) {
@@ -68,10 +69,32 @@ export async function POST(request: NextRequest): Promise<Response> {
     return new Response("Unexpected messaging sender", { status: 403 });
   }
 
+  let userId: string;
+  try {
+    // Create a participant on the first text, including STOP/HELP. Otherwise
+    // drafts that never become a comic disappear from the admin directory.
+    userId = (await getOrCreateChannelIdentity(inbound.channel, inbound.from)).userId;
+  } catch (error) {
+    console.error("Inbound messaging identity failed", error);
+    return new Response("Temporary messaging failure", { status: 503 });
+  }
+
   if (
     Object.hasOwn(params, "OptOutType") ||
     TWILIO_CONTROL_KEYWORDS.has(inbound.body.toUpperCase())
   ) {
+    await recordActivityEvent({
+      eventKey: `message:${inbound.messageSid}:inbound`,
+      userId,
+      channel: inbound.channel,
+      kind: "message.inbound",
+      direction: "inbound",
+      address: inbound.from,
+      messageSid: inbound.messageSid,
+      content: inbound.body,
+      status: "control",
+      details: { optOutType: params.OptOutType?.slice(0, 32) || null },
+    }).catch((error) => console.error("Inbound control history failed", error));
     return emptyTwiml();
   }
 
@@ -85,6 +108,22 @@ export async function POST(request: NextRequest): Promise<Response> {
       mediaUrls: inbound.mediaUrls,
       mediaContentTypes: inbound.mediaContentTypes,
     });
+
+    await recordActivityEvent({
+      eventKey: `message:${inbound.messageSid}:inbound`,
+      userId,
+      channel: inbound.channel,
+      kind: "message.inbound",
+      direction: "inbound",
+      address: inbound.from,
+      messageSid: inbound.messageSid,
+      content: inbound.body,
+      status: "received",
+      details: {
+        mediaCount: inbound.mediaUrls.length,
+        mediaContentTypes: inbound.mediaContentTypes,
+      },
+    }).catch((error) => console.error("Inbound activity history failed", error));
 
     if (receipt.shouldEnqueue) {
       await sendInboundMessage(inbound.messageSid);
