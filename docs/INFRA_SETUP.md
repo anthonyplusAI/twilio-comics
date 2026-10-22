@@ -1,12 +1,14 @@
 # Azure Infrastructure Setup
 
-Twilio Comics uses Azure Container Apps for its public app and Jobs, Azure Storage for images and queue messages, and **Azure Database for PostgreSQL Flexible Server** for comics, conversations, and retained admin history. This guide covers the one-time resources and settings needed before the [production deployment](DEPLOYMENT.md). The [private PostgreSQL guide](AZURE_POSTGRES.md) covers networking, database roles, TLS, backups, and migrations in more detail.
+Twilio Comics uses Azure Container Apps for its public app and Jobs, Azure Storage for images and queue messages, and **Azure Database for PostgreSQL Flexible Server** for comics, conversations, and retained admin history. This guide records the running V2 pilot and the steps to recreate or change its infrastructure. The [private PostgreSQL guide](AZURE_POSTGRES.md) covers networking, database roles, TLS, backups, and migrations in more detail.
 
 ## Current state and production target
 
-The approved Azure subscription has a V1 foundation in `rg-twilio-comics`: ACR `twiliocomicsacr1a1d98`, Storage account `twiliocomicsst1a1d98`, Log Analytics, managed identities, GitHub OIDC, and a managed-network Container Apps environment. Its web app and Jobs are **sample-image placeholders**, not a Twilio Comics release. The private V2 platform is provisioned separately; inspect Azure for its current provisioning state. A server reaching `Running` does not establish runtime database URLs, roles, migrations, or a live application release.
+The approved Azure subscription has a V1 foundation in `rg-twilio-comics`: ACR `twiliocomicsacr1a1d98`, Storage account `twiliocomicsst1a1d98`, Log Analytics, managed identities, GitHub OIDC, and a managed-network Container Apps environment. Its web app and Jobs are **sample-image placeholders**. The private V2 platform is provisioned and its app is public at [the V2 origin](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io), running release `e2bafc6`. `/api/healthz` reported that release and `/api/readyz` passed against the migrated private database. The production release gate is `PRODUCTION_RELEASE_READY=true`.
 
-| Workload | Existing placeholder | Planned private-network production target |
+The Twilio number **+1 866 901 2028** is toll-free approved and has verified SMS and Voice POST webhooks. The V2 web app has `TWILIO_ENABLED_CHANNELS=sms,voice`; WhatsApp remains disabled. This is a controlled pilot: a handset SMS comic, a Voice ConversationRelay comic, their result deliveries, and admin password sign-in still need confirmation. The one-time provisioning commands below describe how this environment was built; do not rerun bootstrap scripts against the active pilot without reviewing their preconditions and current settings.
+
+| Workload | V1 placeholder | Current private-network pilot |
 |---|---|---|
 | Container Apps environment | `cae-twilio-comics` | `cae-twilio-comics-v2` |
 | Public web and Voice app | `twilio-comics` | `twilio-comics-v2` |
@@ -15,7 +17,7 @@ The approved Azure subscription has a V1 foundation in `rg-twilio-comics`: ACR `
 | Manual migration Job | None | `twilio-comics-migrate-v2` |
 | PostgreSQL | Not part of V1 | Central US Flexible Server `twilio-comics-pg-1a1d98`, database `twilio_comics` |
 
-The V2 names are the production **target**, not evidence that every V2 resource or application release is ready. `scripts/provision-azure.sh` created the existing foundation with an Azure managed-network ACA environment. Run the private-platform provisioner **first** so the V2 environment exists with VNet integration and a route to Central US PostgreSQL. Only then rerun `provision-azure.sh` with V2 workload names; it reuses that environment and creates the V2 web app and two runtime Jobs. If the order is reversed, it can create a managed-network V2 environment that cannot reach the private database. Keep the existing placeholders until the V2 app and Jobs pass verification; move the public URL and Twilio webhooks in a deliberate cutover.
+`scripts/provision-azure.sh` created the V1 foundation with an Azure managed-network ACA environment. To reproduce the V2 platform, run the private-platform provisioner **first** so the V2 environment exists with VNet integration and a route to Central US PostgreSQL. Only then rerun `provision-azure.sh` with V2 workload names; it reuses that environment and creates the V2 web app and two runtime Jobs. If the order is reversed, it can create a managed-network V2 environment that cannot reach the private database. The V2 app and Jobs now run the pilot image; the V1 placeholders remain outside the public Twilio route and can be retired after live handset and admin checks.
 
 ## Inspect or recreate the existing foundation
 
@@ -124,7 +126,7 @@ PROVISION_AZURE_CONFIRM=yes \
 bash scripts/provision-azure.sh
 ```
 
-The new V2 web placeholder remains internal and scaled to zero. The release workflow requires single revision mode and makes it externally reachable only after the private migration Job succeeds and a digest-pinned Twilio Comics web revision is healthy. Production needs external HTTPS ingress on port 8080 for the website, Twilio webhooks, and ConversationRelay WebSocket. The two runtime Jobs need no public ingress. The PostgreSQL role provisioner creates the fourth workload as a **manual**, one-container migration Job using the reviewed `Dockerfile.migrate` image. Build and pin its image and the one-off role bootstrap image from committed source:
+At bootstrap, the V2 web placeholder is internal and scaled to zero. The release workflow requires single revision mode and makes it externally reachable only after the private migration Job succeeds and a digest-pinned Twilio Comics web revision is healthy. The current V2 web app now has external HTTPS ingress on port 8080 for the website, Twilio webhooks, and ConversationRelay WebSocket. The two runtime Jobs need no public ingress. The PostgreSQL role provisioner creates the fourth workload as a **manual**, one-container migration Job using the reviewed `Dockerfile.migrate` image. Build and pin its image and the one-off role bootstrap image from committed source:
 
 ```bash
 export SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
@@ -135,7 +137,7 @@ PROVISION_POSTGRES_ROLES_CONFIRM=yes bash scripts/provision-postgres-roles.sh
 
 `scripts/provision-postgres-roles.sh` first seeds `postgres-comics-runtime-url` and `postgres-comics-migration-url` in Key Vault through owner-only temporary files and the host Azure CLI, preserving valid existing URLs on reruns. It then starts `twilio-comics-db-bootstrap-v2` inside the private V2 environment to create and verify separate `comics_runtime` and `comics_migrator` SQL logins. The Job retrieves the administrator password and the two URL secrets through temporary, secret-scoped Key Vault Secrets User grants that the host script revokes on exit. Only after SQL verification succeeds does the script grant the V2 workload identities their own secret-scoped reads, bind the runtime URL as `runtime-database-url` on the web/generation/recovery workloads, and create `twilio-comics-migrate-v2` with `migration-database-url`. Both are exposed to their containers as `DATABASE_URL=secretref:...`. See the [role bootstrap steps](AZURE_POSTGRES.md#one-time-role-bootstrap-and-v2-workload-wiring) for exact behavior and recovery.
 
-Rerun `scripts/provision-azure.sh` with the same V2 name overrides after the migration Job exists. Its first run cannot grant a role on a Job that has not been created. The second run assigns the GitHub deployment principal `Container Apps Jobs Contributor` on that exact migration Job, which includes permission to start it. Keep the production release gate closed until this grant is present.
+For a fresh installation, rerun `scripts/provision-azure.sh` with the same V2 name overrides after the migration Job exists. Its first run cannot grant a role on a Job that has not been created. The second run assigns the GitHub deployment principal `Container Apps Jobs Contributor` on that exact migration Job, which includes permission to start it. Keep the production release gate closed until this grant is present; the current pilot has completed this step.
 
 The platform template sets 14-day backups; review that retention and confirm point-in-time restore. Confirm the database is `Ready`, both peerings are `Connected`, both private DNS links are complete, and port 5432 works from a Job inside the East US 2 V2 environment before the first release.
 
@@ -172,7 +174,7 @@ This repository's production workflow emitted an ID-based `sub` claim, so its cu
 GITHUB_OIDC_SUBJECT='repo:anthonyplusAI@26190505/twilio-comics@1286817910:environment:production'
 ```
 
-Use that value with the V2 provisioning command above and on later reruns. The claim can change if the repository is transferred or replaced; verify the actual `sub` claim from a trusted production workflow before changing the override. If the existing `gha-production` credential subject differs from the computed default and `GITHUB_OIDC_SUBJECT` is absent, the script stops without updating the credential. An explicit override authorizes the script to update that credential when needed. On every completed run it enforces a custom `main`-only deployment branch policy on the GitHub `production` environment, including one created earlier without restrictions; it preserves existing required reviewers and wait timers when switching policy modes. It removes other deployment branch patterns and verifies the final rule. **Before opening the release gate**, protect `main` with the `Validate` required check and require a production environment reviewer in GitHub Settings. Verify the reviewer rule after provisioning.
+Use that value with the V2 provisioning command above and on later reruns. The claim can change if the repository is transferred or replaced; verify the actual `sub` claim from a trusted production workflow before changing the override. If the existing `gha-production` credential subject differs from the computed default and `GITHUB_OIDC_SUBJECT` is absent, the script stops without updating the credential. An explicit override authorizes the script to update that credential when needed. On every completed run it enforces a custom `main`-only deployment branch policy on the GitHub `production` environment, including one created earlier without restrictions; it preserves existing required reviewers and wait timers when switching policy modes. It removes other deployment branch patterns and verifies the final rule. The current protected `main` branch requires `Validate`, and the GitHub `production` environment requires a reviewer. Preserve those protections on later runs.
 
 The original foundation run points the repository's `ACA_*` variables at the **placeholders**. Its V2 rerun repoints the web, runtime Job, and migration Job variables. Verify them with `gh variable list` and repair any mismatch using the values below:
 
@@ -185,11 +187,11 @@ gh variable set ACA_RESOURCE_GROUP --body 'rg-twilio-comics'
 gh variable set ACR_NAME --body 'twiliocomicsacr1a1d98'
 ```
 
-The script sets these **production environment secrets**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. They are OIDC identifiers, not a reusable Azure password. The GitHub-hosted runner starts the private migration Job through Azure's management API and never connects to PostgreSQL. **Do not add `DATABASE_URL` to GitHub secrets or variables.** Keep `PRODUCTION_RELEASE_READY` unset or false while the V2 network, database, roles, runtime secrets, and migration Job are incomplete. A closed prelaunch site can be released with `TWILIO_ENABLED_CHANNELS` empty while sender approval is pending; production startup still requires Twilio account credentials. The [release workflow](DEPLOYMENT.md#release-flow) requires `PRODUCTION_RELEASE_READY=true` before it builds or deploys.
+The script sets these **production environment secrets**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. They are OIDC identifiers, not a reusable Azure password. The GitHub-hosted runner starts the private migration Job through Azure's management API and never connects to PostgreSQL. **Do not add `DATABASE_URL` to GitHub secrets or variables.** The current `PRODUCTION_RELEASE_READY` repository variable is `true`, allowing the [release workflow](DEPLOYMENT.md#release-flow) to build and deploy after its approval gate. For a new installation, keep this variable unset or false until the V2 network, database, roles, runtime secrets, and migration Job are ready. A closed initial release can use an empty `TWILIO_ENABLED_CHANNELS` while its sender is being prepared; the current pilot uses `sms,voice`.
 
 ## Configure V2 runtime before the first release
 
-The sample workloads do not carry the credentials or database settings needed by the real app. Configure the **V2** app and Jobs before setting the release gate. The values below use the planned target names; replace them if the actual resources differ:
+The original sample workloads did not carry the credentials or database settings needed by the real app. The **V2** app and Jobs are configured and released. The steps below are the bootstrap procedure for a fresh V2 environment; the script requires an internal, zero-replica placeholder and should not be rerun against the public pilot. Replace these resource names for a different installation:
 
 ```bash
 export RESOURCE_GROUP='rg-twilio-comics'
@@ -209,7 +211,7 @@ CONFIGURE_RUNTIME_CONFIRM=yes \
 bash scripts/configure-runtime-secrets.sh
 ```
 
-The script generates strong `AUTH_SECRET`, `MEDIA_SIGNING_SECRET`, and a 48-character admin password. It stores the initial password in Key Vault as `admin-initial-password`, stores only its scrypt hash as `admin-password-hash` for the web app, and defaults the admin username to `comics-admin`. Set `ADMIN_USERNAME` before the first run if a different username is desired. No password is printed or passed to Azure CLI as an argument. The script reuses existing secrets, checks that the admin password matches its hash, and refuses to rotate existing credentials or the username silently. It also grants the current operator read access only to the initial admin password secret. Retrieve it into an owner-only local file, move it to a password manager, and delete the file; keep it out of Git and chat:
+The script generated strong `AUTH_SECRET`, `MEDIA_SIGNING_SECRET`, and a 48-character admin password. It stored the initial password in Key Vault as `admin-initial-password` and only its scrypt hash as `admin-password-hash` for the web app. The configured admin username is `comics-admin`; password sign-in has not yet been confirmed. No password is printed or passed to Azure CLI as an argument. For a fresh installation, set `ADMIN_USERNAME` before the first run if a different username is desired. The script reuses existing secrets, checks that the admin password matches its hash, and refuses to rotate existing credentials or the username silently. It grants the current operator read access only to the initial admin password secret. Retrieve it into an owner-only local file on a trusted operator machine, move it to a password manager, and delete the file; keep it out of Git and chat:
 
 ```bash
 umask 077
@@ -219,17 +221,62 @@ az keyvault secret download --vault-name kv-twilio-comics-1a1d98 \
   --only-show-errors --output none
 ```
 
+If the Key Vault firewall denies the operator's current network, temporarily allow that trusted machine's public IPv4 address, then remove **only a rule added for this retrieval** afterward. The earlier pilot testing exception has been removed, so do not assume a local host still has access. Behind a proxy or VPN, the client IP in Azure's `ForbiddenByFirewall` error may differ from `api.ipify.org`; set `OPERATOR_PUBLIC_IPV4` to the IPv4 named in that error if needed. The operator still needs permission to read `admin-initial-password`. Use an approved private network path instead when available. This subshell checks existing rules, retries briefly for rule propagation, and removes only an exact IP rule that it added, even if the download fails. Never print the password to a terminal, put it in a shell argument, or send it in chat:
+
+```bash
+(
+  set -e
+  operator_ipv4="${OPERATOR_PUBLIC_IPV4:-$(curl -4fsS https://api.ipify.org)}"
+  rules_json="$(az keyvault network-rule list --name kv-twilio-comics-1a1d98 \
+    --resource-group rg-twilio-comics --only-show-errors --output json)"
+  jq -e '.ipRules | type == "array"' <<<"$rules_json" >/dev/null
+  rule_added=0
+  cleanup_rule() {
+    if [[ "$rule_added" == 1 ]]; then
+      az keyvault network-rule remove --name kv-twilio-comics-1a1d98 \
+        --resource-group rg-twilio-comics --ip-address "$operator_ipv4" \
+        --only-show-errors --output none
+    fi
+  }
+  trap cleanup_rule EXIT
+  if ! jq -e --arg ip "$operator_ipv4" \
+    '(.ipRules // []) | any(.value == $ip or .value == ($ip + "/32"))' \
+    <<<"$rules_json" >/dev/null; then
+    az keyvault network-rule add --name kv-twilio-comics-1a1d98 \
+      --resource-group rg-twilio-comics --ip-address "$operator_ipv4" \
+      --only-show-errors --output none
+    rule_added=1
+  fi
+  download_ok=0
+  for attempt in 1 2 3; do
+    if az keyvault secret download --vault-name kv-twilio-comics-1a1d98 \
+      --name admin-initial-password --file "$admin_password_file" --overwrite \
+      --only-show-errors --output none; then
+      download_ok=1
+      break
+    fi
+    if [[ "$attempt" -lt 3 ]]; then sleep 5; fi
+  done
+  if [[ "$download_ok" != 1 ]]; then
+    rm -f -- "$admin_password_file"
+    exit 1
+  fi
+)
+```
+
+Import the owner-only file into a password manager, then run `rm -- "$admin_password_file"`. Do not keep a local copy. The firewall rule cleanup runs before the subshell returns. If cleanup reports an error, remove the temporary rule manually before proceeding.
+
 | Key Vault secret | V2 web | Generation and recovery Jobs | Purpose |
 |---|---|---|---|
 | `auth-secret` | Yes |  | Auth.js/admin sessions and Voice authorization signing |
 | `media-signing-secret` | Yes | Yes | Private media link signing |
 | `admin-password-hash` | Yes |  | `/admin/login` password check; plaintext is never bound to a workload |
-| `openai-api-key` | When supplied | When supplied | Comic and conversation models |
-| `twilio-auth-token` | When supplied | When supplied | Twilio API and signed webhook validation |
+| `openai-api-key` | Yes | Yes | Comic and conversation models |
+| `twilio-auth-token` | Yes | Yes | Twilio API and signed webhook validation |
 
-The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, operator name/contact, and initial shared 25-per-day generation limit are configured as ordinary environment settings. `TWILIO_ENABLED_CHANNELS` is explicitly empty, so the number does not appear as an available action yet. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses the existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
+The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, operator name/contact, and initial shared 25-per-day generation limit are configured as ordinary environment settings. The bootstrap script initially leaves `TWILIO_ENABLED_CHANNELS` empty. The current public pilot overrides it with `sms,voice` and the daily generation limit with `5`. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
 
-The OpenAI API key and Twilio Auth Token are not in this repository. When available, put each value in its own owner-only (`0600`), single-line local file and rerun with file **paths**, not credential values, in the command. Either file can be supplied independently. The script copies the value through a short-lived owner-only file into Key Vault, then wires only the workloads that need it. If a Key Vault secret already exists, a supplied file must match it exactly; a different value is rejected without rotation. Existing `auth-secret`, `media-signing-secret`, admin credentials, and their expiry dates are also reused. Without the OpenAI and Twilio credentials, `/api/readyz` remains closed and the release gate must stay unset.
+The production OpenAI API key and Twilio Auth Token are in Key Vault and bound to the V2 workloads; they are not in this repository. For a fresh installation, put each value in its own owner-only (`0600`), single-line local file and run the script with file **paths**, not credential values, in the command. Either file can be supplied independently. The script copies the value through a short-lived owner-only file into Key Vault, then wires only the workloads that need it. If a Key Vault secret already exists, a supplied file must match it exactly; a different value is rejected without rotation. Existing `auth-secret`, `media-signing-secret`, admin credentials, and their expiry dates are also reused. Without the OpenAI and Twilio credentials, `/api/readyz` remains closed and the release gate must stay unset.
 
 ```bash
 SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98' \
@@ -250,7 +297,7 @@ Google OAuth is optional for `/studio`; if enabled in production, store its clie
 
 The V2 rerun of `provision-azure.sh` sets the Storage endpoints, container/queue names, workload-specific `AZURE_CLIENT_ID`, web/worker identities, and ACR pull identity on the web app and both runtime Jobs. Verify those settings before release; they are independent of the old placeholders. The PostgreSQL role provisioner creates and configures the manual migration Job, including its dedicated Key Vault identity and ACR pull access. Production Storage access uses managed identity, not `AZURE_STORAGE_CONNECTION_STRING`. The image listens on `PORT=8080` and `HOSTNAME=0.0.0.0`; the worker creates a unique `WORKER_ID` when needed.
 
-Keep `DAILY_GENERATION_JOB_LIMIT` the same on all three runtime workloads. The code and runtime-setup default is 25 new app-funded comic admissions per UTC day across users, Twilio channel jobs, and browser studio requests using the app's OpenAI key; `0` pauses these requests. PostgreSQL serializes admissions so retries and duplicate queue deliveries do not consume another slot. Studio requests also retain their per-user quota, while requests using a caller-owned API key do not use the app-funded pool. Set the low-cost pilot values **after** `configure-runtime-secrets.sh` finishes:
+Keep `DAILY_GENERATION_JOB_LIMIT` the same on all three runtime workloads. The code and runtime-setup default is 25 new app-funded comic admissions per UTC day across users, Twilio channel jobs, and browser studio requests using the app's OpenAI key; `0` pauses these requests. PostgreSQL serializes admissions so retries and duplicate queue deliveries do not consume another slot. Studio requests also retain their per-user quota, while requests using a caller-owned API key do not use the app-funded pool. The current pilot uses the low-cost values below, applied **after** `configure-runtime-secrets.sh` finished:
 
 ```bash
 az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
@@ -276,10 +323,10 @@ az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESO
   | jq -r '.properties.template.containers[].env[]? | select(.name == "DAILY_GENERATION_JOB_LIMIT") | "\(.name)=\(.value)"'
 ```
 
-Set the final public origin on the V2 app and runtime Jobs. The worker uses it to build story links. The V2 ACA domain can be used for a prelaunch smoke test; use the chosen final HTTPS domain before configuring Twilio webhooks. During prelaunch, leave `TWILIO_ENABLED_CHANNELS` empty **or unset**. Either state shows no SMS/call/WhatsApp action or QR code and rejects inbound channel conversations; a configured number alone never enables a channel.
+The public origin is the V2 ACA HTTPS domain on the web app and runtime Jobs; the worker uses it to build story links. Use the exact origin before configuring Twilio webhooks because signed webhook URLs are origin-sensitive. The bootstrap step below left `TWILIO_ENABLED_CHANNELS` empty for the closed release. The current pilot has `sms,voice`, which shows only the text and call actions. Setting the list empty or unsetting it again closes the actions and rejects inbound channel conversations.
 
 ```bash
-export PUBLIC_BASE_URL='https://<your-final-domain>'
+export PUBLIC_BASE_URL='https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io'
 
 az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
   --set-env-vars "PUBLIC_BASE_URL=$PUBLIC_BASE_URL" "AUTH_URL=$PUBLIC_BASE_URL" \
@@ -294,7 +341,7 @@ az containerapp job update --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RE
 
 If the browser testing studio is used, reference `AUTH_GOOGLE_ID=secretref:auth-google-id` and `AUTH_GOOGLE_SECRET=secretref:auth-google-secret` on the V2 web app, set `STUDIO_TESTER_EMAILS` there, and add `https://<your-final-domain>/api/auth/callback/google` as a Google OAuth callback. See [authentication](../README.md#authentication). SMS, Voice, and the admin dashboard do not require Google OAuth.
 
-For Voice, the dedicated six-digit SMS Verify service `Comics Voice` (`VA9fae12b38cb0a91645f514842476e647`) was created in the launch account. The runtime setup sets its Service SID on the V2 web app. The caller receives a text and enters the code on the phone keypad before ConversationRelay can use saved conversation data. Set the secure relay URL after choosing the final public origin. Voice stays unavailable on `/start` until its Verify service, relay URL, Twilio credentials, and signing secret are configured:
+For Voice, the dedicated six-digit SMS Verify service `Comics Voice` (`VA9fae12b38cb0a91645f514842476e647`) was created in the launch account. The runtime setup set its Service SID on the V2 web app. The caller should receive a text and enter the code on the phone keypad before ConversationRelay can use saved conversation data; this handset path is still awaiting confirmation. The V2 web app has the secure relay URL below. Voice is shown on `/start` because its Verify service, relay URL, Twilio credentials, and signing secret are configured:
 
 ```bash
 az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
@@ -309,17 +356,17 @@ WhatsApp is outside the initial launch. To add it later, configure an approved `
 
 ## Configure Twilio and release
 
-On October 21, 2026, the authenticated Twilio CLI confirmed that **+1 866 901 2028** belongs to the provided account, supports SMS, MMS, and Voice, and has toll-free verification status `TWILIO_APPROVED`. Both inbound webhook URLs were blank at that check. Twilio [requires toll-free verification for SMS to the United States and Canada](https://www.twilio.com/docs/messaging/compliance/toll-free/console-onboarding), including the comic result sent after a Voice call. Confirm the new Verify service can deliver SMS codes, review the SMS/Voice disclosures and app policies, and accept the [ConversationRelay AI/ML Features Addendum](https://www.twilio.com/docs/voice/conversationrelay/onboarding) before enabling Voice.
+On October 22, 2026, the authenticated Twilio CLI confirmed that **+1 866 901 2028** belongs to the provided account, supports SMS, MMS, and Voice, has toll-free verification status `TWILIO_APPROVED`, and has the exact SMS and Voice POST webhook URLs below. Twilio [requires toll-free verification for SMS to the United States and Canada](https://www.twilio.com/docs/messaging/compliance/toll-free/console-onboarding), including the comic result sent after a Voice call. Confirm actual Verify SMS delivery, review the SMS/Voice disclosures and app policies, and confirm the [ConversationRelay AI/ML Features Addendum](https://www.twilio.com/docs/voice/conversationrelay/onboarding) before a broad announcement.
 
-After a healthy V2 revision is publicly reachable, configure the number's HTTP webhooks with the **exact** origin in `PUBLIC_BASE_URL`; Twilio signatures depend on the URL. The retry fragment is a [Twilio connection override](https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides), excluded from signature validation. ConversationRelay uses the `wss://` URL in the Voice TwiML, without that fragment. The app's channel selection does not change the number's settings in Twilio:
+The number's HTTP webhooks use the **exact** origin in `PUBLIC_BASE_URL`; Twilio signatures depend on the URL. The retry fragment is a [Twilio connection override](https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides), excluded from signature validation. ConversationRelay uses the `wss://` URL in the Voice TwiML, without that fragment. The app's channel selection does not change the number's settings in Twilio:
 
 ```text
-SMS/MMS: POST https://<your-final-domain>/api/twilio/sms#rc=3&rp=5xx,ct,rt
-Voice:   POST https://<your-final-domain>/api/twilio/voice#rc=3&rp=5xx,ct,rt
-Relay:   wss://<your-final-domain>/relay
+SMS/MMS: POST https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/sms#rc=3&rp=5xx,ct,rt
+Voice:   POST https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/voice#rc=3&rp=5xx,ct,rt
+Relay:   wss://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/relay
 ```
 
-Before releasing a closed prelaunch site, verify the V2 resource names, Azure secrets, private migration Job, PostgreSQL backup/restore, OIDC access, Twilio account credentials, and main branch protections. Keep `TWILIO_ENABLED_CHANNELS` empty. Set the release variable only when these prerequisites are complete, then trigger a deployment from `main`:
+The first closed V2 release completed these infrastructure checks before the Twilio cutover. For a new installation, verify the V2 resource names, Azure secrets, private migration Job, PostgreSQL backup/restore, OIDC access, Twilio account credentials, and main branch protections. Keep `TWILIO_ENABLED_CHANNELS` empty until its number and webhooks are configured. Then set the release variable and trigger a deployment from `main`:
 
 ```bash
 gh variable list
@@ -329,9 +376,9 @@ gh workflow run deploy.yml --ref main
 gh run list --workflow deploy.yml --limit 1
 ```
 
-Watch the selected run with `gh run watch <run-id> --exit-status`. The workflow must finish the private migration Job before rolling out the runtime workloads, then check the commit SHA at `/api/healthz`. Confirm the prelaunch homepage and `/start` show “opening soon” with no contact action. The current managed-network placeholder's health page is not evidence of a V2 release.
+Watch the selected run with `gh run watch <run-id> --exit-status`. The workflow must finish the private migration Job before rolling out the runtime workloads, then check the commit SHA at `/api/healthz`. An initial closed release shows “opening soon” on the homepage and `/start`. The actual public V2 release is `e2bafc6`, and its `/api/readyz` has passed; the old managed-network placeholder is not the public app.
 
-Once `PUBLIC_BASE_URL` is the final HTTPS origin and its `/api/readyz` reports `ready: true`, cut over the approved number through the authenticated Twilio CLI profile:
+After `PUBLIC_BASE_URL` is the final HTTPS origin and `/api/readyz` reports `ready: true`, use the authenticated Twilio CLI profile to configure or reverify the approved number. This cutover has completed for the current pilot:
 
 ```bash
 curl --fail --silent --show-error "$PUBLIC_BASE_URL/api/readyz"
@@ -340,16 +387,16 @@ CONFIGURE_TWILIO_WEBHOOKS_CONFIRM=yes TWILIO_PROFILE=Demo \
   bash scripts/configure-twilio-webhooks.sh
 ```
 
-Use the same approved `TWILIO_ACCOUNT_SID` entered for runtime setup; enter it locally again if this is a new shell. The script fetches the number in that account, checks its SMS and Voice capabilities, and refuses an existing unrelated webhook, fallback URL, TwiML app, or SIP trunk. It sets both URLs and their POST methods in one CLI update, then fetches the number again to verify the result. A repeat run with matching settings makes no update. Review any reported conflict before changing the existing number setup. If the number belongs to a [Messaging Service](https://www.twilio.com/docs/messaging/services), verify that service uses “Defer to sender's webhook,” so its SMS handling follows the number's URL. The script does not read the Auth Token or enable public channels.
+Use the same approved `TWILIO_ACCOUNT_SID` entered for runtime setup; enter it locally again if this is a new shell. The script fetches the number in that account, checks its SMS and Voice capabilities, and refuses an existing unrelated webhook, fallback URL, TwiML app, or SIP trunk. It sets both URLs and their POST methods in one CLI update, then fetches the number again to verify the result. A repeat run with matching settings makes no update. Review any reported conflict before changing the existing number setup. If the number belongs to a [Messaging Service](https://www.twilio.com/docs/messaging/services), verify that service uses “Defer to sender's webhook,” so its SMS handling follows the number's URL. The script does not read the Auth Token or enable public channels. The current number's two POST URLs were verified after cutover.
 
-After the configured number, Twilio webhooks, Verify, and ConversationRelay pass readiness checks, enable only SMS and Voice on the V2 web app for controlled production tests:
+Only SMS and Voice are enabled on the V2 web app for controlled production tests. The current setting is:
 
 ```bash
 az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
   --set-env-vars 'TWILIO_ENABLED_CHANNELS=sms,voice'
 ```
 
-At phone and desktop widths, verify the two `/start` actions and QR codes lead to `sms:+18669012028` and `tel:+18669012028`, with their disclosures and policy links nearby. Send a real SMS comic, then make a real call: receive the Verify text, enter its code on the keypad, create a comic through ConversationRelay, and receive the result by SMS. Confirm the queue Job and recovery Job execute, `/admin/login` shows the activity and timeline, and the records remain after a new revision. Those records live in PostgreSQL and Azure Blob Storage, outside the container image. [Deployment verification](DEPLOYMENT.md#twilio-verification) has the detailed checks and [rollback](DEPLOYMENT.md#health-and-rollback) covers image recovery.
+At phone and desktop widths, verify the two `/start` actions and QR codes lead to `sms:+18669012028` and `tel:+18669012028`, with their disclosures and policy links nearby. **Pending real-device checks:** send an SMS comic idea, complete the agent's approval step, and receive the generated result; then make a call, receive the Verify text, enter its code on the keypad, create a comic through ConversationRelay, and receive the result by SMS. Confirm the queue Job and recovery Job execute, then sign in at `/admin/login` and verify the activity and timeline. The admin sign-in has not yet been confirmed. Finally, verify records remain after a new revision; they live in PostgreSQL and Azure Blob Storage, outside the container image. [Deployment verification](DEPLOYMENT.md#twilio-verification) has the detailed checks and [rollback](DEPLOYMENT.md#health-and-rollback) covers image recovery.
 
 To close entry without clearing the sender number, set `TWILIO_ENABLED_CHANNELS=` on the V2 web app. Unset is also closed. This changes the public actions and inbound channel acceptance, not the sender's Twilio capabilities or webhook settings. Keep the database and backup policy active so admin history survives deploys; use the [deletion procedure](DATA_DELETION.md) for explicit user requests.
 
