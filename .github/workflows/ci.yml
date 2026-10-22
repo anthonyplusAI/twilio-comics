@@ -38,6 +38,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - name: Azure deployment script contract tests
+        run: |
+          for test_file in scripts/*.test.sh; do
+            bash "$test_file"
+          done
 
   build:
     name: Production build

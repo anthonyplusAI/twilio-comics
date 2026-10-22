@@ -20,9 +20,32 @@ resources = template['resources']
 postgres = next(resource for resource in resources if resource['type'] == 'Microsoft.DBforPostgreSQL/flexibleServers')
 environment = next(resource for resource in resources if resource['type'] == 'Microsoft.App/managedEnvironments')
 aca_subnet = next(resource for resource in resources if resource['type'] == 'Microsoft.Network/virtualNetworks/subnets' and 'acaSubnetName' in resource['name'])
+subnets = [resource for resource in resources if resource['type'] == 'Microsoft.Network/virtualNetworks/subnets']
+vnets = [resource for resource in resources if resource['type'] == 'Microsoft.Network/virtualNetworks']
+peerings = [resource for resource in resources if resource['type'] == 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings']
+dns_links = [resource for resource in resources if resource['type'] == 'Microsoft.Network/privateDnsZones/virtualNetworkLinks']
+assert template['parameters']['postgresLocation']['defaultValue'] == 'centralus'
+assert template['parameters']['postgresLocation']['allowedValues'] == ['centralus']
+assert {tuple(vnet['properties']['addressSpace']['addressPrefixes']) for vnet in vnets} == {
+    ('10.74.0.0/20',), ('10.75.0.0/20',),
+}
+assert {subnet['properties']['addressPrefix'] for subnet in subnets} == {
+    '10.74.0.0/23', '10.74.8.0/26', '10.75.0.0/26',
+}
+assert len(peerings) == 2 and all(peer['properties']['allowVirtualNetworkAccess'] for peer in peerings)
+assert len(dns_links) == 2 and all(not link['properties']['registrationEnabled'] for link in dns_links)
+assert postgres['sku'] == {'name': 'Standard_B1ms', 'tier': 'Burstable'}
+assert postgres['location'] == "[parameters('postgresLocation')]"
+assert 'availabilityZone' not in postgres['properties']
 assert postgres['properties']['network']['publicNetworkAccess'] == 'Disabled'
 assert environment['properties']['vnetConfiguration']['internal'] is False
+assert environment['properties']['peerAuthentication']['mtls']['enabled'] is False
+assert environment['properties']['peerTrafficConfiguration']['encryption']['enabled'] is False
 assert any(endpoint['service'] == 'Microsoft.KeyVault' for endpoint in aca_subnet['properties']['serviceEndpoints'])
+assert all(subnet['properties']['privateEndpointNetworkPolicies'] == 'Disabled'
+           for subnet in subnets if subnet['properties']['addressPrefix'].startswith('10.74.'))
+assert {'postgresVnetId', 'postgresSubnetId', 'acaToPostgresPeeringId', 'postgresToAcaPeeringId',
+        'postgresDnsAcaLinkId', 'postgresDnsDbLinkId', 'postgresRegion'} <= set(template['outputs'])
 PY
 fi
 
@@ -47,12 +70,45 @@ case "$1 $2 ${3:-}" in
   'provider show --namespace') printf 'Registered\n' ;;
   'network vnet list')
     if [[ "${AZ_TEST_OVERLAP:-}" == 1 ]]; then
-      printf '%s\n' '[{"id":"/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/virtualNetworks/conflict","prefixes":["10.74.8.0/24"]}]'
+      printf '%s\n' '[{"id":"/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/virtualNetworks/conflict","location":"eastus2","prefixes":["10.74.8.0/24"]}]'
+    elif [[ "${AZ_TEST_DB_OVERLAP:-}" == 1 ]]; then
+      printf '%s\n' '[{"id":"/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/virtualNetworks/conflict","location":"centralus","prefixes":["10.75.1.0/24"]}]'
     elif [[ "${AZ_TEST_TARGET_DRIFT:-}" == 1 ]]; then
-      printf '%s\n' '[{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-v2","prefixes":["10.75.0.0/20"]}]'
+      printf '%s\n' '[{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-v2","location":"eastus2","prefixes":["10.76.0.0/20"]}]'
+    elif [[ "${AZ_TEST_DB_TARGET_DRIFT:-}" == 1 ]]; then
+      printf '%s\n' '[{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-pg-cus","location":"centralus","prefixes":["10.76.0.0/20"]}]'
+    elif [[ "${AZ_TEST_DB_REGION_DRIFT:-}" == 1 ]]; then
+      printf '%s\n' '[{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-pg-cus","location":"eastus2","prefixes":["10.75.0.0/20"]}]'
     else
-      printf '%s\n' '[{"id":"/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/virtualNetworks/existing","prefixes":["10.73.0.0/20"]}]'
+      printf '%s\n' '[{"id":"/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/virtualNetworks/existing","location":"eastus2","prefixes":["10.73.0.0/20"]},{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-v2","location":"eastus2","prefixes":["10.74.0.0/20"]}]'
     fi ;;
+  'network vnet show')
+    vnet="$(arg_after --name "$@")"
+    case "$vnet" in
+      vnet-twilio-comics-v2)
+        printf '%s\n' '{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-v2","location":"eastus2","addressSpace":{"addressPrefixes":["10.74.0.0/20"]}}' ;;
+      vnet-twilio-comics-pg-cus)
+        printf '%s\n' '{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-pg-cus","location":"centralus","addressSpace":{"addressPrefixes":["10.75.0.0/20"]}}' ;;
+      *) exit 91 ;;
+    esac ;;
+  'network vnet peering')
+    source_vnet="$(arg_after --vnet-name "$@")"
+    peering_state='Connected'
+    [[ "${AZ_TEST_DISCONNECTED_PEERING:-}" != 1 ]] || peering_state='Disconnected'
+    case "$source_vnet" in
+      vnet-twilio-comics-v2) remote_vnet='vnet-twilio-comics-pg-cus' ;;
+      vnet-twilio-comics-pg-cus) remote_vnet='vnet-twilio-comics-v2' ;;
+      *) exit 91 ;;
+    esac
+    printf '{"peeringState":"%s","allowVirtualNetworkAccess":true,"remoteVirtualNetwork":{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/%s"}}\n' "$peering_state" "$remote_vnet" ;;
+  'network private-dns link')
+    link="$(arg_after --name "$@")"
+    case "$link" in
+      twilio-comics-v2-link) target_vnet='vnet-twilio-comics-v2' ;;
+      twilio-comics-pg-cus-link) target_vnet='vnet-twilio-comics-pg-cus' ;;
+      *) exit 91 ;;
+    esac
+    printf '{"registrationEnabled":false,"virtualNetwork":{"id":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/%s"}}\n' "$target_vnet" ;;
   'keyvault show --name')
     [[ -e "$AZ_TEST_VAULT_FILE" ]] || exit 1
     case "$(arg_after --query "$@")" in
@@ -134,7 +190,8 @@ assert secret not in open(arguments_file, encoding='utf-8').read()
 PY
     printf '%s\n' '{}'
     ;;
-  'postgres flexible-server show') printf '%s\n' 'Disabled' ;;
+  'postgres flexible-server show')
+    printf '%s\n' '{"location":"Central US","sku":{"name":"Standard_B1ms","tier":"Burstable"},"network":{"publicNetworkAccess":"Disabled","delegatedSubnetResourceId":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-pg-cus/subnets/postgresql","privateDnsZoneArmResourceId":"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.Network/privateDnsZones/twilio-comics.postgres.database.azure.com"}}' ;;
   *) printf 'Unexpected Azure command: %s\n' "$*" >&2; exit 90 ;;
 esac
 AZ
@@ -175,6 +232,14 @@ run_provision > "$TEST_ROOT/success-output"
 parameters_file="$(awk '$0 == "--parameters" { getline; if (substr($0, 1, 1) == "@") { print substr($0, 2); exit } }' "$AZ_TEST_ARGUMENT_LOG")"
 [[ -n "$parameters_file" && ! -e "$parameters_file" ]]
 [[ "$(wc -l < "$AZ_TEST_SECRET_WRITES")" == 1 ]]
+
+# Deployment readback must reject a peering that has not connected yet.
+set +e
+AZ_TEST_DISCONNECTED_PEERING=1 run_provision > "$TEST_ROOT/disconnected-peering-output" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 ]]
+grep -q 'not connected to its intended peer' "$TEST_ROOT/disconnected-peering-output"
 
 # Rerunning must use the existing Key Vault secret and avoid a second write.
 run_provision > "$TEST_ROOT/repeat-output"
@@ -221,11 +286,32 @@ set -e
 grep -q 'overlaps existing VNet' "$TEST_ROOT/overlap-output"
 
 set +e
+AZ_TEST_DB_OVERLAP=1 run_provision > "$TEST_ROOT/db-overlap-output" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 && ! -e "$AZ_TEST_ARGUMENT_LOG" ]]
+grep -q '10.75.0.0/20 overlaps existing VNet' "$TEST_ROOT/db-overlap-output"
+
+set +e
 AZ_TEST_TARGET_DRIFT=1 run_provision > "$TEST_ROOT/drift-output" 2>&1
 status=$?
 set -e
 [[ "$status" == 1 && ! -e "$AZ_TEST_ARGUMENT_LOG" ]]
 grep -q 'different address space' "$TEST_ROOT/drift-output"
+
+set +e
+AZ_TEST_DB_TARGET_DRIFT=1 run_provision > "$TEST_ROOT/db-drift-output" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 && ! -e "$AZ_TEST_ARGUMENT_LOG" ]]
+grep -q 'different address space' "$TEST_ROOT/db-drift-output"
+
+set +e
+AZ_TEST_DB_REGION_DRIFT=1 run_provision > "$TEST_ROOT/db-region-drift-output" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 && ! -e "$AZ_TEST_ARGUMENT_LOG" ]]
+grep -q 'wrong region' "$TEST_ROOT/db-region-drift-output"
 
 set +e
 OPERATOR_PUBLIC_IPV4=10.0.0.1 run_provision > "$TEST_ROOT/invalid-ip-output" 2>&1

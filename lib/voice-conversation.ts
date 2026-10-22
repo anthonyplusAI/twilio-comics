@@ -4,6 +4,7 @@ import type {
   ComicAgentResult,
   ComicAgentTurn,
 } from "@/lib/comic-agent";
+import { isDailyGenerationCapacityRejection } from "@/lib/generation-policy";
 
 /** The live call keeps this snapshot and saves each completed user turn. */
 export interface VoiceConversationSnapshot {
@@ -48,8 +49,14 @@ export interface VoiceRelayDependencies {
   ) => Promise<VoiceConversationSnapshot | null>;
   advance: (current: ComicAgentCurrent, turn: ComicAgentTurn) => Promise<ComicAgentResult>;
   identity: (from: string) => Promise<{ userId: string }>;
-  submit: (input: VoiceSubmitInput) => Promise<{ accepted: boolean; job: { status: string } }>;
-  lookupJob: (idempotencyKey: string) => Promise<{ status: string } | null>;
+  submit: (input: VoiceSubmitInput) => Promise<{
+    accepted: boolean;
+    job: { status: string; lastError?: string | null };
+  }>;
+  lookupJob: (idempotencyKey: string) => Promise<{
+    status: string;
+    lastError?: string | null;
+  } | null>;
   onCallStart?: (event: { callSid: string; from: string; to: string }) => Promise<void>;
   onTurn?: (event: {
     callSid: string;
@@ -82,7 +89,8 @@ export interface VoiceRelaySession {
   timeout: () => VoiceRelayOutbound[];
 }
 
-type EndResult = "queued" | "quota_rejected" | "checking" | "invalid_setup" | "stale" | "service_error" | "limit_reached";
+type EndResult = "queued" | "quota_rejected" | "capacity_rejected" |
+  "checking" | "invalid_setup" | "stale" | "service_error" | "limit_reached";
 
 const DUPLICATE_FINAL_WINDOW_MS = 1_500;
 const MAX_VOICE_TURNS = 20;
@@ -286,7 +294,7 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         }
       }
 
-      let submission: { accepted: boolean; job: { status: string } };
+      let submission: { accepted: boolean; job: { status: string; lastError?: string | null } };
       try {
         const identity = await deps.identity(from);
         submission = await deps.submit({
@@ -304,19 +312,21 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         });
       } catch (error) {
         deps.onError?.("voice generation enqueue failed", error);
-        let jobStatus: string | null | undefined;
+        let lookedUpJob: { status: string; lastError?: string | null } | null | undefined;
         try {
-          jobStatus = (await deps.lookupJob(approvalKey))?.status ?? null;
+          lookedUpJob = await deps.lookupJob(approvalKey);
         } catch (lookupError) {
           deps.onError?.("voice job status lookup failed", lookupError);
         }
+        const jobStatus = lookedUpJob?.status;
         if (["queued", "processing", "succeeded"].includes(jobStatus || "")) {
           return finish("queued");
         }
-        if (jobStatus === null || jobStatus === "quota_rejected" || jobStatus === "failed") {
+        if (lookedUpJob === null || jobStatus === "quota_rejected" || jobStatus === "failed") {
           if (await rollback()) {
             if (jobStatus === "quota_rejected") {
-              return finish("quota_rejected");
+              return finish(lookedUpJob && isDailyGenerationCapacityRejection(lookedUpJob)
+                ? "capacity_rejected" : "quota_rejected");
             }
             if (jobStatus === "failed") approvalKey = undefined;
             lastFinalText = undefined;
@@ -336,7 +346,8 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
           return finish("checking");
         }
         if (status === "quota_rejected") {
-          return finish("quota_rejected");
+          return finish(isDailyGenerationCapacityRejection(submission.job)
+            ? "capacity_rejected" : "quota_rejected");
         }
         approvalKey = undefined;
         lastFinalText = undefined;

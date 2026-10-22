@@ -28,6 +28,7 @@ vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityE
 import {
   claimConversationLease,
   checkpointInboundTurn,
+  completeInboundOptedOutReply,
   completeInboundWithoutReply,
   getInboundMessagePosition,
   recordInboundMessage,
@@ -76,6 +77,41 @@ beforeEach(() => {
 });
 
 describe("durable Twilio receipts", () => {
+  it("atomically completes a rejected reply and records Twilio opt-out without clearing submission", async () => {
+    h.execute.mockResolvedValueOnce({ rows: [{ message_sid: "SM123" }] });
+
+    await expect(completeInboundOptedOutReply("SM123")).resolves.toBeUndefined();
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/UPDATE twilio_inbound_messages[\s\S]*SET status = 'completed'/i);
+    expect(query.sql).toMatch(/status = 'reply_pending'/i);
+    expect(query.sql).toMatch(/outbound_sid IS NULL/i);
+    expect(query.sql).toMatch(/reply_body <> ''/i);
+    expect(query.sql).not.toMatch(/submission\s*=/i);
+    expect(query.sql).toMatch(/INSERT INTO activity_events[\s\S]*message\.reply\.suppressed/i);
+    expect(query.sql).toContain("recipient_opted_out");
+    expect(query.sql).toContain("21610");
+    expect(query.params).toEqual(expect.arrayContaining([
+      "SM123", "message:SM123:reply:suppressed",
+    ]));
+  });
+
+  it("accepts a retry after an opt-out receipt was already completed", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: "completed", outbound_sid: null }] });
+
+    await expect(completeInboundOptedOutReply("SM123")).resolves.toBeUndefined();
+  });
+
+  it("refuses to suppress a reply that has no send checkpoint", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: "processing", outbound_sid: null }] });
+
+    await expect(completeInboundOptedOutReply("SM123")).rejects.toThrow(/suppress/i);
+  });
+
   it("atomically completes a checkpointed silent limit denial without a Twilio SID", async () => {
     h.execute.mockResolvedValueOnce({ rows: [{ message_sid: "SM123" }] });
 
@@ -268,7 +304,7 @@ describe("durable Twilio receipts", () => {
 });
 
 describe("conversation leases", () => {
-  it("atomically clears a draft inactive for over 24 hours, except while generating", async () => {
+  it("atomically clears a draft inactive for over 14 days, except while generating", async () => {
     let updateSet: Record<string, unknown> | undefined;
     let updateWhere: SQL | undefined;
     const claimed = { id: "conversation-1", state: "collecting", collected: {}, activeStoryId: null };
@@ -294,13 +330,14 @@ describe("conversation leases", () => {
 
     const expression = (key: string) =>
       dialect.sqlToQuery(updateSet![key] as SQL).sql.replace(/\s+/g, " ");
-    const staleCondition = /"conversations"\."updated_at" < NOW\(\) - INTERVAL '24 hours' AND "conversations"\."state" <> 'generating'/;
+    const staleCondition = /"conversations"\."updated_at" < NOW\(\) - \(\$\d+ \* INTERVAL '1 day'\) AND "conversations"\."state" <> 'generating'/;
     expect(expression("state")).toMatch(staleCondition);
     expect(expression("state")).toContain("THEN 'collecting' ELSE \"conversations\".\"state\" END");
     expect(expression("collected")).toMatch(staleCondition);
     expect(expression("collected")).toContain("THEN '{}'::jsonb ELSE \"conversations\".\"collected\" END");
     expect(expression("activeStoryId")).toMatch(staleCondition);
     expect(expression("activeStoryId")).toContain("THEN NULL ELSE \"conversations\".\"active_story_id\" END");
+    expect(dialect.sqlToQuery(updateSet!.state as SQL).params).toContain(14);
 
     const leasePredicate = dialect.sqlToQuery(updateWhere!).sql.replace(/\s+/g, " ");
     expect(leasePredicate).toContain('"conversations"."lease_expires_at" <= NOW()');

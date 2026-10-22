@@ -7,11 +7,13 @@ const h = vi.hoisted(() => ({
   createComicStory: vi.fn(),
   createComicContinuationPage: vi.fn(),
   cleanupFailedContinuationPage: vi.fn(),
+  deleteBlankFailedGenerationStory: vi.fn(),
   checkpointGenerationDelivery: vi.fn(),
   checkpointGenerationOutput: vi.fn(),
   claimGenerationJob: vi.fn(),
   getGenerationJob: vi.fn(),
   markGenerationJobFailed: vi.fn(),
+  markGenerationJobSuppressed: vi.fn(),
   markGenerationJobSucceeded: vi.fn(),
   returnGenerationJobToQueue: vi.fn(),
   consumeFreeTierQuota: vi.fn(),
@@ -56,6 +58,7 @@ vi.mock("@/lib/generation-jobs", () => ({
   claimGenerationJob: h.claimGenerationJob,
   getGenerationJob: h.getGenerationJob,
   markGenerationJobFailed: h.markGenerationJobFailed,
+  markGenerationJobSuppressed: h.markGenerationJobSuppressed,
   markGenerationJobSucceeded: h.markGenerationJobSucceeded,
   returnGenerationJobToQueue: h.returnGenerationJobToQueue,
 }));
@@ -71,6 +74,7 @@ vi.mock("@/lib/twilio", () => ({
 vi.mock("@/lib/db-actions", () => ({
   completeConversationForGeneration: h.completeConversationForGeneration,
   failConversationForGeneration: h.failConversationForGeneration,
+  deleteBlankFailedGenerationStory: h.deleteBlankFailedGenerationStory,
 }));
 vi.mock("@/lib/mms-preview", () => ({ createMmsPreview: h.createMmsPreview }));
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
@@ -123,6 +127,23 @@ beforeEach(() => {
 });
 
 describe("processGenerationJob", () => {
+  it("releases quota when a delivery window expires before any comic exists", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      storyId: null,
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Result delivery expired after 24 hours",
+    );
+    expect(h.markGenerationJobSuppressed).not.toHaveBeenCalled();
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ id: job.id }));
+  });
+
   it("expires an undelivered job after 24 hours without generating or texting an old number", async () => {
     const expired = {
       ...job,
@@ -137,11 +158,13 @@ describe("processGenerationJob", () => {
     expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.createComicContinuationPage).not.toHaveBeenCalled();
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
-    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+    expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
       job.id,
       expect.any(String),
       "Result delivery expired after 24 hours",
+      "story-already-generated",
     );
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
     expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventKey: `job:${job.id}:delivery:expired`,
       kind: "generation.delivery",
@@ -150,8 +173,9 @@ describe("processGenerationJob", () => {
       details: expect.objectContaining({ reason: "delivery_window_expired" }),
     }));
     expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
-    expect(h.completeConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(expired, "story-already-generated");
   });
 
   it("preserves a completed comic if generation crosses the 24-hour delivery cutoff", async () => {
@@ -177,9 +201,15 @@ describe("processGenerationJob", () => {
         deliveryHadMedia: false,
       });
       expect(h.sendChannelMessage).not.toHaveBeenCalled();
-      expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "Result delivery expired after 24 hours", "story-1",
+      );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
       expect(h.markGenerationJobSucceeded).not.toHaveBeenCalled();
       expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+      expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ id: job.id }), "story-1",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -224,11 +254,13 @@ describe("processGenerationJob", () => {
       }
 
       expect(h.sendChannelMessage).toHaveBeenCalledOnce();
-      expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
         job.id,
         expect.any(String),
         "Result delivery expired after 24 hours",
+        "story-1",
       );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
       expect(h.markGenerationJobSucceeded).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -288,6 +320,7 @@ describe("processGenerationJob", () => {
         expect.any(String),
         "Result delivery expired after 24 hours",
       );
+      expect(h.markGenerationJobSuppressed).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -295,6 +328,8 @@ describe("processGenerationJob", () => {
 
   it("records processing attempt, accepted delivery, and completed comic details", async () => {
     await processGenerationJob(job.id);
+
+    expect(h.sendChannelMessage.mock.calls[0][0].body).toContain("CONTINUE within 14 days");
 
     expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventKey: `job:${job.id}:attempt:1:started`,
@@ -366,6 +401,7 @@ describe("processGenerationJob", () => {
       details: expect.objectContaining({ attemptCount: 1, errorType: "Error" }),
     }));
     expect(JSON.stringify(h.recordActivityEvent.mock.calls)).not.toContain("provider request included secret detail");
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
   });
 
   it("finishes a delivered comic when optional analytics fails", async () => {
@@ -430,6 +466,16 @@ describe("processGenerationJob", () => {
     h.claimGenerationJob.mockResolvedValue(null);
     h.getGenerationJob.mockResolvedValue({ ...job, status: "processing" });
     await expect(processGenerationJob(job.id)).resolves.toBeUndefined();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not process a job before its capacity admission commits", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({ ...job, status: "admitting" });
+
+    await expect(processGenerationJob(job.id)).resolves.toBeUndefined();
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -509,6 +555,68 @@ describe("processGenerationJob", () => {
     expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
   });
 
+  it.each(["sms", "voice"])(
+    "suppresses %s result delivery after Twilio reports recipient opt-out",
+    async (source) => {
+      h.claimGenerationJob.mockResolvedValue({ ...job, source, targetStoryId: "story-1" });
+      h.sendChannelMessage.mockRejectedValue(Object.assign(
+        new Error("Recipient opted out"),
+        { code: 21610, status: 400 },
+      ));
+
+      await processGenerationJob(job.id);
+
+      expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+      expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: "sms",
+      }));
+      expect(h.checkpointGenerationOutput).toHaveBeenCalledWith(job.id, expect.any(String), {
+        storyId: "story-1",
+        imageUrl: "https://comics.example.com/api/media?key=page2",
+        deliveryHadMedia: true,
+      });
+      expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "recipient_opted_out", "story-1",
+      );
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+      expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+      expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+      expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ source }), "story-1",
+      );
+      expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+        eventKey: `job:${job.id}:delivery:opted-out`,
+        kind: "generation.delivery",
+        status: "suppressed",
+        storyId: "story-1",
+        details: expect.objectContaining({
+          reason: "recipient_opted_out", errorCode: "21610", resultGenerated: true,
+        }),
+      }));
+    },
+  );
+
+  it("keeps the weekly credit when a generated comic cannot be delivered permanently", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.sendChannelMessage.mockRejectedValue(new Error("Twilio permanently unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processGenerationJob(job.id);
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Twilio permanently unavailable", "story-1",
+    );
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), "story-1",
+    );
+  });
+
   it("does not report generation failure after Twilio accepted the result", async () => {
     h.checkpointGenerationDelivery.mockRejectedValue(new Error("DB temporarily unavailable"));
     h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
@@ -564,7 +672,57 @@ describe("processGenerationJob", () => {
 
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
     expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+  });
+
+  it("removes only the blank first-page story after terminal generation failure", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError("content_policy", "Rejected"));
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(job.id, expect.any(String), "Rejected");
+    expect(h.deleteBlankFailedGenerationStory).toHaveBeenCalledWith({
+      jobId: job.id,
+      userId: job.userId,
+    });
+    expect(h.markGenerationJobFailed.mock.invocationCallOrder[0])
+      .toBeLessThan(h.deleteBlankFailedGenerationStory.mock.invocationCallOrder[0]);
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+  });
+
+  it("removes a prior blank first-page story when its delivery window expires", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.deleteBlankFailedGenerationStory).toHaveBeenCalledWith({
+      jobId: job.id,
+      userId: job.userId,
+    });
+  });
+
+  it("removes a prior blank continuation page when its delivery window expires", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      targetStoryId: "story-1",
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.cleanupFailedContinuationPage).toHaveBeenCalledWith({
+      userId: job.userId,
+      storyId: "story-1",
+      pageId: job.id,
+    });
+    expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
   });
 
   it("removes only the blank continuation page after terminal generation failure", async () => {

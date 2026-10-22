@@ -21,9 +21,11 @@ const eventLabels: Record<string, string> = {
 export function ActivityList({
   events,
   compact = false,
+  showUserLink = false,
 }: {
   events: AdminActivityRow[];
   compact?: boolean;
+  showUserLink?: boolean;
 }) {
   if (!events.length) {
     return (
@@ -41,7 +43,9 @@ export function ActivityList({
           <div className={styles.activityDot} aria-hidden="true" />
           <div className={styles.activityBody}>
             <div className={styles.activityHeading}>
-              <strong>{eventLabels[event.kind] ?? event.kind.replaceAll(".", " ")}</strong>
+              <strong>{event.kind === "message.delivery" && event.details?.purpose === "agent_reply"
+                ? "Agent reply delivery"
+                : eventLabels[event.kind] ?? event.kind.replaceAll(".", " ")}</strong>
               <time dateTime={new Date(event.occurred_at).toISOString()}>
                 {formatAdminDate(event.occurred_at)}
               </time>
@@ -74,6 +78,16 @@ export function ActivityList({
                     <summary>Recorded details</summary>
                     <pre>{JSON.stringify(event.details, null, 2)}</pre>
                   </details>
+                ) : null}
+                {showUserLink && (event.user_id || event.address) ? (
+                  <Link
+                    className={styles.inlineLink}
+                    href={event.user_id
+                      ? `/admin/users/${encodeURIComponent(event.user_id)}`
+                      : `/admin/users?q=${encodeURIComponent(event.address!)}`}
+                  >
+                    {event.user_id ? "View participant history" : "Find participant"}
+                  </Link>
                 ) : null}
               </>
             )}

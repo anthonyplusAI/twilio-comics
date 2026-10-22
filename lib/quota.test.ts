@@ -7,6 +7,7 @@ vi.mock("@/lib/db", () => ({ db: { execute } }));
 
 import {
   getFreeTierQuota,
+  releaseFreeTierQuota,
   reserveFreeTierQuota,
 } from "@/lib/quota";
 
@@ -126,5 +127,27 @@ describe("Postgres generation quota", () => {
       "Quota claim key belongs to another subject",
     );
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a caller's transaction for reservation and release", async () => {
+    const transactionExecute = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        subject: "user-1",
+        status: "reserved",
+        used: 1,
+        window_started_at: new Date(),
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const transaction = { execute: transactionExecute } as unknown as Parameters<typeof reserveFreeTierQuota>[2];
+
+    const result = await reserveFreeTierQuota("user-1", "claim-1", transaction);
+    await releaseFreeTierQuota("claim-1", transaction);
+
+    expect(result.allowed).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(transactionExecute).toHaveBeenCalledTimes(3);
+    expect(dialect.sqlToQuery(transactionExecute.mock.calls[2][0]).sql)
+      .toMatch(/UPDATE free_tier_quota_claims[\s\S]*UPDATE free_tier_quotas/);
   });
 });

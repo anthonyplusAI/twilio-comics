@@ -5,10 +5,12 @@ const h = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock("@/lib/db", () => ({ db: { execute: h.execute } }));
 
 import {
+  buildAdminActivityHistoryQuery,
   buildAdminUserSearchQuery,
   buildActivityHistoryQuery,
   decodeActivityCursor,
   encodeActivityCursor,
+  getAdminActivityHistory,
   getAdminDashboard,
   paginateActivityRows,
   summarizeAdminCounts,
@@ -87,6 +89,7 @@ describe("administrator analytics", () => {
       comics_failed: "2",
       delivered: "9",
       delivery_failed: "1",
+      agent_reply_delivery_failed: "4",
       outbound_messages: "34",
       outbound_messages_7d: "7",
       event_count: "120",
@@ -104,8 +107,69 @@ describe("administrator analytics", () => {
       comicsCompleted: 10,
       delivered: 9,
       deliveryFailed: 1,
+      agentReplyDeliveryFailed: 4,
     });
     expect(summarizeAdminCounts({}).voiceCallsRateLimited).toBe(0);
+    expect(summarizeAdminCounts({})).toMatchObject({ agentReplyDeliveryFailed: 0 });
+  });
+
+  it("counts only failed Twilio agent text replies, once per outbound Message SID", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [{ agent_reply_delivery_failed: "4" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const dashboard = await getAdminDashboard();
+
+    expect(dashboard.counts).toMatchObject({ agentReplyDeliveryFailed: 4 });
+    const countsSql = dialect.sqlToQuery(h.execute.mock.calls[0][0]).sql;
+    expect(countsSql).toMatch(/COUNT\(DISTINCT message_sid\).*?AS agent_reply_delivery_failed/s);
+    expect(countsSql).toContain("kind = 'message.delivery'");
+    expect(countsSql).toContain("status IN ('failed', 'undelivered')");
+    expect(countsSql).toContain("details->>'purpose' = 'agent_reply'");
+  });
+
+  it("filters paged operations history to failed agent replies without including comic delivery", () => {
+    const cursor = {
+      occurredAt: new Date("2026-10-20T12:00:00.000Z"),
+      id: "11111111-1111-4111-8111-111111111111",
+    };
+    const filtered = dialect.sqlToQuery(buildAdminActivityHistoryQuery({
+      filter: "failed-agent-replies",
+      cursor,
+      limit: 41,
+    }));
+    const all = dialect.sqlToQuery(buildAdminActivityHistoryQuery({ filter: "all", cursor: null, limit: 41 }));
+
+    expect(filtered.sql).toContain("kind = 'message.delivery'");
+    expect(filtered.sql).toContain("status IN ('failed', 'undelivered')");
+    expect(filtered.sql).toContain("details->>'purpose' = 'agent_reply'");
+    expect(filtered.sql).toContain("message_sid IS NOT NULL");
+    expect(filtered.sql).toContain("(occurred_at, id) <");
+    expect(filtered.sql).toContain("ORDER BY occurred_at DESC, id DESC");
+    expect(filtered.params).toContain(41);
+    expect(filtered.params).toContain(cursor.id);
+    expect(all.sql).not.toContain("details->>'purpose'");
+  });
+
+  it("pages the filtered operations history without dropping older failure events", async () => {
+    const rows = Array.from({ length: 41 }, (_, index) => ({
+      id: `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`,
+      occurred_at: new Date(Date.UTC(2026, 9, 21, 12, 0, 0) - index * 1000),
+    }));
+    h.execute.mockResolvedValueOnce({ rows });
+
+    const page = await getAdminActivityHistory("failed-agent-replies", null);
+
+    expect(page.items).toHaveLength(40);
+    expect(page.items.at(-1)?.id).toBe(rows[39].id);
+    expect(decodeActivityCursor(page.nextCursor)).toEqual({
+      occurredAt: rows[39].occurred_at,
+      id: rows[39].id,
+    });
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0]);
+    expect(query.sql).toContain("details->>'purpose' = 'agent_reply'");
+    expect(query.params).toContain(41);
   });
 
   it("counts durable messaging agent denials for lifetime and trailing week", async () => {

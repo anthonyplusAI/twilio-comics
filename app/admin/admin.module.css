@@ -321,6 +321,10 @@
 .healthFootnote { margin: 17px 0 0; color: var(--muted); font-size: .78rem; }
 
 .dashboardPage > .activityPanel { margin-top: 20px; }
+.activityFilters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.activityFilters a { padding: 8px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: white; font-size: .78rem; font-weight: 750; text-decoration: none; }
+.activityFilters a:hover { border-color: var(--twilio-blue); color: #1459cb; }
+.activityFilters a[aria-current="page"] { border-color: var(--twilio-red); color: #a61e35; background: #ffe8ec; }
 .activityList { position: relative; margin: 0; padding: 0; list-style: none; }
 .activityItem { position: relative; display: flex; gap: 17px; padding: 15px 0 18px; border-top: 1px solid #edf0f5; }
 .activityDot { flex: 0 0 11px; width: 11px; height: 11px; margin: 6px 0 0 2px; border: 3px solid var(--twilio-red); border-radius: 50%; background: white; }

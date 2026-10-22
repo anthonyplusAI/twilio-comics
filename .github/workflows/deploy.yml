@@ -101,6 +101,25 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Install Container Apps CLI extension
         run: az extension add --name containerapp --upgrade --only-show-errors
+      - name: Verify web placeholder is private
+        run: |
+          test -n "$ACA_NAME"
+          test -n "$ACA_JOB_NAME"
+          test -n "$ACA_RECOVERY_JOB_NAME"
+          test -n "$ACA_MIGRATION_JOB_NAME"
+          app=$(az containerapp show --name "$ACA_NAME" --resource-group "$ACA_RESOURCE_GROUP" --output json)
+          if ! jq --exit-status '(.properties.configuration.activeRevisionsMode // "Single") == "Single"' \
+            >/dev/null <<< "$app"; then
+            echo 'The web app must use single revision mode for this release workflow.' >&2
+            exit 1
+          fi
+          if jq --exit-status \
+            --arg placeholder 'mcr.microsoft.com/dotnet/samples:aspnetapp' \
+            '.properties.configuration.ingress.external == true and .properties.template.containers[0].image == $placeholder' \
+            >/dev/null <<< "$app"; then
+            echo 'The sample placeholder is public. Set internal ingress before releasing.' >&2
+            exit 1
+          fi
       - name: Run private PostgreSQL migration Job
         run: bash scripts/run-azure-migration-job.sh
       - name: Deploy generation job
@@ -120,6 +139,8 @@ jobs:
             --args start:worker \
             --cron-expression '*/5 * * * *' \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" 'RECOVERY_MODE=1'
+      - name: Ensure web readiness probe
+        run: bash scripts/ensure-azure-readiness-probe.sh
       - name: Deploy web and voice app
         run: |
           az containerapp update \
@@ -130,6 +151,43 @@ jobs:
             --termination-grace-period 240 \
             --min-replicas 1 \
             --max-replicas 2
+      - name: Wait for the released web revision
+        run: |
+          for attempt in $(seq 1 30); do
+            revision=$(az containerapp show \
+              --name "$ACA_NAME" --resource-group "$ACA_RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv)
+            if [ -n "$revision" ]; then
+              if revision_json=$(az containerapp revision show \
+                --name "$ACA_NAME" --resource-group "$ACA_RESOURCE_GROUP" \
+                --revision "$revision" --output json --only-show-errors) &&
+                jq --exit-status --arg image "$APP_IMAGE" '
+                  .properties.template.containers[0].image == $image
+                  and .properties.provisioningState == "Provisioned"
+                  and .properties.healthState == "Healthy"
+                  and .properties.runningState == "Running"
+                  and .properties.replicas >= 1
+                ' >/dev/null <<< "$revision_json"; then
+                echo "Released revision $revision is healthy."
+                exit 0
+              fi
+            fi
+            echo "Waiting for released web revision (${attempt}/30)"
+            sleep 10
+          done
+          echo 'Released web revision did not become healthy; ingress remains unchanged.' >&2
+          exit 1
+      - name: Publish web ingress
+        run: |
+          app=$(az containerapp show --name "$ACA_NAME" --resource-group "$ACA_RESOURCE_GROUP" --output json)
+          if ! jq --exit-status '.properties.configuration.ingress.external == true' >/dev/null <<< "$app"; then
+            az containerapp ingress update \
+              --name "$ACA_NAME" \
+              --resource-group "$ACA_RESOURCE_GROUP" \
+              --type external \
+              --target-port 8080 \
+              --transport auto
+          fi
       - name: Resolve app URL
         id: app
         run: |

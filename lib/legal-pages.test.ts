@@ -17,7 +17,7 @@ describe("Twilio Comics legal pages", () => {
     expect(terms).toContain("Anthony Dellavecchia");
     expect(privacy).toContain('href="mailto:adellavecchia@twilio.com"');
     expect(terms).toContain('href="mailto:adellavecchia@twilio.com"');
-    expect(privacy).not.toMatch(/draft|not (?:yet )?published/i);
+    expect(privacy).not.toContain("Draft — not published for public use");
   });
 
   it("labels policies as drafts when the app operator and contact are not configured", () => {
@@ -27,8 +27,8 @@ describe("Twilio Comics legal pages", () => {
     const privacy = renderToStaticMarkup(PrivacyPage());
     const terms = renderToStaticMarkup(TermsPage());
 
-    expect(privacy).toMatch(/draft|not (?:yet )?published/i);
-    expect(terms).toMatch(/draft|not (?:yet )?published/i);
+    expect(privacy).toContain("Draft — not published for public use");
+    expect(terms).toContain("Draft — not published for public use");
     expect(privacy).toContain("Twilio provider privacy notice");
     expect(terms).toContain("Twilio provider terms");
     expect(privacy).not.toContain("mailto:");
@@ -46,8 +46,8 @@ describe("Twilio Comics legal pages", () => {
     expect(terms).toContain("Example Operator LLC");
     expect(privacy).toContain('href="mailto:support@example.test"');
     expect(terms).toContain('href="mailto:support@example.test"');
-    expect(privacy).not.toMatch(/draft|not (?:yet )?published/i);
-    expect(terms).not.toMatch(/draft|not (?:yet )?published/i);
+    expect(privacy).not.toContain("Draft — not published for public use");
+    expect(terms).not.toContain("Draft — not published for public use");
     expect(privacy).toMatch(/until we explicitly delete them/i);
     expect(privacy).toMatch(/no automatic expiration schedule/i);
     expect(privacy).toMatch(/not.*share.*mobile.*(?:marketing|promotional)/i);

@@ -37,7 +37,7 @@ export function Navbar() {
     async function fetchStars() {
       try {
         const res = await fetch(
-          "https://api.github.com/repos/anthonyjdella/twilio-comics",
+          "https://api.github.com/repos/anthonyplusAI/twilio-comics",
           {
             headers: {
               Accept: "application/vnd.github+json",
@@ -97,7 +97,7 @@ export function Navbar() {
           )}
 
           <Link
-            href="https://github.com/anthonyjdella/twilio-comics"
+            href="https://github.com/anthonyplusAI/twilio-comics"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 glass-panel glass-panel-hover transition-all text-xs rounded-md"

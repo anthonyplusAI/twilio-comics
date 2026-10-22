@@ -74,6 +74,12 @@ export default function PrivacyPage() {
           may retain their own records under their separate policies.
         </p>
         <p>
+          An active comic draft and its CONTINUE shortcut reset after 14 days without a text or
+          call. Your earlier messages and finished comics remain in retained history until
+          deletion. A new holder of a reassigned phone number could access an active draft
+          during that short window; contact us to request deletion if your number changes.
+        </p>
+        <p>
           {contactEmail ? (
             <>For access, correction, or deletion requests, email <a href={`mailto:${contactEmail}`}>{contactEmail}</a>.</>
           ) : (

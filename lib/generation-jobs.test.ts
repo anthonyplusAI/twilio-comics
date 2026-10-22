@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
@@ -8,11 +8,14 @@ const h = vi.hoisted(() => ({
   select: vi.fn(),
   update: vi.fn(),
   execute: vi.fn(),
+  transaction: vi.fn(),
   send: vi.fn(),
   reserve: vi.fn(),
   release: vi.fn(),
   recordActivityEvent: vi.fn(),
   beforeSelect: null as null | (() => Promise<void>),
+  capacityUsed: 0,
+  capacityClaims: new Map<string, string>(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -21,6 +24,7 @@ vi.mock("@/lib/db", () => ({
     select: h.select,
     update: h.update,
     execute: h.execute,
+    transaction: h.transaction,
   },
 }));
 vi.mock("@/lib/generation-queue", () => ({ sendGenerationJob: h.send }));
@@ -35,6 +39,8 @@ import {
   checkpointGenerationDelivery,
   checkpointGenerationOutput,
   markGenerationJobFailed,
+  markGenerationJobSuppressed,
+  reconcileTerminalGenerationConversations,
   markGenerationJobSucceeded,
   recoverUnpublishedGenerationJobs,
   returnGenerationJobToQueue,
@@ -64,7 +70,7 @@ function jobRow(values: Record<string, unknown>): Record<string, unknown> {
     style: values.style ?? "noir",
     characterImageUrls: values.characterImageUrls ?? [],
     quotaClaimKey: values.quotaClaimKey,
-    status: "pending",
+    status: values.status ?? "pending",
     storyId: null,
     targetStoryId: values.targetStoryId ?? null,
     imageUrl: null,
@@ -109,6 +115,8 @@ function matches(where: SQL | null): boolean {
 beforeEach(() => {
   h.row = null;
   h.beforeSelect = null;
+  h.capacityUsed = 0;
+  h.capacityClaims.clear();
   h.send.mockReset().mockResolvedValue(undefined);
   h.reserve.mockReset().mockResolvedValue({
     allowed: true,
@@ -118,7 +126,30 @@ beforeEach(() => {
   });
   h.release.mockReset().mockResolvedValue(undefined);
   h.recordActivityEvent.mockReset().mockResolvedValue(undefined);
-  h.execute.mockReset().mockResolvedValue({ rows: [] });
+  h.execute.mockReset().mockImplementation(async (statement: SQL) => {
+    const query = dialect.sqlToQuery(statement);
+    if (query.sql.includes("WITH budget_day AS")) {
+      return { rows: [{ subject: "system:generation:daily:2026-10-01", used: h.capacityUsed }] };
+    }
+    if (query.sql.includes("SELECT subject, status FROM free_tier_quota_claims")) {
+      const subject = h.capacityClaims.get(String(query.params[0]));
+      return { rows: subject ? [{ subject, status: "reserved" }] : [] };
+    }
+    if (query.sql.includes("INSERT INTO free_tier_quota_claims") &&
+        query.sql.includes("RETURNING claim_key")) {
+      const claimKey = String(query.params[0]);
+      const subject = String(query.params[1]);
+      if (h.capacityClaims.has(claimKey)) return { rows: [] };
+      h.capacityClaims.set(claimKey, subject);
+      h.capacityUsed += 1;
+      return { rows: [{ claim_key: claimKey }] };
+    }
+    return { rows: [] };
+  });
+  h.transaction.mockReset().mockImplementation(async (callback) => callback({
+    execute: h.execute,
+    update: h.update,
+  }));
 
   h.insert.mockReset().mockImplementation(() => {
     let values: Record<string, unknown> = {};
@@ -191,6 +222,8 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("submitGenerationJob", () => {
   it("records the request and queue acceptance with the user's prompt and job ID", async () => {
     const submission = await submitGenerationJob(input);
@@ -224,6 +257,74 @@ describe("submitGenerationJob", () => {
       kind: "generation.rejected",
       status: "quota_rejected",
     }));
+    expect(h.capacityUsed).toBe(0);
+    expect(h.release).not.toHaveBeenCalled();
+  });
+
+  it("admits a job through a transaction-scoped global UTC-day ledger", async () => {
+    const submission = await submitGenerationJob(input);
+
+    expect(submission.accepted).toBe(true);
+    expect(h.transaction).toHaveBeenCalledOnce();
+    const executor = expect.objectContaining({ execute: h.execute, update: h.update });
+    expect(h.reserve).toHaveBeenCalledWith("user-1", submission.job.quotaClaimKey, executor);
+    expect(h.capacityUsed).toBe(1);
+    expect(h.capacityClaims.size).toBe(1);
+    const queries = h.execute.mock.calls.map(([statement]) => dialect.sqlToQuery(statement).sql);
+    expect(queries.join("\n")).toMatch(/pg_advisory_xact_lock/);
+    expect(queries.join("\n")).toMatch(/transaction_timestamp\(\)/);
+    expect(queries.join("\n")).toMatch(/claim\.status = 'reserved'/);
+    expect(queries.join("\n")).toMatch(/INSERT INTO free_tier_quota_claims/);
+  });
+
+  it("rejects daily capacity without publishing or consuming a weekly slot", async () => {
+    h.capacityUsed = 25;
+
+    const submission = await submitGenerationJob(input);
+
+    expect(submission).toMatchObject({ accepted: false, job: {
+      status: "quota_rejected",
+      lastError: "daily_generation_capacity",
+    } });
+    expect(h.release).toHaveBeenCalledWith(
+      submission.job.quotaClaimKey,
+      expect.objectContaining({ execute: h.execute, update: h.update }),
+    );
+    expect(h.capacityUsed).toBe(25);
+    expect(h.capacityClaims.size).toBe(0);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "generation.rejected",
+      details: expect.objectContaining({ reason: "daily_generation_capacity" }),
+    }));
+  });
+
+  it("reuses daily admission on a pending retry after an ambiguous queue send", async () => {
+    vi.stubEnv("DAILY_GENERATION_JOB_LIMIT", "1");
+    h.send.mockRejectedValueOnce(new Error("Queue response lost"));
+
+    await expect(submitGenerationJob(input)).rejects.toThrow("Queue response lost");
+    const retry = await submitGenerationJob(input);
+
+    expect(retry.accepted).toBe(true);
+    expect(h.capacityUsed).toBe(1);
+    expect(h.capacityClaims.size).toBe(1);
+    expect(h.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not report an unadmitted duplicate as accepted", async () => {
+    let duplicate: Awaited<ReturnType<typeof submitGenerationJob>> | undefined;
+    h.reserve.mockImplementationOnce(async () => {
+      duplicate = await submitGenerationJob(input);
+      return { allowed: true, remaining: 2, reset: null, status: "reserved" };
+    });
+
+    const original = await submitGenerationJob(input);
+
+    expect(duplicate).toMatchObject({ accepted: false, job: { status: "admitting" } });
+    expect(original).toMatchObject({ accepted: true, job: { status: "queued" } });
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.capacityUsed).toBe(1);
   });
 
   it("still queues generation if the optional activity insert fails", async () => {
@@ -277,7 +378,7 @@ describe("submitGenerationJob", () => {
       submitGenerationJob(input),
     ]);
 
-    expect(results.map((result) => result.accepted)).toEqual([true, true]);
+    expect(results.map((result) => result.accepted).sort()).toEqual([false, true]);
     expect(h.send).toHaveBeenCalledTimes(1);
     expect(h.row?.status).toBe("queued");
   });
@@ -305,7 +406,8 @@ describe("submitGenerationJob", () => {
     const original = await first;
 
     expect(original.accepted).toBe(true);
-    expect(duplicate.accepted).toBe(true);
+    expect(duplicate.accepted).toBe(false);
+    expect(duplicate.job.status).toBe("pending");
     expect(h.send).toHaveBeenCalledTimes(1);
     expect(h.row?.status).toBe("queued");
   });
@@ -361,6 +463,33 @@ describe("submitGenerationJob", () => {
 
     expect(recovered).toBe(1);
     expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.row?.status).toBe("queued");
+  });
+
+  it("recovers a stale unadmitted job before queueing it", async () => {
+    h.row = jobRow({
+      id: "00000000-0000-4000-8000-000000000001",
+      ...input,
+      status: "admitting",
+      quotaClaimKey: "generation-job:abandoned",
+    });
+    h.row.leaseOwner = "dead-publisher";
+    h.row.leaseExpiresAt = new Date(Date.now() - 60_000);
+    h.select.mockImplementationOnce(() => {
+      const query = {
+        from: () => query,
+        where: () => query,
+        orderBy: () => query,
+        limit: async () => [{ ...h.row }],
+      };
+      return query;
+    });
+
+    const recovered = await recoverUnpublishedGenerationJobs(10);
+
+    expect(recovered).toBe(1);
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.capacityUsed).toBe(1);
     expect(h.row?.status).toBe("queued");
   });
 });
@@ -426,9 +555,39 @@ describe("processing lease fences", () => {
     expect(query.sql).toContain("UPDATE generation_jobs");
     expect(query.sql).toContain("UPDATE free_tier_quota_claims");
     expect(query.sql).toContain("UPDATE free_tier_quotas");
+    expect(query.sql).toMatch(/failed_job\.story_id IS NULL/);
+    expect(query.sql).toMatch(/failed_job\.story_id IS NOT NULL/);
+    expect(query.sql).toMatch(/status = 'consumed'/);
     expect(query.sql).toMatch(/status = 'processing'\s+AND .*lease_owner =/);
     expect(query.params).toContain(owner);
     expect(query.params).toContain(jobId);
+  });
+
+  it("atomically marks a saved comic suppressed without refunding its weekly credit", async () => {
+    const savedStoryId = "00000000-0000-4000-8000-000000000010";
+    h.execute.mockResolvedValue({ rows: [{ id: jobId }] });
+
+    await markGenerationJobSuppressed(jobId, owner, "recipient_opted_out", savedStoryId);
+
+    expect(h.execute).toHaveBeenCalledOnce();
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/story_id = COALESCE\(j\.story_id,/);
+    expect(query.sql).toMatch(/AND \(j\.story_id IS NULL OR j\.story_id =/);
+    expect(query.sql).toMatch(/status = 'consumed'/);
+    expect(query.sql).toMatch(/failed_job\.story_id IS NULL/);
+    expect(query.sql).toMatch(/failed_job\.story_id IS NOT NULL/);
+    expect(query.params).toContain(savedStoryId);
+    expect(query.params).toContain("recipient_opted_out");
+  });
+
+  it("does not change quota when suppression loses its processing lease", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+
+    await expect(markGenerationJobSuppressed(
+      jobId, owner, "recipient_opted_out", "00000000-0000-4000-8000-000000000010",
+    )).rejects.toBeInstanceOf(GenerationJobLeaseLostError);
+
+    expect(h.execute).toHaveBeenCalledOnce();
   });
 
   it("does not release quota when the terminal failure loses its lease", async () => {
@@ -452,5 +611,18 @@ describe("processing lease fences", () => {
     const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
     expect(query.sql).toMatch(/AND j\.delivery_sid IS NULL/);
     expect(h.release).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal conversation recovery", () => {
+  it("restores a completed story link after any saved result delivery is suppressed", async () => {
+    h.execute.mockResolvedValue({ rows: [{ id: "conversation-1" }] });
+
+    const repaired = await reconcileTerminalGenerationConversations(10);
+
+    expect(repaired).toBe(1);
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/ready\.status = 'failed' AND ready\.story_id IS NOT NULL/);
+    expect(query.sql).not.toContain("ready.last_error = 'recipient_opted_out'");
   });
 });

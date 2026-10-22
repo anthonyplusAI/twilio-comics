@@ -1,5 +1,6 @@
 import { and, asc, eq, gte, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import { recordActivityEvent } from "@/lib/activity-events";
+import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { db } from "@/lib/db";
 import { sendInboundMessage } from "@/lib/generation-queue";
 import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
@@ -177,7 +178,7 @@ export async function claimConversationLease(
   // Generating rows retain their request marker until the job reaches a
   // terminal state; clearing it here would detach a late result from its draft.
   const staleDraft = sql<boolean>`
-    ${conversations.updatedAt} < NOW() - INTERVAL '24 hours'
+    ${conversations.updatedAt} < NOW() - (${CONVERSATION_RESUME_DAYS} * INTERVAL '1 day')
     AND ${conversations.state} <> 'generating'
   `;
   const [claimed] = await db
@@ -309,6 +310,58 @@ export async function completeInboundReply(
     .limit(1);
   if (existing?.status === "completed" && existing.outboundSid === outboundSid) return;
   throw new Error(`Unable to complete inbound reply for ${messageSid}`);
+}
+
+/** Close a saved reply after Twilio 21610, retaining any generation checkpoint. */
+export async function completeInboundOptedOutReply(messageSid: string): Promise<void> {
+  // The receipt and its suppression reason commit together. A failure to write
+  // history leaves the receipt open for a retry instead of hiding the rejection.
+  const [suppressed] = rowsOf<{ message_sid: string }>(await db.execute(sql`
+    WITH suppressed AS (
+      UPDATE twilio_inbound_messages
+      SET status = 'completed', updated_at = NOW()
+      WHERE message_sid = ${messageSid}
+        AND status = 'reply_pending'
+        AND outbound_sid IS NULL
+        AND reply_body IS NOT NULL
+        AND reply_body <> ''
+      RETURNING message_sid, channel, from_address, to_address
+    ), history AS (
+      INSERT INTO activity_events
+        (event_key, channel, kind, direction, address, message_sid, status, details)
+      SELECT
+        ${`message:${messageSid}:reply:suppressed`},
+        suppressed.channel,
+        'message.reply.suppressed',
+        'outbound',
+        suppressed.from_address,
+        suppressed.message_sid,
+        'suppressed',
+        jsonb_build_object(
+          'toAddress', suppressed.to_address,
+          'errorCode', '21610',
+          'reason', 'recipient_opted_out',
+          'purpose', 'agent_reply'
+        )
+      FROM suppressed
+      WHERE TRUE
+      ON CONFLICT (event_key) DO NOTHING
+      RETURNING id
+    )
+    SELECT suppressed.message_sid
+    FROM suppressed
+    LEFT JOIN history ON TRUE
+  `));
+  if (suppressed?.message_sid === messageSid) return;
+
+  const [existing] = rowsOf<{ status: string }>(await db.execute(sql`
+    SELECT status
+    FROM twilio_inbound_messages
+    WHERE message_sid = ${messageSid}
+    LIMIT 1
+  `));
+  if (existing?.status === "completed") return;
+  throw new Error(`Unable to suppress opted-out inbound reply for ${messageSid}`);
 }
 
 /** Close a checkpointed rate-limit denial without creating an outbound SMS. */

@@ -1,6 +1,5 @@
 import OpenAI, { toFile } from "openai";
-import { BlobServiceClient } from "@azure/storage-blob";
-import { isValidMediaToken } from "@/lib/blob-storage";
+import { isAllowedReferenceUrl } from "@/lib/reference-image-url";
 
 export const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 export const IMAGE_SIZE = "1024x1536"; // portrait 2:3 comic page
@@ -10,31 +9,6 @@ export interface GenerateComicImageArgs {
   apiKey: string;
   prompt: string;
   referenceImageUrls?: string[];
-}
-
-function isAllowedReferenceUrl(url: URL): boolean {
-  const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING?.trim();
-  const configuredEndpoint = process.env.AZURE_STORAGE_BLOB_ENDPOINT?.trim();
-  const container = process.env.AZURE_STORAGE_CONTAINER_NAME?.trim();
-  const blobEndpoint = connectionString
-    ? new URL(BlobServiceClient.fromConnectionString(connectionString).url)
-    : configuredEndpoint
-      ? new URL(configuredEndpoint)
-      : null;
-  if (blobEndpoint && container) {
-    const containerPath = `${blobEndpoint.pathname.replace(/\/+$/, "")}/${container}/`;
-    if (url.origin === blobEndpoint.origin && url.pathname.startsWith(containerPath)) {
-      return true;
-    }
-  }
-
-  const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
-  if (!publicBaseUrl) return false;
-  const mediaUrl = new URL(`${publicBaseUrl.replace(/\/+$/, "")}/api/media`);
-  if (url.origin !== mediaUrl.origin || url.pathname !== mediaUrl.pathname) return false;
-  const key = url.searchParams.get("key");
-  const token = url.searchParams.get("token");
-  return Boolean(key && token && isValidMediaToken(key, token));
 }
 
 async function urlToFile(url: string, index: number) {

@@ -13,6 +13,12 @@ import {
 const USER_PAGE_SIZE = 20;
 const ACTIVITY_PAGE_SIZE = 40;
 const RAW_RECORD_LIMIT = 20;
+const failedAgentReplyEvent = sql`
+  kind = 'message.delivery'
+    AND status IN ('failed', 'undelivered')
+    AND details->>'purpose' = 'agent_reply'
+    AND message_sid IS NOT NULL
+`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function rowsOf<T>(result: unknown): T[] {
@@ -43,6 +49,7 @@ interface AdminCountRow {
   comics_failed?: string | number | null;
   delivered?: string | number | null;
   delivery_failed?: string | number | null;
+  agent_reply_delivery_failed?: string | number | null;
   outbound_messages?: string | number | null;
   outbound_messages_7d?: string | number | null;
   event_count?: string | number | null;
@@ -68,6 +75,7 @@ export function summarizeAdminCounts(row: AdminCountRow) {
     comicsFailed: numeric(row.comics_failed),
     delivered: numeric(row.delivered),
     deliveryFailed: numeric(row.delivery_failed),
+    agentReplyDeliveryFailed: numeric(row.agent_reply_delivery_failed),
     outboundMessages: numeric(row.outbound_messages),
     outboundMessages7d: numeric(row.outbound_messages_7d),
     eventCount: numeric(row.event_count),
@@ -154,6 +162,8 @@ export async function getAdminDashboard(): Promise<AdminDashboard> {
         (SELECT COUNT(*) FROM generation_jobs
           WHERE delivery_status IN ('failed', 'undelivered')
             AND COALESCE(delivery_fallback_status, '') NOT IN ('delivered', 'read')) AS delivery_failed,
+        (SELECT COUNT(DISTINCT message_sid) FROM activity_events
+          WHERE ${failedAgentReplyEvent}) AS agent_reply_delivery_failed,
         (SELECT COUNT(*) FROM activity_events
           WHERE (kind = 'message.outbound' AND channel = 'sms')
              OR (kind = 'generation.delivery' AND status = 'accepted'
@@ -294,6 +304,30 @@ export interface ActivityCursor {
   id: string;
 }
 
+export type AdminActivityFilter = "all" | "failed-agent-replies";
+
+/** A global operations timeline with an optional agent reply delivery filter. */
+export function buildAdminActivityHistoryQuery(input: {
+  filter: AdminActivityFilter;
+  cursor: ActivityCursor | null;
+  limit: number;
+}): SQL {
+  const filtered = input.filter === "failed-agent-replies"
+    ? sql`AND ${failedAgentReplyEvent}`
+    : sql``;
+  const before = input.cursor
+    ? sql`AND (occurred_at, id) < (${input.cursor.occurredAt.toISOString()}::timestamp, ${input.cursor.id}::uuid)`
+    : sql``;
+  return sql`
+    SELECT id, occurred_at, user_id, channel, kind, direction, address,
+      call_sid, message_sid, job_id, story_id, content, status, details
+    FROM activity_events
+    WHERE TRUE ${filtered} ${before}
+    ORDER BY occurred_at DESC, id DESC
+    LIMIT ${input.limit}
+  `;
+}
+
 export function encodeActivityCursor(cursor: ActivityCursor): string {
   return Buffer.from(JSON.stringify([
     cursor.occurredAt.toISOString(),
@@ -351,6 +385,18 @@ export function paginateActivityRows<T extends { id: string; occurred_at: Date |
       ? encodeActivityCursor({ occurredAt: new Date(last.occurred_at), id: last.id })
       : null,
   };
+}
+
+export async function getAdminActivityHistory(
+  filter: AdminActivityFilter,
+  cursorString: string | null | undefined,
+) {
+  const result = await db.execute(buildAdminActivityHistoryQuery({
+    filter,
+    cursor: decodeActivityCursor(cursorString),
+    limit: ACTIVITY_PAGE_SIZE + 1,
+  }));
+  return paginateActivityRows(rowsOf<AdminActivityRow>(result), ACTIVITY_PAGE_SIZE);
 }
 
 export async function getAdminUserHistory(

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-time Azure foundation for the public app, queue job, and recovery job.
+# One-time Azure foundation for the web app, queue job, and recovery job.
 # This script never builds an image or deploys an application revision.
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -19,6 +19,12 @@ ACA_ENVIRONMENT="${ACA_ENVIRONMENT:-cae-twilio-comics}"
 ACA_NAME="${ACA_NAME:-twilio-comics}"
 ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation}"
 ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery}"
+# The migration Job is created later by provision-postgres-roles.sh. A second
+# foundation run gives the deployment principal access once that Job exists.
+ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-}"
+if [[ -z "$ACA_MIGRATION_JOB_NAME" && "$ACA_NAME" == *-v2 ]]; then
+  ACA_MIGRATION_JOB_NAME="${ACA_NAME%-v2}-migrate-v2"
+fi
 BLOB_CONTAINER="${BLOB_CONTAINER:-comics}"
 QUEUE_NAME="${QUEUE_NAME:-comic-generation}"
 POISON_QUEUE_NAME="${POISON_QUEUE_NAME:-comic-generation-poison}"
@@ -27,8 +33,8 @@ WORKER_IDENTITY_NAME="${WORKER_IDENTITY_NAME:-id-${ACA_NAME}-worker}"
 PULL_IDENTITY_NAME="${PULL_IDENTITY_NAME:-id-${ACA_NAME}-acr-pull}"
 DEPLOY_APP_NAME="${DEPLOY_APP_NAME:-${ACA_NAME}-gha-deploy}"
 GITHUB_ENVIRONMENT=production # Must match both Azure-login jobs in deploy.yml.
-# The ASP.NET sample serves HTTP on 8080, matching this app's ingress and
-# default ACA TCP probes until the production image is deployed.
+# The ASP.NET sample serves HTTP on 8080 behind internal ingress. The release
+# workflow publishes ingress only after migrations and the real image are ready.
 PLACEHOLDER_IMAGE="mcr.microsoft.com/dotnet/samples:aspnetapp"
 TAGS=("created_by=${CREATED_BY:-github-actions}" "managed_by=${MANAGED_BY:-twilio-comics-ci}")
 
@@ -313,8 +319,8 @@ ensure_registry_pull() {
 if ! az containerapp show --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az containerapp create --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
     --environment "$ACA_ENVIRONMENT" --image "$PLACEHOLDER_IMAGE" \
-    --ingress external --target-port 8080 --transport auto \
-    --cpu 0.5 --memory 1Gi --min-replicas 1 --max-replicas 2 \
+    --ingress internal --target-port 8080 --transport auto \
+    --cpu 0.5 --memory 1Gi --min-replicas 0 --max-replicas 2 \
     --scale-rule-name http --scale-rule-http-concurrency 50 \
     --termination-grace-period 240 \
     --user-assigned "$WEB_ID" "$PULL_ID" --env-vars "${WEB_ENV[@]}" \
@@ -323,11 +329,17 @@ else
   existing_app="$(az containerapp show --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" --output json)"
   if ! jq -e '
     (.properties.configuration.ingress // {}) as $ingress
-    | $ingress.external == true
+    | ($ingress.external | type) == "boolean"
       and $ingress.targetPort == 8080
       and (["auto", "http"] | index(($ingress.transport // "auto") | ascii_downcase) != null)
   ' <<< "$existing_app" >/dev/null; then
-    die "Existing Container App '$ACA_NAME' must have external HTTP ingress on port 8080. Align ingress with 'az containerapp ingress update --name $ACA_NAME --resource-group $RESOURCE_GROUP --type external --target-port 8080 --transport auto' when its image listens on port 8080, or choose a new ACA_NAME."
+    die "Existing Container App '$ACA_NAME' must have HTTP ingress on port 8080. Inspect its configuration and choose a different ACA_NAME if necessary."
+  fi
+  if jq -e --arg image "$PLACEHOLDER_IMAGE" '
+    .properties.configuration.ingress.external == true
+      and .properties.template.containers[0].image == $image
+  ' <<< "$existing_app" >/dev/null; then
+    die "Existing Container App '$ACA_NAME' exposes the sample placeholder. Make its ingress internal and scale it to zero before rerunning, or choose a new ACA_NAME."
   fi
 fi
 ensure_workload_identity app "$ACA_NAME" "$WEB_ID"
@@ -335,8 +347,8 @@ ensure_workload_identity app "$ACA_NAME" "$PULL_ID"
 ensure_infrastructure_env app "$ACA_NAME" "${WEB_ENV[@]}"
 ensure_registry_pull app "$ACA_NAME"
 
-# The placeholder does not expose /api/healthz. ACA's default ingress TCP
-# startup/readiness/liveness probes keep it healthy until the real image ships.
+# The placeholder does not expose /api/healthz. It stays private and scaled to
+# zero until the real image and runtime configuration are deployed.
 if ! az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az containerapp job create --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
     --environment "$ACA_ENVIRONMENT" --trigger-type Event \
@@ -395,8 +407,62 @@ if ! az ad sp show --id "$DEPLOY_APP_ID" --output none >/dev/null 2>&1; then
   az ad sp create --id "$DEPLOY_APP_ID" --output none
 fi
 DEPLOY_PRINCIPAL="$(az ad sp show --id "$DEPLOY_APP_ID" --query id --output tsv)"
+[[ -n "$DEPLOY_PRINCIPAL" ]] || die "Cannot resolve the GitHub deployment principal."
+
+verify_workload_scope() {
+  local scope="$1" type="$2" name="$3"
+  jq -en --arg actual "$scope" --arg group "$RESOURCE_GROUP_ID" \
+    --arg type "$type" --arg name "$name" '
+      ($actual | ascii_downcase)
+        == (($group + "/providers/Microsoft.App/" + $type + "/" + $name) | ascii_downcase)
+    ' >/dev/null
+}
+
+# Do not silently change an older principal's assignments. A direct resource
+# group Contributor grant would override the narrow workload scopes below.
+LEGACY_ASSIGNMENTS="$(az role assignment list --assignee-object-id "$DEPLOY_PRINCIPAL" \
+  --scope "$RESOURCE_GROUP_ID" --role Contributor --output json)"
+LEGACY_ASSIGNMENT_IDS="$(jq -r --arg scope "$RESOURCE_GROUP_ID" '
+  .[] | select((.scope | ascii_downcase) == ($scope | ascii_downcase)) | .id
+' <<< "$LEGACY_ASSIGNMENTS")"
+[[ -z "$LEGACY_ASSIGNMENT_IDS" ]] \
+  || die "The GitHub deployment principal still has direct Contributor access at $RESOURCE_GROUP_ID. Review and revoke that assignment manually, then rerun. This script did not remove it."
+
+# Grant access only to resources that this workflow actually updates. The
+# migration Job is created by the PostgreSQL role provisioner, so rerun this
+# script after that step to grant its Job-specific role.
+WEB_SCOPE="$(az containerapp show --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
+GENERATION_SCOPE="$(az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
+RECOVERY_SCOPE="$(az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
+verify_workload_scope "$WEB_SCOPE" containerApps "$ACA_NAME" \
+  || die "Could not verify the exact Container App resource ID for '$ACA_NAME'."
+verify_workload_scope "$GENERATION_SCOPE" jobs "$ACA_JOB_NAME" \
+  || die "Could not verify the exact generation Job resource ID for '$ACA_JOB_NAME'."
+verify_workload_scope "$RECOVERY_SCOPE" jobs "$ACA_RECOVERY_JOB_NAME" \
+  || die "Could not verify the exact recovery Job resource ID for '$ACA_RECOVERY_JOB_NAME'."
+
+ROLE_CREATED=false
 assign_role "$DEPLOY_PRINCIPAL" "$ACR_ID" AcrPush
-assign_role "$DEPLOY_PRINCIPAL" "$RESOURCE_GROUP_ID" Contributor
+assign_role "$DEPLOY_PRINCIPAL" "$WEB_SCOPE" 'Container Apps Contributor'
+assign_role "$DEPLOY_PRINCIPAL" "$GENERATION_SCOPE" 'Container Apps Jobs Contributor'
+assign_role "$DEPLOY_PRINCIPAL" "$RECOVERY_SCOPE" 'Container Apps Jobs Contributor'
+if [[ -n "$ACA_MIGRATION_JOB_NAME" ]]; then
+  if az containerapp job show --name "$ACA_MIGRATION_JOB_NAME" \
+      --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
+    MIGRATION_SCOPE="$(az containerapp job show --name "$ACA_MIGRATION_JOB_NAME" \
+      --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
+    verify_workload_scope "$MIGRATION_SCOPE" jobs "$ACA_MIGRATION_JOB_NAME" \
+      || die "Could not verify the exact migration Job resource ID for '$ACA_MIGRATION_JOB_NAME'."
+    assign_role "$DEPLOY_PRINCIPAL" "$MIGRATION_SCOPE" 'Container Apps Jobs Contributor'
+  else
+    printf 'Migration Job %s does not exist yet; rerun this script after role bootstrap.\n' \
+      "$ACA_MIGRATION_JOB_NAME"
+  fi
+fi
+if [[ "$ROLE_CREATED" == true ]]; then
+  printf 'Waiting for scoped deployment RBAC propagation...\n'
+  sleep "${AZURE_DEPLOY_RBAC_POLL_SECONDS:-30}"
+fi
 
 FEDERATED_NAME=gha-production
 FEDERATED_JSON="$(az ad app federated-credential list --id "$DEPLOY_APP_ID" --output json)"
@@ -425,20 +491,116 @@ elif ! jq -e --arg subject "$OIDC_SUBJECT" '
     --parameters "$FEDERATED_UPDATE_PARAMETERS" --output none
 fi
 
-# A missing environment is created with a main-only deployment branch policy.
-# Existing environment reviewers and protection settings are never replaced.
+# Restrict production deployments to main on both first setup and reruns. The
+# environment API updates protection rules as well as branch mode, so carry
+# existing reviewers and wait timers through a mode change.
 ENVIRONMENT_API="repos/${GITHUB_REPOSITORY}/environments/${GITHUB_ENVIRONMENT}"
-if ! gh api "$ENVIRONMENT_API" >/dev/null 2>&1; then
-  GH_ENV_PARAMETERS='{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
-  gh api --method PUT "$ENVIRONMENT_API" --input - >/dev/null <<< "$GH_ENV_PARAMETERS"
-  gh api --method POST "${ENVIRONMENT_API}/deployment-branch-policies" \
-    --field name=main >/dev/null
+ENVIRONMENTS_JSON="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/environments?per_page=100")" \
+  || die "Cannot list GitHub environments for ${GITHUB_REPOSITORY}."
+jq -e 'type == "array" and length > 0 and all(.[]; (.environments | type) == "array")' \
+  <<< "$ENVIRONMENTS_JSON" >/dev/null \
+  || die "GitHub returned an unexpected environment list."
+ENVIRONMENT_COUNT="$(jq --arg name "$GITHUB_ENVIRONMENT" \
+  '[.[].environments[] | select(.name == $name)] | length' <<< "$ENVIRONMENTS_JSON")"
+[[ "$ENVIRONMENT_COUNT" == 0 || "$ENVIRONMENT_COUNT" == 1 ]] \
+  || die "GitHub returned duplicate '$GITHUB_ENVIRONMENT' environments."
+if [[ "$ENVIRONMENT_COUNT" == 1 ]]; then
+  ENVIRONMENT_JSON="$(gh api "$ENVIRONMENT_API")" \
+    || die "Cannot inspect the existing GitHub '$GITHUB_ENVIRONMENT' environment."
+  jq -e --arg name "$GITHUB_ENVIRONMENT" '
+    .name == $name and (.protection_rules | type) == "array"
+      and (.deployment_branch_policy == null
+        or ((.deployment_branch_policy.protected_branches | type) == "boolean"
+          and (.deployment_branch_policy.custom_branch_policies | type) == "boolean"))
+  ' <<< "$ENVIRONMENT_JSON" >/dev/null \
+    || die "GitHub returned an unexpected '$GITHUB_ENVIRONMENT' environment."
+else
+  ENVIRONMENT_JSON='{"name":"production","protection_rules":[],"deployment_branch_policy":null}'
 fi
+
+if ! jq -e '.deployment_branch_policy.protected_branches == false
+    and .deployment_branch_policy.custom_branch_policies == true' \
+    <<< "$ENVIRONMENT_JSON" >/dev/null; then
+  jq -e '
+    ([.protection_rules[] | select(.type == "wait_timer")] | length) <= 1
+      and ([.protection_rules[] | select(.type == "required_reviewers")] | length) <= 1
+      and all(.protection_rules[]; .type == "wait_timer"
+        or .type == "required_reviewers" or .type == "branch_policy")
+      and all(.protection_rules[] | select(.type == "wait_timer");
+        (.wait_timer | type) == "number")
+      and all(.protection_rules[] | select(.type == "required_reviewers");
+        (.reviewers | type) == "array"
+          and all(.reviewers[]; (.type == "User" or .type == "Team")
+            and (.reviewer.id | type) == "number"))
+  ' <<< "$ENVIRONMENT_JSON" >/dev/null \
+    || die "Cannot safely preserve existing GitHub environment protection rules."
+  GH_ENV_PARAMETERS="$(jq -c '
+    (.protection_rules | map(select(.type == "wait_timer"))) as $wait
+    | (.protection_rules | map(select(.type == "required_reviewers"))) as $review
+    | {deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}
+      + (if ($wait | length) == 1 then {wait_timer: $wait[0].wait_timer} else {} end)
+      + (if ($review | length) == 1 then {
+          reviewers: [$review[0].reviewers[] | {type: .type, id: .reviewer.id}],
+          prevent_self_review: ($review[0].prevent_self_review // false)
+        } else {} end)
+  ' <<< "$ENVIRONMENT_JSON")"
+  gh api --method PUT "$ENVIRONMENT_API" --input - >/dev/null <<< "$GH_ENV_PARAMETERS" \
+    || die "Cannot set GitHub '$GITHUB_ENVIRONMENT' to custom deployment branch policies."
+fi
+
+BRANCH_POLICIES_API="${ENVIRONMENT_API}/deployment-branch-policies"
+list_branch_policies() {
+  gh api --paginate --slurp "${BRANCH_POLICIES_API}?per_page=100"
+}
+BRANCH_POLICIES_JSON="$(list_branch_policies)" \
+  || die "Cannot list GitHub '$GITHUB_ENVIRONMENT' deployment branch policies."
+jq -e 'type == "array" and length > 0
+  and all(.[]; (.branch_policies | type) == "array")
+  and all(.[].branch_policies[]; (.id | type) == "number"
+    and (.name | type) == "string"
+    and (.type == null or .type == "branch" or .type == "tag"))' \
+  <<< "$BRANCH_POLICIES_JSON" >/dev/null \
+  || die "GitHub returned an unexpected deployment branch policy list."
+
+if ! jq -e '[.[].branch_policies[] | select(.name == "main"
+    and (.type == null or .type == "branch"))] | length > 0' \
+    <<< "$BRANCH_POLICIES_JSON" >/dev/null; then
+  gh api --method POST "$BRANCH_POLICIES_API" \
+    --field name=main --field type=branch >/dev/null \
+    || die "Cannot add the GitHub '$GITHUB_ENVIRONMENT' main branch policy."
+fi
+
+# Add main before removing broader patterns, so a failed API call never leaves
+# the environment open to more branches than it was at the start of this step.
+while IFS= read -r policy_id; do
+  [[ -n "$policy_id" ]] || continue
+  gh api --method DELETE "${BRANCH_POLICIES_API}/${policy_id}" >/dev/null \
+    || die "Cannot remove extra GitHub '$GITHUB_ENVIRONMENT' deployment branch policy ${policy_id}."
+done < <(jq -r '.[].branch_policies[]
+  | select(.name != "main" or (.type != null and .type != "branch")) | .id' \
+  <<< "$BRANCH_POLICIES_JSON")
+
+FINAL_ENVIRONMENT_JSON="$(gh api "$ENVIRONMENT_API")" \
+  || die "Cannot verify GitHub '$GITHUB_ENVIRONMENT' environment after update."
+FINAL_BRANCH_POLICIES_JSON="$(list_branch_policies)" \
+  || die "Cannot verify GitHub '$GITHUB_ENVIRONMENT' branch policies after update."
+jq -e '.deployment_branch_policy.protected_branches == false
+  and .deployment_branch_policy.custom_branch_policies == true' \
+  <<< "$FINAL_ENVIRONMENT_JSON" >/dev/null \
+  || die "GitHub '$GITHUB_ENVIRONMENT' is not restricted to custom branch policies."
+jq -e '[.[].branch_policies[]] as $policies
+  | ($policies | length) == 1 and $policies[0].name == "main"
+    and ($policies[0].type == null or $policies[0].type == "branch")' \
+  <<< "$FINAL_BRANCH_POLICIES_JSON" >/dev/null \
+  || die "GitHub '$GITHUB_ENVIRONMENT' must have exactly one main branch policy."
 
 gh variable set ACR_NAME --repo "$GITHUB_REPOSITORY" --body "$ACR_NAME"
 gh variable set ACA_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_NAME"
 gh variable set ACA_JOB_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_JOB_NAME"
 gh variable set ACA_RECOVERY_JOB_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_RECOVERY_JOB_NAME"
+if [[ -n "$ACA_MIGRATION_JOB_NAME" ]]; then
+  gh variable set ACA_MIGRATION_JOB_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_MIGRATION_JOB_NAME"
+fi
 gh variable set ACA_RESOURCE_GROUP --repo "$GITHUB_REPOSITORY" --body "$RESOURCE_GROUP"
 TENANT_ID="$(az account show --query tenantId --output tsv)"
 gh secret set AZURE_CLIENT_ID --repo "$GITHUB_REPOSITORY" --env "$GITHUB_ENVIRONMENT" --body "$DEPLOY_APP_ID"
@@ -448,11 +610,12 @@ gh secret set AZURE_SUBSCRIPTION_ID --repo "$GITHUB_REPOSITORY" --env "$GITHUB_E
 cat <<EOF
 Azure foundation is ready for ${GITHUB_REPOSITORY}.
 
-Public app:  ${ACA_NAME}
+Web app:    ${ACA_NAME} (new placeholders have internal ingress, minReplicas=0)
 Queue job:   ${ACA_JOB_NAME}
 Recovery job: ${ACA_RECOVERY_JOB_NAME}
 ACR server:  ${ACR_SERVER}
 
+Rerun this script after the migration Job exists to grant its scoped deploy role.
 Set runtime secrets on both Jobs and public URLs from docs/INFRA_SETUP.md before the first deploy.
 Store runtime and migration DATABASE_URL values as Azure Container Apps secrets. The
 production GitHub environment needs only Azure OIDC identifiers. Set the repository

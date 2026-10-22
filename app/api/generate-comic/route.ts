@@ -13,8 +13,11 @@ import { uploadBufferToBlob } from "@/lib/blob-storage";
 import {
   consumeFreeTierQuota,
   releaseFreeTierQuota,
-  reserveFreeTierQuota,
 } from "@/lib/quota";
+import {
+  chooseGenerationApiKey,
+  reserveBrowserGenerationCapacity,
+} from "@/lib/generation-capacity";
 import { buildComicPrompt } from "@/lib/prompt";
 import { generateComicImage } from "@/lib/image-generation";
 import {
@@ -22,6 +25,7 @@ import {
   getContentPolicyErrorMessage,
 } from "@/lib/utils";
 import { createComicStory, ComicServiceError } from "@/lib/comic-service";
+import { generateComicRequestSchema } from "@/lib/browser-generation-request";
 
 export async function POST(request: NextRequest) {
   let quotaClaimKey: string | null = null;
@@ -56,45 +60,67 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request" }, { status: 400 });
+    }
+    const parsed = generateComicRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      const fields = body && typeof body === "object" && !Array.isArray(body)
+        ? body as Record<string, unknown>
+        : null;
+      const error = fields && !fields.prompt ? "Missing required fields" : "Invalid comic request";
+      return NextResponse.json({ error }, { status: 400 });
+    }
+
     const {
       storyId,
       prompt,
       apiKey,
-      style = "noir",
-      characterImages = [],
-      isContinuation = false,
-      previousContext = "",
-    } = await request.json();
+      style,
+      characterImages,
+      isContinuation,
+      previousContext,
+    } = parsed.data;
 
-    if (!prompt) {
+    const keyChoice = chooseGenerationApiKey(apiKey, process.env.OPENAI_API_KEY);
+    if (!keyChoice.valid) {
       return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 },
+        { error: keyChoice.reason === "missing"
+          ? "Server configuration error - OpenAI API key not available"
+          : "Invalid OpenAI API key" },
+        { status: keyChoice.reason === "missing" ? 500 : 400 },
       );
     }
-
-    const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
-    if (!openAIApiKey) {
-      return NextResponse.json(
-        { error: "Server configuration error - OpenAI API key not available" },
-        { status: 500 },
-      );
-    }
+    const openAIApiKey = keyChoice.apiKey;
 
     // New-story path: delegate to channel-agnostic service and return early.
     // The continuation path (storyId present) falls through to the existing logic below.
     if (!storyId) {
-      if (!apiKey) {
+      if (keyChoice.appFunded) {
         quotaClaimKey = `web-generation:${userId}:${randomUUID()}`;
-        const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
-        if (!reservation.allowed) {
+        const admission = await reserveBrowserGenerationCapacity(userId, quotaClaimKey);
+        if (admission.reason !== "accepted") {
+          quotaClaimKey = null;
+          if (admission.reason === "daily_capacity") {
+            return NextResponse.json(
+              {
+                error: "Comic generation is at today's capacity. Please try again tomorrow.",
+                errorType: "daily_capacity",
+                isRateLimited: true,
+              },
+              { status: 429 },
+            );
+          }
           return NextResponse.json(
             {
               error: "You've reached the free limit of 3 comics this week.",
               errorType: "quota_limit",
               isRateLimited: true,
-              creditsRemaining: reservation.remaining,
-              resetTime: reservation.reset,
+              creditsRemaining: admission.quota.remaining,
+              resetTime: admission.quota.reset,
             },
             { status: 429 },
           );
@@ -104,12 +130,12 @@ export async function POST(request: NextRequest) {
         const result = await createComicStory({
           userId,
           prompt,
-          apiKey,
+          apiKey: openAIApiKey,
           style,
           characterImageUrls: characterImages,
           source: "web",
           generateTitle: true,
-          usesOwnApiKey: !!apiKey,
+          usesOwnApiKey: !keyChoice.appFunded,
         });
         await finishSavedQuota();
         return NextResponse.json({
@@ -160,17 +186,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    if (!apiKey) {
+    if (keyChoice.appFunded) {
       quotaClaimKey = `web-generation:${userId}:${randomUUID()}`;
-      const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
-      if (!reservation.allowed) {
+      const admission = await reserveBrowserGenerationCapacity(userId, quotaClaimKey);
+      if (admission.reason !== "accepted") {
+        quotaClaimKey = null;
+        if (admission.reason === "daily_capacity") {
+          return NextResponse.json(
+            {
+              error: "Comic generation is at today's capacity. Please try again tomorrow.",
+              errorType: "daily_capacity",
+              isRateLimited: true,
+            },
+            { status: 429 },
+          );
+        }
         return NextResponse.json(
           {
             error: "You've reached the free limit of 3 comics this week.",
             errorType: "quota_limit",
             isRateLimited: true,
-            creditsRemaining: reservation.remaining,
-            resetTime: reservation.reset,
+            creditsRemaining: admission.quota.remaining,
+            resetTime: admission.quota.reset,
           },
           { status: 429 },
         );
@@ -207,10 +244,6 @@ export async function POST(request: NextRequest) {
     let imageBuffer: Buffer;
     try {
       console.log("Starting image generation for ...");
-      console.dir({
-        fullPrompt,
-        referenceImages,
-      });
       const startTime = Date.now();
       imageBuffer = await generateComicImage({
         apiKey: openAIApiKey,

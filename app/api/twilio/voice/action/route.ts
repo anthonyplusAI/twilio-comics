@@ -95,7 +95,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   const relayDuration = durationSeconds(params.SessionDuration);
   const duration = callDuration ?? relayDuration;
   const knownResults = new Set([
-    "queued", "quota_rejected", "checking", "invalid_setup", "stale", "service_error", "limit_reached",
+    "queued", "quota_rejected", "capacity_rejected", "checking", "invalid_setup", "stale", "service_error", "limit_reached",
   ]);
   const result = handoffData.result && knownResults.has(handoffData.result)
     ? handoffData.result
@@ -109,6 +109,9 @@ export async function POST(request: NextRequest): Promise<Response> {
       break;
     case "quota_rejected":
       spoken = "You've reached the free comic limit for this week. Please try again later. Goodbye.";
+      break;
+    case "capacity_rejected":
+      spoken = "Today's comic studio is full. Your idea is saved. Please call again tomorrow. Goodbye.";
       break;
     case "checking":
       spoken = "I'm checking your comic request. If it started, I'll text the result when it's ready. Please call again for status if nothing arrives.";

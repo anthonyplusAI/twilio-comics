@@ -20,6 +20,14 @@ KEY_VAULT_NAME="${KEY_VAULT_NAME:-kv-twilio-comics-1a1d98}"
 ADMIN_SECRET_NAME='postgres-bootstrap-password'
 VNET_NAME='vnet-twilio-comics-v2'
 VNET_CIDR='10.74.0.0/20'
+POSTGRES_VNET_NAME='vnet-twilio-comics-pg-cus'
+POSTGRES_VNET_CIDR='10.75.0.0/20'
+POSTGRES_REGION='centralus'
+POSTGRES_DNS_ZONE='twilio-comics.postgres.database.azure.com'
+ACA_DNS_LINK='twilio-comics-v2-link'
+POSTGRES_DNS_LINK='twilio-comics-pg-cus-link'
+ACA_PEERING='aca-to-postgres-centralus'
+POSTGRES_PEERING='postgres-to-aca-eastus2'
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$PROJECT_ROOT/infra/private-platform.bicep"
 [[ -r "$TEMPLATE" ]] || die "Missing $TEMPLATE."
@@ -43,32 +51,46 @@ for provider in Microsoft.Network Microsoft.App Microsoft.DBforPostgreSQL Micros
     || die "Register $provider in subscription $SUBSCRIPTION_ID before provisioning (current state: ${state:-unknown})."
 done
 
-# Refuse to reserve the address block if another VNet already uses it. A
-# repeat deployment of this template's own VNet is allowed.
+# Refuse either address block if another VNet already uses it. A repeat
+# deployment of either template-owned VNet is allowed only if its region and
+# address space still match the reviewed design.
 TARGET_VNET_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$VNET_NAME"
-VNET_INVENTORY="$(az network vnet list --query '[].{id:id,prefixes:addressSpace.addressPrefixes}' --output json)" \
+POSTGRES_VNET_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$POSTGRES_VNET_NAME"
+VNET_INVENTORY="$(az network vnet list --query '[].{id:id,location:location,prefixes:addressSpace.addressPrefixes}' --output json)" \
   || die 'Cannot inspect existing virtual networks.'
 if ! printf '%s\n' "$VNET_INVENTORY" | python3 -c '
 import ipaddress
 import json
 import sys
 
-target_id, target_cidr = sys.argv[1:]
-target = ipaddress.ip_network(target_cidr)
+aca_id, aca_cidr, db_id, db_cidr, db_region = sys.argv[1:]
+targets = {
+    aca_id.casefold(): (ipaddress.ip_network(aca_cidr), "eastus2"),
+    db_id.casefold(): (ipaddress.ip_network(db_cidr), db_region),
+}
+target_ranges = [item[0] for item in targets.values()]
+if target_ranges[0].overlaps(target_ranges[1]):
+    print("Template VNet address spaces overlap each other", file=sys.stderr)
+    sys.exit(1)
 for network in json.load(sys.stdin):
-    if network.get("id", "").casefold() == target_id.casefold():
+    network_id = network.get("id", "").casefold()
+    if network_id in targets:
+        target, expected_region = targets[network_id]
         existing_prefixes = network.get("prefixes") or []
-        if set(existing_prefixes) != {target_cidr}:
+        if set(existing_prefixes) != {str(target)}:
             print(f"Existing target VNet has a different address space: {existing_prefixes}", file=sys.stderr)
+            sys.exit(1)
+        if network.get("location", "").casefold() != expected_region:
+            print("Existing target VNet is in the wrong region: {}".format(network.get("location")), file=sys.stderr)
             sys.exit(1)
         continue
     for prefix in network.get("prefixes") or []:
         existing = ipaddress.ip_network(prefix)
-        if existing.overlaps(target):
-            network_id = network.get("id") or "unknown"
-            print(f"{target} overlaps existing VNet {network_id} ({existing})", file=sys.stderr)
-            sys.exit(1)
-' "$TARGET_VNET_ID" "$VNET_CIDR"; then
+        for target in target_ranges:
+            if existing.overlaps(target):
+                print("{} overlaps existing VNet {} ({})".format(target, network.get("id") or "unknown", existing), file=sys.stderr)
+                sys.exit(1)
+' "$TARGET_VNET_ID" "$VNET_CIDR" "$POSTGRES_VNET_ID" "$POSTGRES_VNET_CIDR" "$POSTGRES_REGION"; then
   die 'Choose a nonoverlapping address range and review the Bicep template before retrying.'
 fi
 
@@ -303,8 +325,8 @@ with parameters_file.open('w', encoding='utf-8') as destination:
 os.chmod(parameters_file, 0o600)
 PY
 
-printf 'Deploying VNet %s, private PostgreSQL, and Container Apps environment into %s.\n' \
-  "$VNET_NAME" "$RESOURCE_GROUP"
+printf 'Deploying VNet %s in East US 2, VNet %s and private PostgreSQL in Central US, and Container Apps environment into %s.\n' \
+  "$VNET_NAME" "$POSTGRES_VNET_NAME" "$RESOURCE_GROUP"
 az deployment group create \
   --name twilio-comics-private-platform-v2 \
   --resource-group "$RESOURCE_GROUP" \
@@ -343,12 +365,79 @@ sys.exit(0 if any(rule.get("id", "").casefold() == target for rule in rules) els
     || die "Could not allow ACA subnet '$ACA_SUBNET_ID' through the Key Vault firewall. Verify its Microsoft.KeyVault service endpoint and rerun."
 fi
 
-public_access="$(az postgres flexible-server show \
-  --name twilio-comics-pg-1a1d98 --resource-group "$RESOURCE_GROUP" \
-  --query network.publicNetworkAccess --output tsv)" \
-  || die 'Deployment returned, but PostgreSQL could not be read back.'
-[[ "$public_access" == Disabled ]] \
-  || die "PostgreSQL public network access is '${public_access:-unknown}' instead of Disabled."
+for vnet_spec in "$VNET_NAME|$TARGET_VNET_ID|eastus2|$VNET_CIDR" \
+    "$POSTGRES_VNET_NAME|$POSTGRES_VNET_ID|$POSTGRES_REGION|$POSTGRES_VNET_CIDR"; do
+  IFS='|' read -r vnet_name vnet_id vnet_region vnet_cidr <<< "$vnet_spec"
+  vnet_json="$(az network vnet show --name "$vnet_name" \
+    --resource-group "$RESOURCE_GROUP" --output json)" \
+    || die "Deployment returned, but VNet '$vnet_name' could not be read back."
+  printf '%s\n' "$vnet_json" | python3 -c '
+import json
+import sys
 
-printf 'Private platform provisioned. Bootstrap password is stored as %s in Key Vault %s. Create separate migration/runtime SQL roles from inside the new VNet before deploying workloads.\n' \
+expected_id, expected_region, expected_cidr = sys.argv[1:]
+vnet = json.load(sys.stdin)
+assert vnet.get("id", "").casefold() == expected_id.casefold()
+assert vnet.get("location", "").casefold() == expected_region
+assert set(vnet.get("addressSpace", {}).get("addressPrefixes") or []) == {expected_cidr}
+' "$vnet_id" "$vnet_region" "$vnet_cidr" \
+    || die "VNet '$vnet_name' differs from the reviewed region or address space."
+done
+
+check_peering() {
+  local source_vnet="$1" peering_name="$2" remote_id="$3" peering_json
+  peering_json="$(az network vnet peering show --resource-group "$RESOURCE_GROUP" \
+    --vnet-name "$source_vnet" --name "$peering_name" --output json)" \
+    || die "Cannot read VNet peering '$peering_name'."
+  printf '%s\n' "$peering_json" | python3 -c '
+import json
+import sys
+
+peer = json.load(sys.stdin)
+assert peer.get("peeringState") == "Connected"
+assert peer.get("allowVirtualNetworkAccess") is True
+assert peer.get("remoteVirtualNetwork", {}).get("id", "").casefold() == sys.argv[1].casefold()
+' "$remote_id" || die "VNet peering '$peering_name' is not connected to its intended peer."
+}
+check_peering "$VNET_NAME" "$ACA_PEERING" "$POSTGRES_VNET_ID"
+check_peering "$POSTGRES_VNET_NAME" "$POSTGRES_PEERING" "$TARGET_VNET_ID"
+
+check_dns_link() {
+  local link_name="$1" vnet_id="$2" link_json
+  link_json="$(az network private-dns link vnet show --resource-group "$RESOURCE_GROUP" \
+    --zone-name "$POSTGRES_DNS_ZONE" --name "$link_name" --output json)" \
+    || die "Cannot read PostgreSQL private DNS link '$link_name'."
+  printf '%s\n' "$link_json" | python3 -c '
+import json
+import sys
+
+link = json.load(sys.stdin)
+assert link.get("registrationEnabled") is False
+assert link.get("virtualNetwork", {}).get("id", "").casefold() == sys.argv[1].casefold()
+' "$vnet_id" || die "PostgreSQL private DNS link '$link_name' targets the wrong VNet."
+}
+check_dns_link "$ACA_DNS_LINK" "$TARGET_VNET_ID"
+check_dns_link "$POSTGRES_DNS_LINK" "$POSTGRES_VNET_ID"
+
+POSTGRES_SUBNET_ID="$POSTGRES_VNET_ID/subnets/postgresql"
+POSTGRES_DNS_ZONE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/privateDnsZones/$POSTGRES_DNS_ZONE"
+server_json="$(az postgres flexible-server show \
+  --name twilio-comics-pg-1a1d98 --resource-group "$RESOURCE_GROUP" --output json)" \
+  || die 'Deployment returned, but PostgreSQL could not be read back.'
+printf '%s\n' "$server_json" | python3 -c '
+import json
+import sys
+
+subnet_id, zone_id = sys.argv[1:]
+server = json.load(sys.stdin)
+region = "".join(character for character in server.get("location", "") if character.isalnum()).casefold()
+assert region == "centralus"
+assert server.get("sku", {}).get("name") == "Standard_B1ms"
+assert server.get("network", {}).get("publicNetworkAccess") == "Disabled"
+assert server.get("network", {}).get("delegatedSubnetResourceId", "").casefold() == subnet_id.casefold()
+assert server.get("network", {}).get("privateDnsZoneArmResourceId", "").casefold() == zone_id.casefold()
+' "$POSTGRES_SUBNET_ID" "$POSTGRES_DNS_ZONE_ID" \
+  || die 'PostgreSQL is not the reviewed private Central US B1ms server.'
+
+printf 'Private platform provisioned. Bootstrap password is stored as %s in Key Vault %s. Create separate migration/runtime SQL roles from the peered ACA VNet before deploying workloads.\n' \
   "$ADMIN_SECRET_NAME" "$KEY_VAULT_NAME"

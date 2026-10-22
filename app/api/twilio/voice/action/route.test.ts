@@ -89,6 +89,20 @@ describe("ConversationRelay action callback", () => {
     }));
   });
 
+  it("explains a daily capacity denial at the end of a call", async () => {
+    const { POST } = await import("@/app/api/twilio/voice/action/route");
+    const response = await POST(signedAction({
+      CallSid: CALL_SID,
+      CallStatus: "in-progress",
+      HandoffData: JSON.stringify({ result: "capacity_rejected" }),
+    }));
+    const xml = await response.text();
+    expect(response.status).toBe(200);
+    expect(xml).toMatch(/comic studio is full/i);
+    expect(xml).toMatch(/call again tomorrow/i);
+    expect(xml).not.toMatch(/free comic limit/i);
+  });
+
   it("explains an unexpected socket disconnect without promising a new comic", async () => {
     const { POST } = await import("@/app/api/twilio/voice/action/route");
     const response = await POST(signedAction({

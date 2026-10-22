@@ -12,14 +12,18 @@ import { uploadBufferToBlob } from "@/lib/blob-storage";
 import {
   consumeFreeTierQuota,
   releaseFreeTierQuota,
-  reserveFreeTierQuota,
 } from "@/lib/quota";
+import {
+  chooseGenerationApiKey,
+  reserveBrowserGenerationCapacity,
+} from "@/lib/generation-capacity";
 import { buildComicPrompt } from "@/lib/prompt";
 import { generateComicImage } from "@/lib/image-generation";
 import {
   isContentPolicyViolation,
   getContentPolicyErrorMessage,
 } from "@/lib/utils";
+import { addPageRequestSchema } from "@/lib/browser-generation-request";
 
 export async function POST(request: NextRequest) {
   let quotaClaimKey: string | null = null;
@@ -46,7 +50,7 @@ export async function POST(request: NextRequest) {
   try {
     const session = await auth();
     const userId = session?.user?.id;
-    const apiKey = request.headers.get("x-api-key") || undefined;
+    const apiKey = request.headers.get("x-api-key") ?? undefined;
 
     if (!userId) {
       return NextResponse.json(
@@ -55,27 +59,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request" }, { status: 400 });
+    }
+    const parsed = addPageRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      const fields = body && typeof body === "object" && !Array.isArray(body)
+        ? body as Record<string, unknown>
+        : null;
+      const error = fields && (!fields.storyId || !fields.prompt)
+        ? "Missing required fields: storyId and prompt"
+        : "Invalid page request";
+      return NextResponse.json({ error }, { status: 400 });
+    }
+
     const {
       storyId,
       pageId,
       prompt,
-      characterImages = [],
-    } = await request.json();
+      characterImages,
+    } = parsed.data;
 
-    if (!storyId || !prompt) {
+    const keyChoice = chooseGenerationApiKey(apiKey, process.env.OPENAI_API_KEY);
+    if (!keyChoice.valid) {
       return NextResponse.json(
-        { error: "Missing required fields: storyId and prompt" },
-        { status: 400 },
+        { error: keyChoice.reason === "missing"
+          ? "Server configuration error - OpenAI API key not available"
+          : "Invalid OpenAI API key" },
+        { status: keyChoice.reason === "missing" ? 500 : 400 },
       );
     }
-
-    const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
-    if (!openAIApiKey) {
-      return NextResponse.json(
-        { error: "Server configuration error - OpenAI API key not available" },
-        { status: 500 },
-      );
-    }
+    const openAIApiKey = keyChoice.apiKey;
 
     // Get the story and all its pages
     const storyData = await getStoryWithPagesBySlug(storyId);
@@ -97,17 +114,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Page not found" }, { status: 404 });
     }
 
-    if (!apiKey) {
+    if (keyChoice.appFunded) {
       quotaClaimKey = `web-page:${userId}:${randomUUID()}`;
-      const reservation = await reserveFreeTierQuota(userId, quotaClaimKey);
-      if (!reservation.allowed) {
+      const admission = await reserveBrowserGenerationCapacity(userId, quotaClaimKey);
+      if (admission.reason !== "accepted") {
+        quotaClaimKey = null;
+        if (admission.reason === "daily_capacity") {
+          return NextResponse.json(
+            {
+              error: "Comic generation is at today's capacity. Please try again tomorrow.",
+              errorType: "daily_capacity",
+              isRateLimited: true,
+            },
+            { status: 429 },
+          );
+        }
         return NextResponse.json(
           {
             error: "You've reached the free limit of 3 comics this week.",
             errorType: "quota_limit",
             isRateLimited: true,
-            creditsRemaining: reservation.remaining,
-            resetTime: reservation.reset,
+            creditsRemaining: admission.quota.remaining,
+            resetTime: admission.quota.reset,
           },
           { status: 429 },
         );
@@ -189,10 +217,6 @@ export async function POST(request: NextRequest) {
     let imageBuffer: Buffer;
     try {
       console.log("Starting image generation for ...");
-      console.dir({
-        fullPrompt,
-        referenceImages,
-      });
       const startTime = Date.now();
       imageBuffer = await generateComicImage({
         apiKey: openAIApiKey,

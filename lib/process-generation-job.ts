@@ -6,6 +6,7 @@ import {
   createComicStory,
   ComicServiceError,
 } from "@/lib/comic-service";
+import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import {
   GenerationJobLeaseLostError,
   checkpointGenerationDelivery,
@@ -13,6 +14,7 @@ import {
   claimGenerationJob,
   getGenerationJob,
   markGenerationJobFailed,
+  markGenerationJobSuppressed,
   markGenerationJobSucceeded,
   returnGenerationJobToQueue,
 } from "@/lib/generation-jobs";
@@ -25,6 +27,7 @@ import {
 } from "@/lib/twilio";
 import {
   completeConversationForGeneration,
+  deleteBlankFailedGenerationStory,
   failConversationForGeneration,
 } from "@/lib/db-actions";
 import { createMmsPreview } from "@/lib/mms-preview";
@@ -35,6 +38,7 @@ const RESULT_DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TWILIO_VALIDITY_SAFETY_SECONDS = 10;
 const MIN_TWILIO_VALIDITY_SECONDS = 6;
 const EXPIRED_DELIVERY_REASON = "Result delivery expired after 24 hours";
+const OPTED_OUT_DELIVERY_REASON = "recipient_opted_out";
 
 function resultDeliveryValiditySeconds(job: Pick<GenerationJob, "createdAt">): number | null {
   const createdAt = job.createdAt instanceof Date ? job.createdAt.getTime() : NaN;
@@ -108,15 +112,38 @@ async function logGenerationSuccess(job: GenerationJob, storyId: string, deliver
   }, { storyId, messageSid: deliverySid });
 }
 
+async function cleanupFailedEmptyOutput(job: GenerationJob): Promise<void> {
+  try {
+    if (job.targetStoryId) {
+      await cleanupFailedContinuationPage({
+        userId: job.userId,
+        storyId: job.targetStoryId,
+        pageId: job.id,
+      });
+    } else {
+      await deleteBlankFailedGenerationStory({ jobId: job.id, userId: job.userId });
+    }
+  } catch (error) {
+    console.error("Failed to remove unfinished comic after terminal generation failure", {
+      jobId: job.id,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
+}
+
 async function suppressExpiredResult(
   job: GenerationJob,
   workerId: string,
   storyId: string | null = job.storyId,
 ): Promise<void> {
-  // The existing failed state is terminal and releases the reserved quota.
-  // Any generated story and page remain saved; a late result is never sent to
-  // a number that may now belong to someone else.
-  await markGenerationJobFailed(job.id, workerId, EXPIRED_DELIVERY_REASON);
+  // A late result is never sent to a number that may now belong to someone
+  // else. Its saved story still counts as a generated comic.
+  if (storyId) {
+    await markGenerationJobSuppressed(job.id, workerId, EXPIRED_DELIVERY_REASON, storyId);
+  } else {
+    await markGenerationJobFailed(job.id, workerId, EXPIRED_DELIVERY_REASON);
+    await cleanupFailedEmptyOutput(job);
+  }
   await logGenerationEvent(job, "generation.delivery", "delivery:expired", "suppressed", {
     reason: "delivery_window_expired",
     resultGenerated: Boolean(storyId),
@@ -127,6 +154,55 @@ async function suppressExpiredResult(
     resultGenerated: Boolean(storyId),
     totalDurationMs: elapsedMs(job.createdAt),
   }, { storyId });
+  try {
+    if (storyId) {
+      await completeConversationForGeneration(job, storyId);
+    } else {
+      await failConversationForGeneration(job);
+    }
+  } catch (error) {
+    console.error("Failed to reconcile expired comic conversation", error);
+  }
+}
+
+/** Twilio 21610 means further texts to this recipient are blocked until opt-in. */
+function isTwilioOptOut(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, status } = error as { code?: unknown; status?: unknown };
+  return String(code) === "21610" && Number(status) === 400;
+}
+
+async function suppressOptedOutResult(
+  job: GenerationJob,
+  workerId: string,
+  storyId: string | null,
+): Promise<void> {
+  // A saved story and page count against both the weekly and daily limits,
+  // even when Twilio blocks the outbound result after generation.
+  if (storyId) {
+    await markGenerationJobSuppressed(job.id, workerId, OPTED_OUT_DELIVERY_REASON, storyId);
+  } else {
+    await markGenerationJobFailed(job.id, workerId, OPTED_OUT_DELIVERY_REASON);
+  }
+  await logGenerationEvent(job, "generation.delivery", "delivery:opted-out", "suppressed", {
+    reason: OPTED_OUT_DELIVERY_REASON,
+    errorCode: "21610",
+    resultGenerated: Boolean(storyId),
+  }, { storyId });
+  await logGenerationEvent(job, "generation.failed", "failed", "failed", {
+    reason: OPTED_OUT_DELIVERY_REASON,
+    resultGenerated: Boolean(storyId),
+    totalDurationMs: elapsedMs(job.createdAt),
+  }, { storyId });
+  try {
+    if (storyId) {
+      await completeConversationForGeneration(job, storyId);
+    } else {
+      await failConversationForGeneration(job);
+    }
+  } catch (error) {
+    console.error("Failed to reconcile opted-out comic conversation", error);
+  }
 }
 
 function extensionFor(contentType: string): string {
@@ -200,7 +276,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       }
       return;
     }
-    if (["failed", "quota_rejected", "processing"].includes(existing.status)) {
+    if (["admitting", "failed", "quota_rejected", "processing"].includes(existing.status)) {
       return;
     }
     throw new Error("Generation job is already being processed");
@@ -218,6 +294,8 @@ export async function processGenerationJob(jobId: string): Promise<void> {
   );
 
   let acceptedDeliverySid: string | null = claimed.deliverySid;
+  let generatedStoryId: string | null = claimed.storyId;
+  let deliveryAttempted = false;
   try {
     // A prior worker may have sent the result and then failed to checkpoint
     // quota or the terminal job state. Its accepted Message SID is enough to
@@ -277,6 +355,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
           imageKey,
           preserveOnFailure: true,
         });
+    generatedStoryId = result.story.id;
 
     if (resultDeliveryExpired(claimed)) {
       await checkpointGenerationOutput(claimed.id, workerId, {
@@ -289,9 +368,10 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     }
 
     const link = `${publicBaseUrl}/story/${result.story.slug}`;
-    const body = claimed.targetStoryId
+    const readyMessage = claimed.targetStoryId
       ? `Page ${result.page.pageNumber} of "${result.story.title}" is ready! View it here: ${link}`
       : `Your comic "${result.story.title}" is ready! View it here: ${link}`;
+    const body = `${readyMessage} Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page.`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;
@@ -328,6 +408,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         ...(channel === "sms" ? { validityPeriod } : {}),
       };
       try {
+        deliveryAttempted = true;
         deliverySid = await sendChannelMessage({ ...message, mediaUrl });
       } catch (error) {
         if (!mediaUrl || !isMediaSubmissionError(error)) throw error;
@@ -403,6 +484,15 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       }
       throw error;
     }
+    if (deliveryAttempted && isTwilioOptOut(error)) {
+      try {
+        await suppressOptedOutResult(claimed, workerId, generatedStoryId);
+      } catch (checkpointError) {
+        if (checkpointError instanceof GenerationJobLeaseLostError) return;
+        throw checkpointError;
+      }
+      return;
+    }
     const expired = resultDeliveryExpired(claimed);
     if (!expired && !isPermanent(error, claimed.attemptCount)) {
       try {
@@ -422,11 +512,12 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     }
 
     try {
-      await markGenerationJobFailed(
-        claimed.id,
-        workerId,
-        expired ? EXPIRED_DELIVERY_REASON : message,
-      );
+      const terminalReason = expired ? EXPIRED_DELIVERY_REASON : message;
+      if (generatedStoryId) {
+        await markGenerationJobSuppressed(claimed.id, workerId, terminalReason, generatedStoryId);
+      } else {
+        await markGenerationJobFailed(claimed.id, workerId, terminalReason);
+      }
       await logGenerationEvent(claimed, "generation.failed", "failed", "failed", {
         ...errorDetails(error),
         ...(expired ? { reason: "delivery_window_expired" } : {}),
@@ -443,15 +534,14 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       if (checkpointError instanceof GenerationJobLeaseLostError) return;
       throw checkpointError;
     }
-    if (claimed.targetStoryId) {
+    if (!generatedStoryId && !claimed.storyId) {
+      await cleanupFailedEmptyOutput(claimed);
+    }
+    if (generatedStoryId) {
       try {
-        await cleanupFailedContinuationPage({
-          userId: claimed.userId,
-          storyId: claimed.targetStoryId,
-          pageId: claimed.id,
-        });
-      } catch (cleanupError) {
-        console.error("Failed to remove unfinished continuation page", cleanupError);
+        await completeConversationForGeneration(claimed, generatedStoryId);
+      } catch (conversationError) {
+        console.error("Failed to reconcile saved comic conversation", conversationError);
       }
     }
     if (expired) return;
@@ -465,7 +555,9 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         });
         return;
       }
-      const failureBody = failureMessage(error);
+      const failureBody = generatedStoryId
+        ? "Your comic was created, but I couldn't deliver the link. Reply STATUS to get it."
+        : failureMessage(error);
       const channel = (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel;
       const callbackBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
       const failureSid = await sendChannelMessage({
@@ -494,10 +586,12 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     } catch (notificationError) {
       console.error("Failed to send generation failure notification", notificationError);
     }
-    try {
-      await failConversationForGeneration(claimed);
-    } catch (conversationError) {
-      console.error("Failed to restore draft after generation failure", conversationError);
+    if (!generatedStoryId) {
+      try {
+        await failConversationForGeneration(claimed);
+      } catch (conversationError) {
+        console.error("Failed to restore draft after generation failure", conversationError);
+      }
     }
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent } from "react";
+import { useState, useEffect, useEffectEvent, useRef } from "react";
 import { useParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useToast } from "@/hooks/use-toast";
@@ -74,6 +74,8 @@ export function StoryEditorClient() {
     string[]
   >([]);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState<string | null>(null);
+  const pdfInProgressRef = useRef(false);
   const { toast } = useToast();
   const [apiKey, setApiKey] = useApiKey();
 
@@ -140,12 +142,7 @@ export function StoryEditorClient() {
     }
   }, [slug, toast]);
 
-  const handleAddPage = async () => {
-    if (!isLoaded || !isSignedIn || !isOwner) {
-      return;
-    }
-
-    // Check credits
+  const hasGenerationCredits = async (): Promise<boolean> => {
     try {
       const hasApiKey = !!apiKey;
       const response = await fetch('/api/check-credits', {
@@ -163,24 +160,21 @@ export function StoryEditorClient() {
           description: "Failed to check credits",
           variant: "destructive",
         });
-        return;
+        return false;
       }
 
       if (hasApiKey || data.creditsRemaining === "unlimited") {
-        // Has API key, unlimited
-        setShowGenerateModal(true);
-      } else if (data.creditsRemaining > 0) {
-        // Has credits
-        setShowGenerateModal(true);
-        } else {
-          // No credits left, show API modal
-          setShowApiModal(true);
-          toast({
-            title: "No credits remaining",
-            description: "You get 3 credits weekly. Add an API key for unlimited generation.",
-            variant: "destructive",
-          });
-        }
+        return true;
+      }
+      if (data.creditsRemaining > 0) return true;
+
+      setShowApiModal(true);
+      toast({
+        title: "No credits remaining",
+        description: "You get 3 credits weekly. Add an API key for unlimited generation.",
+        variant: "destructive",
+      });
+      return false;
     } catch (error) {
       console.error("Error checking credits:", error);
       toast({
@@ -188,7 +182,13 @@ export function StoryEditorClient() {
         description: "Failed to check credits",
         variant: "destructive",
       });
+      return false;
     }
+  };
+
+  const handleAddPage = async () => {
+    if (!isLoaded || !isSignedIn || !isOwner) return;
+    if (await hasGenerationCredits()) setShowGenerateModal(true);
   };
 
   const addPageFromShortcut = useEffectEvent(() => {
@@ -227,15 +227,9 @@ export function StoryEditorClient() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [pages, currentPage, isOwner]);
 
-  const handleRedrawPage = () => {
-    if (!isLoaded || !isSignedIn || !isOwner) {
-      return;
-    }
-    if (!apiKey) {
-      setShowApiModal(true);
-      return;
-    }
-    setShowRedrawDialog(true);
+  const handleRedrawPage = async () => {
+    if (!isLoaded || !isSignedIn || !isOwner) return;
+    if (await hasGenerationCredits()) setShowRedrawDialog(true);
   };
 
   const confirmRedrawPage = async () => {
@@ -253,7 +247,7 @@ export function StoryEditorClient() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": apiKey!,
+          ...(apiKey ? { "x-api-key": apiKey } : {}),
         },
         body: JSON.stringify({
           storyId: story?.slug,
@@ -301,27 +295,34 @@ export function StoryEditorClient() {
   };
 
   const downloadPDF = async () => {
-    if (!story || pages.length === 0) return;
+    if (!story || pdfInProgressRef.current) return;
 
+    pdfInProgressRef.current = true;
     setIsGeneratingPDF(true);
 
     try {
-      const response = await fetch(`/api/download-pdf?storySlug=${story.slug}`);
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to generate PDF");
-      }
+      setPdfProgress("Preparing PDF…");
+      const { buildComicPdf } = await import("@/lib/client-pdf");
+      const { blob, filename } = await buildComicPdf({
+        title: story.title,
+        imageUrls: pages.map((page) => page.image),
+        siteUrl: window.location.origin,
+        onProgress: ({ page, total }) =>
+          setPdfProgress(`Preparing page ${page} of ${total}…`),
+      });
 
-      // Create blob from response and trigger download
-      const blob = await response.blob();
+      setPdfProgress("Saving PDF…");
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${story.title}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      const link = document.createElement("a");
+      try {
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+      } finally {
+        link.remove();
+        window.setTimeout(() => window.URL.revokeObjectURL(url), 30_000);
+      }
 
       toast({
         title: "PDF downloaded",
@@ -329,14 +330,19 @@ export function StoryEditorClient() {
         duration: 3000,
       });
     } catch (error) {
-      console.error('Error generating PDF:', error);
+      console.error("Error generating PDF:", error);
       toast({
         title: "Failed to generate PDF",
-        description: "An error occurred while generating the PDF.",
+        description:
+          error instanceof Error
+            ? error.message
+            : "An error occurred while generating the PDF.",
         variant: "destructive",
         duration: 4000,
       });
     } finally {
+      pdfInProgressRef.current = false;
+      setPdfProgress(null);
       setIsGeneratingPDF(false);
     }
   };
@@ -417,17 +423,12 @@ export function StoryEditorClient() {
       throw new Error("Only the story owner can add pages");
     }
 
-    if (!apiKey) {
-      setShowApiModal(true);
-      throw new Error("API key required");
-    }
-
     // Add new page mode
     const response = await fetch("/api/add-page", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
       },
       body: JSON.stringify({
         storyId: story?.slug,
@@ -495,6 +496,16 @@ export function StoryEditorClient() {
         isOwner={isOwner}
         onTitleUpdate={handleTitleUpdate}
       />
+
+      {pdfProgress && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="border-b border-border/50 bg-secondary/70 px-4 py-2 text-center text-xs text-foreground"
+        >
+          {pdfProgress}
+        </div>
+      )}
 
       <div className="flex-1 flex overflow-hidden">
         <PageSidebar

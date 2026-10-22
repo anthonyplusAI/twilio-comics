@@ -9,10 +9,13 @@ const h = vi.hoisted(() => ({
   markInboundProcessing: vi.fn(),
   checkpointInboundTurn: vi.fn(),
   completeInboundReply: vi.fn(),
+  completeInboundOptedOutReply: vi.fn(),
   completeInboundWithoutReply: vi.fn(),
   releaseConversationLease: vi.fn(),
   advanceComicAgent: vi.fn(),
   getOrCreateChannelIdentity: vi.fn(),
+  channelStoryLink: vi.fn(),
+  latestStoryLinkForSms: vi.fn(),
   submitGenerationJob: vi.fn(),
   sendChannelMessage: vi.fn(),
   recordActivityEvent: vi.fn(),
@@ -28,12 +31,17 @@ vi.mock("@/lib/twilio-events", () => ({
   markInboundProcessing: h.markInboundProcessing,
   checkpointInboundTurn: h.checkpointInboundTurn,
   completeInboundReply: h.completeInboundReply,
+  completeInboundOptedOutReply: h.completeInboundOptedOutReply,
   completeInboundWithoutReply: h.completeInboundWithoutReply,
   releaseConversationLease: h.releaseConversationLease,
 }));
 vi.mock("@/lib/comic-agent", () => ({ advanceComicAgent: h.advanceComicAgent }));
 vi.mock("@/lib/channel-identities", () => ({
   getOrCreateChannelIdentity: h.getOrCreateChannelIdentity,
+}));
+vi.mock("@/lib/channel-story-link", () => ({
+  channelStoryLink: h.channelStoryLink,
+  latestStoryLinkForSms: h.latestStoryLinkForSms,
 }));
 vi.mock("@/lib/generation-jobs", () => ({ submitGenerationJob: h.submitGenerationJob }));
 vi.mock("@/lib/twilio", () => ({ sendChannelMessage: h.sendChannelMessage }));
@@ -155,6 +163,9 @@ beforeEach(() => {
     receipts[sid].status = "completed";
     receipts[sid].outboundSid = outboundSid;
   });
+  h.completeInboundOptedOutReply.mockImplementation(async (sid: string) => {
+    receipts[sid].status = "completed";
+  });
   h.completeInboundWithoutReply.mockImplementation(async (sid: string) => {
     receipts[sid].status = "completed";
   });
@@ -162,6 +173,8 @@ beforeEach(() => {
     if (conversation.leaseOwner === owner) conversation.leaseOwner = null;
   });
   h.getOrCreateChannelIdentity.mockResolvedValue({ userId: "channel-user" });
+  h.channelStoryLink.mockResolvedValue(null);
+  h.latestStoryLinkForSms.mockResolvedValue(null);
   h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: false });
   h.submitGenerationJob.mockResolvedValue({ accepted: true, job: { id: "job-1" }, remaining: 2 });
   h.sendChannelMessage.mockImplementation(async (message: { body: string; to: string; from: string; channel: string }) => {
@@ -173,6 +186,138 @@ beforeEach(() => {
 });
 
 describe("ordered inbound messaging processor", () => {
+  it("returns a finished comic URL to STATUS from the same SMS identity", async () => {
+    const storyId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    const link = "https://comics.example.com/story/robot-detective";
+    conversation.state = "done";
+    conversation.activeStoryId = storyId;
+    receipts.SM1.body = "  status!  ";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "done",
+      collected: {},
+      activeStoryId: storyId,
+      reply: "Your comic is ready. Send CONTINUE or NEW.",
+      action: "none",
+    });
+    h.channelStoryLink.mockResolvedValue(link);
+
+    await processInboundMessage("SM1");
+
+    expect(h.channelStoryLink).toHaveBeenCalledExactlyOnceWith({
+      storyId, channel: "sms", address: FROM,
+    });
+    expect(sends[0].body).toBe(`Your comic is ready. Send CONTINUE or NEW. View it here: ${link}`);
+    expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("recovers a Voice comic by SMS STATUS after the caller opts back in", async () => {
+    const storyId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    const link = "https://comics.example.com/story/phone-call-hero";
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: {},
+      activeStoryId: null,
+      reply: "I'm ready for your comic idea.",
+      action: "none",
+    });
+    h.latestStoryLinkForSms.mockResolvedValue({ storyId, source: "voice", link });
+
+    await processInboundMessage("SM1");
+
+    expect(h.latestStoryLinkForSms).toHaveBeenCalledExactlyOnceWith({
+      address: FROM,
+      senderAddress: TO,
+    });
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+    expect(sends[0].body).toBe(
+      `Your latest comic from your call is ready. View it here: ${link} Send a new idea to start another by text.`,
+    );
+    expect(conversation).toMatchObject({ state: "collecting", activeStoryId: null });
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("answers an expired Voice result STATUS with a new-idea invitation", async () => {
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: {},
+      activeStoryId: null,
+      reply: "I'm ready for your comic idea. Tell me what should happen.",
+      action: "none",
+    });
+    // The database lookup has no eligible completed job after its 14-day window.
+    h.latestStoryLinkForSms.mockResolvedValue(null);
+
+    await processInboundMessage("SM1");
+
+    expect(h.latestStoryLinkForSms).toHaveBeenCalledOnce();
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+    expect(sends[0].body).toBe("I'm ready for your comic idea. Tell me what should happen.");
+    expect(sends[0].body).not.toContain("/story/");
+  });
+
+  it("returns a newer Voice comic instead of an older completed SMS comic", async () => {
+    const olderSmsStoryId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    const newerVoiceStoryId = "d06c70f2-f0af-464b-b992-2d4040a6fd87";
+    const link = "https://comics.example.com/story/newer-phone-call";
+    conversation.state = "done";
+    conversation.activeStoryId = olderSmsStoryId;
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "done",
+      collected: {},
+      activeStoryId: olderSmsStoryId,
+      reply: "Your comic is ready. Send CONTINUE or NEW.",
+      action: "none",
+    });
+    h.latestStoryLinkForSms.mockResolvedValue({
+      storyId: newerVoiceStoryId, source: "voice", link,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toContain(link);
+    expect(sends[0].body).not.toContain("Send CONTINUE");
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+    expect(conversation.activeStoryId).toBe(olderSmsStoryId);
+  });
+
+  it("gives a recoverable STATUS response when the finished story is missing", async () => {
+    const storyId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    conversation.state = "done";
+    conversation.activeStoryId = storyId;
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "done",
+      collected: {},
+      activeStoryId: storyId,
+      reply: "Your comic is ready.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.channelStoryLink).toHaveBeenCalledOnce();
+    expect(sends[0].body).toMatch(/can't show that comic link.*status.*new/i);
+    expect(sends[0].body).not.toMatch(/comic is ready/i);
+    expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
+  });
+
+  it("does not disclose a comic when the conversation identity differs from the sender", async () => {
+    conversation.state = "done";
+    conversation.activeStoryId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    conversation.phoneNumber = "+15550009999";
+    receipts.SM1.body = "STATUS";
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow(/identity changed/i);
+
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
   it("introduces Twilio Comics and opt-out instructions on only the first SMS reply", async () => {
     receipts.SM2 = receipt("SM2", "Make it manga", "2026-10-01T00:00:02Z");
     h.getInboundMessagePosition.mockImplementation(async (message: Receipt) => ({
@@ -386,6 +531,8 @@ describe("ordered inbound messaging processor", () => {
   });
 
   it("passes a photo-only WhatsApp turn to the agent", async () => {
+    conversation.channel = "whatsapp";
+    conversation.phoneNumber = `whatsapp:${FROM}`;
     receipts.SM1 = receipt("SM1", "", "2026-10-01T00:00:01Z", {
       channel: "whatsapp",
       fromAddress: `whatsapp:${FROM}`,
@@ -473,7 +620,7 @@ describe("ordered inbound messaging processor", () => {
         characterImageUrls: ["https://api.twilio.com/photo"],
       },
     });
-    h.submitGenerationJob.mockResolvedValue({ accepted: false, job: { id: "job-1" }, remaining: 0 });
+    h.submitGenerationJob.mockResolvedValue({ accepted: false, job: { id: "job-1", status: "quota_rejected" }, remaining: 0 });
 
     await processInboundMessage("SM1");
 
@@ -518,16 +665,96 @@ describe("ordered inbound messaging processor", () => {
       reply: "Tell me the art style you want.",
       action: "none",
     });
-    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio unavailable"))
+    h.sendChannelMessage.mockRejectedValueOnce(Object.assign(new Error("Twilio rate limited"), {
+      status: 429,
+      code: 20429,
+    }))
       .mockResolvedValueOnce("SM-out-2");
 
-    await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio unavailable");
+    await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio rate limited");
     expect(receipts.SM1.status).toBe("reply_pending");
+    expect(h.completeInboundOptedOutReply).not.toHaveBeenCalled();
 
     await processInboundMessage("SM1");
 
     expect(h.advanceComicAgent).toHaveBeenCalledOnce();
     expect(receipts.SM1).toMatchObject({ status: "completed", outboundSid: "SM-out-2" });
+  });
+
+  it("does not suppress a full Twilio sender queue error", async () => {
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "Robot detective" },
+      activeStoryId: null,
+      reply: "Tell me the art style you want.",
+      action: "none",
+    });
+    h.sendChannelMessage.mockRejectedValueOnce(Object.assign(new Error("Sender queue full"), {
+      status: 400,
+      code: 21611,
+    }));
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow("Sender queue full");
+    expect(receipts.SM1.status).toBe("reply_pending");
+    expect(h.completeInboundOptedOutReply).not.toHaveBeenCalled();
+
+    await processInboundMessage("SM1");
+    expect(receipts.SM1.status).toBe("completed");
+    expect(h.advanceComicAgent).toHaveBeenCalledOnce();
+  });
+
+  it("closes an opted-out reply so a later inbound turn can proceed without resending it", async () => {
+    receipts.SM2 = receipt("SM2", "A second idea", "2026-10-01T00:00:02Z");
+    h.advanceComicAgent.mockImplementation(async (_current: unknown, turn: { text: string }) => ({
+      nextState: "confirming",
+      collected: { prompt: turn.text },
+      activeStoryId: null,
+      reply: `Draft: ${turn.text}`,
+      action: "none",
+    }));
+    h.sendChannelMessage.mockRejectedValueOnce(Object.assign(new Error("Recipient opted out"), {
+      status: 400,
+      code: 21610,
+    }));
+
+    await processInboundMessage("SM1");
+    expect(receipts.SM1).toMatchObject({ status: "completed", outboundSid: null });
+    expect(h.completeInboundOptedOutReply).toHaveBeenCalledExactlyOnceWith("SM1");
+    expect(h.sendChannelMessage).toHaveBeenCalledTimes(1);
+
+    await processInboundMessage("SM1");
+    expect(h.sendChannelMessage).toHaveBeenCalledTimes(1);
+
+    await processInboundMessage("SM2");
+    expect(receipts.SM2.status).toBe("completed");
+    expect(h.advanceComicAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a submitted generation checkpoint when the confirmation SMS is opted out", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Robot detective", style: "noir" };
+    receipts.SM1.body = "CREATE";
+    const submission = { prompt: "Robot detective", style: "noir", characterImageUrls: [] };
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { prompt: "Robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission,
+    });
+    h.sendChannelMessage.mockRejectedValueOnce(Object.assign(new Error("Recipient opted out"), {
+      status: 400,
+      code: 21610,
+    }));
+
+    await processInboundMessage("SM1");
+
+    expect(h.submitGenerationJob).toHaveBeenCalledOnce();
+    expect(conversation.state).toBe("generating");
+    expect(conversation.collected.generationRequestKey).toBe("twilio-message:SM1");
+    expect(receipts.SM1).toMatchObject({ status: "completed", submission });
+    expect(h.completeInboundOptedOutReply).toHaveBeenCalledExactlyOnceWith("SM1");
   });
 
   it("does not send a reply after losing the conversation lease", async () => {
@@ -559,13 +786,68 @@ describe("ordered inbound messaging processor", () => {
       action: "submit",
       submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [] },
     });
-    h.submitGenerationJob.mockResolvedValue({ accepted: false, job: { id: "job-1" }, remaining: 0 });
+    h.submitGenerationJob.mockResolvedValue({ accepted: false, job: { id: "job-1", status: "quota_rejected" }, remaining: 0 });
 
     await processInboundMessage("SM1");
 
     expect(conversation.state).toBe("confirming");
     expect(receipts.SM1.submission).toBeNull();
     expect(sends[0].body).toMatch(/limit/i);
+  });
+
+  it("explains the daily studio capacity and preserves the confirmed draft", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Robot detective", style: "noir" };
+    receipts.SM1.body = "CREATE";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { prompt: "Robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [] },
+    });
+    h.submitGenerationJob.mockResolvedValue({
+      accepted: false,
+      job: { id: "job-1", status: "quota_rejected", lastError: "daily_generation_capacity" },
+      remaining: 2,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected.generationRequestKey).toBeUndefined();
+    expect(receipts.SM1.submission).toBeNull();
+    expect(sends[0].body).toMatch(/today's comic studio is full/i);
+    expect(sends[0].body).toMatch(/14 days/i);
+    expect(sends[0].body).not.toMatch(/free limit of 3/i);
+  });
+
+  it("keeps an admission in progress checkpoint instead of announcing a quota denial", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Robot detective", style: "noir" };
+    receipts.SM1.body = "CREATE";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { prompt: "Robot detective", style: "noir", generationRequestKey: "twilio-message:SM1" },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [] },
+    });
+    h.submitGenerationJob.mockResolvedValue({
+      accepted: false,
+      job: { id: "job-1", status: "admitting" },
+      remaining: 0,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(conversation.state).toBe("generating");
+    expect(conversation.collected.generationRequestKey).toBe("twilio-message:SM1");
+    expect(receipts.SM1.submission).toMatchObject({ prompt: "Robot detective" });
+    expect(sends[0].body).toMatch(/checking your comic request/i);
+    expect(sends[0].body).not.toMatch(/free limit/i);
   });
 
   it("leaves work retryable when another worker owns the conversation lease", async () => {

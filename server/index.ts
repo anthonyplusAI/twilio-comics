@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { recordVoiceCallStart, recordVoiceTurn } from "@/lib/activity-events";
 import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { advanceComicAgent, emptyAgentCollected } from "@/lib/comic-agent";
+import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { db } from "@/lib/db";
 import { getGenerationJobByIdempotencyKey, submitGenerationJob } from "@/lib/generation-jobs";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
@@ -41,10 +42,10 @@ const nextRevision = sql`GREATEST(
 
 async function loadVoiceConversation(from: string): Promise<VoiceConversationSnapshot> {
   // SET expressions read the old row before updated_at moves forward.
-  // A completed old draft must not be exposed to someone who now owns this
+  // Bound access to an inactive draft or story through a possibly reassigned
   // phone number. A generating row keeps its job marker until completion.
   const staleDraft = sql<boolean>`
-    ${conversations.updatedAt} < NOW() - INTERVAL '24 hours'
+    ${conversations.updatedAt} < NOW() - (${CONVERSATION_RESUME_DAYS} * INTERVAL '1 day')
     AND ${conversations.state} <> 'generating'
   `;
   const [row] = await db

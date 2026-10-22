@@ -4,23 +4,40 @@ Twilio Comics uses Azure Database for PostgreSQL Flexible Server for its app dat
 
 ## Current state and required network change
 
-The initial `cae-twilio-comics` environment was provisioned with Azure's managed network and a placeholder public app. Its network cannot reach the private V2 database. The deployment workflow runs preflight and Drizzle migrations through a manual Container Apps Job inside the new private network. Inspect the V2 resources and role Job before assuming a production database or live migration exists.
+The initial `cae-twilio-comics` environment was provisioned with Azure's managed network and a placeholder public app. Its network cannot reach the private V2 database. The deployment workflow runs preflight and Drizzle migrations through a manual Container Apps Job inside the new private Container Apps environment. Inspect the V2 resources, database roles, and migration Job before assuming a production database or live migration is ready.
 
-Use the pattern already present in the local `twilio-ai-photo-booth` project: one custom VNet with a Container Apps infrastructure subnet delegated to `Microsoft.App/environments`, a **different** subnet delegated to `Microsoft.DBforPostgreSQL/flexibleServers`, and a PostgreSQL private DNS zone linked to the VNet. Create a new workload profile Container Apps environment on the ACA subnet, with external HTTPS ingress for Twilio webhooks and the public landing page. Create Flexible Server with private VNet access and public network access disabled. The web app, event Job, recovery Job, and a manual migration Job all belong in the new environment. Keep the existing placeholder until the new environment and app are verified, then cut over the public URL and Twilio webhooks deliberately.
+The target uses **two custom VNets with bidirectional global peering**:
 
-Before choosing address ranges, check the subscription's existing VNets and reserve nonoverlapping space that accommodates simultaneous old and new ACA revisions. The Container Apps and PostgreSQL subnets have different delegations and cannot be shared. Use the Azure PostgreSQL server FQDN, not an IP address, and link its private DNS zone to the VNet. Test name resolution and port 5432 from a Job **inside** the new Container Apps environment.
+| Region and VNet | Address space | Active delegated subnet | Workloads |
+| --- | --- | --- | --- |
+| East US 2: `vnet-twilio-comics-v2` | `10.74.0.0/20` | `aca-infrastructure`, `10.74.0.0/23`, delegated to `Microsoft.App/environments` | `cae-twilio-comics-v2`, web app, event, recovery, and migration Jobs |
+| Central US: `vnet-twilio-comics-pg-cus` | `10.75.0.0/20` | `postgresql`, `10.75.0.0/26`, delegated to `Microsoft.DBforPostgreSQL/flexibleServers` | `twilio-comics-pg-1a1d98` Flexible Server |
 
-The same pattern is documented by [Container Apps custom VNet setup](https://learn.microsoft.com/en-us/azure/container-apps/workload-profiles-manage-cli) and [PostgreSQL private access networking](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-networking-private). An existing managed network ACA environment is not a substitute for this private route.
+The existing `10.74.8.0/26` PostgreSQL subnet in the East US 2 VNet remains declared but is unused. The Bicep template keeps it during an incremental VNet update. The PostgreSQL private DNS zone, `twilio-comics.postgres.database.azure.com`, is linked to **both** VNets, while global peering provides the route. DNS linking and peering are separate requirements. The server uses private VNet access with public network access disabled; its FQDN must resolve to a private address from a V2 Job. The two address spaces must not overlap with other connected VNets.
+
+```mermaid
+flowchart LR
+  subgraph EUS[East US 2 — 10.74.0.0/20]
+    ACA[Container Apps V2<br/>web and Jobs]
+  end
+  subgraph CUS[Central US — 10.75.0.0/20]
+    PG[(PostgreSQL Flexible Server<br/>Standard_B1ms)]
+  end
+  ACA <-->|global VNet peering| PG
+  DNS[Private PostgreSQL DNS zone] -. linked .-> ACA
+  DNS -. linked .-> PG
+```
+
+Create the V2 web placeholder with internal ingress and zero minimum replicas. After database migration and a healthy application revision, the release workflow enables external HTTPS ingress for Twilio webhooks and the public landing page. Keep the existing V1 placeholder until the V2 app and Jobs are verified, then cut over the public URL and Twilio webhooks deliberately. Test the server FQDN and port 5432 from a Job **inside** the East US 2 V2 environment. [Microsoft's PostgreSQL private-access guide](https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private) explicitly supports clients in a different region through global peering when the private DNS zone is also linked to their VNet; see [Container Apps custom VNet setup](https://learn.microsoft.com/en-us/azure/container-apps/workload-profiles-manage-cli) for the app subnet.
 
 ## Database and credentials
 
-1. Register `Microsoft.DBforPostgreSQL` and verify Flexible Server availability in `eastus2`. Create the server and a dedicated `twilio_comics` database. Set an explicit backup retention period and confirm point in time restore before accepting real users. Prefer private access at creation; this network mode cannot later be moved to another VNet or subnet.
-   The Bicep template requests Burstable `Standard_B2s` in availability zone 2, matching another private server in this subscription. If Azure returns `SkuNotAvailable`, check current zonal capacity before selecting a more expensive compute tier; the `postgresAvailabilityZone` parameter can be changed for a new server.
+1. Register `Microsoft.DBforPostgreSQL` and verify Flexible Server availability in **Central US**. Create the server and a dedicated `twilio_comics` database. The Bicep template requests Burstable `Standard_B1ms`, 32 GB of storage, and 14-day locally redundant backups without a fixed availability zone. Confirm point-in-time restore before accepting real users. Choose private VNet access at creation; this network mode cannot later be moved to another VNet or subnet. East US 2 Burstable requests failed on regional capacity during preparation, so recheck capacity before any SKU or region change and update the cost estimate if a larger SKU is required.
 2. Run the private role bootstrap below. It creates `comics_migrator` and `comics_runtime`. The migration role can create and change `public` tables and the `drizzle` schema. The runtime role can read and modify application rows and use sequences, but cannot create database or schema objects. The migration role sets default grants on tables and sequences it creates, so future Drizzle migrations remain usable by the runtime role. The bootstrap fails if imported `public` objects have another owner; review and repair the import before rerunning.
 3. Store runtime and migration connection URLs as Key Vault secrets consumed through managed identities. The role bootstrap wires `DATABASE_URL=secretref:...` separately on the public app, generation Job, recovery Job, and manual migration Job. During role bootstrap, only the one-off private Job retrieves the administrator password from Key Vault. Do not put passwords in Git, GitHub variables, shell arguments, command output, or image layers.
 4. Use a URL-encoded password and the server FQDN. Example shape: `postgresql://comics_runtime:<encoded-password>@<server>.postgres.database.azure.com/twilio_comics?sslmode=verify-full`. The app's `pg` Pool and read-only migration preflight enforce certificate verification for remote hosts. `drizzle-kit migrate` consumes `DATABASE_URL` directly, so retain `sslmode=verify-full` for that command as well.
 
-The runtime Pool is bounded to four connections per app or Job process, has a five second connection timeout, and lets short lived Jobs exit when idle. Size the Flexible Server connection limit for the sum of active web replicas and Job executions, then monitor connection pressure.
+The runtime Pool is bounded to four connections per app or Job process, has a five second connection timeout, and lets short lived Jobs exit when idle. Size the Flexible Server connection limit for the sum of active web replicas and Job executions, then monitor connection pressure and Burstable CPU credits. The cross-region private route adds traffic charges and latency; see the [Azure cost estimate](AZURE_COSTS.md).
 
 ### One-time role bootstrap and V2 workload wiring
 
@@ -45,7 +62,7 @@ If a Key Vault secret reference fails immediately after creating an identity or 
 
 The production `Dockerfile` contains the web and worker runtime. `Dockerfile.migrate` builds a separate image containing the checked-in migrations, read-only preflight, and Drizzle CLI. Give a manual Container Apps Job that image, the migration role's `DATABASE_URL`, and no public ingress. Its command runs the read-only preflight first and `pnpm db:migrate` only if preflight succeeds. The deployment workflow keeps serial production concurrency so two schema changes cannot run at once.
 
-GitHub Actions authenticates to Azure using the existing OIDC identity, starts that Job, waits for a successful terminal execution, and **stops the deployment** if it fails. It does not run preflight or DDL on the GitHub hosted runner against a private database. Triggering a Job through the Azure management API does not require the runner to route to PostgreSQL. A self-hosted runner within the VNet is another possible migration path, but the manual ACA Job keeps the migration network path aligned with the app.
+GitHub Actions authenticates to Azure through its V2 OIDC deployment principal with a Job-scoped role, starts that Job, waits for a successful terminal execution, and **stops the deployment** if it fails. It does not run preflight or DDL on the GitHub hosted runner against a private database. Triggering a Job through the Azure management API does not require the runner to route to PostgreSQL. A self-hosted runner within the VNet is another possible migration path, but the manual ACA Job keeps the migration network path aligned with the app.
 
 For a fresh empty database, all checked-in Drizzle migrations apply in order. If moving an existing database, run `node --import tsx scripts/check-migration-preflight.ts` from the migration Job first; its journal and schema assessment can block migration until a reviewed baseline or data repair is complete. `pnpm drizzle-kit push` is for a development database, not production schema rollout.
 
@@ -53,7 +70,7 @@ If a previous Neon database contains real stories or history, inventory it befor
 
 ## Acceptance checks
 
-- From the manual Job, resolve `<server>.postgres.database.azure.com` to a private address and connect with verify-full TLS. Confirm a deliberately incorrect server name or certificate fails to connect.
+- From the manual Job in East US 2, resolve `<server>.postgres.database.azure.com` to a private Central US address across the VNet peering and connect with verify-full TLS. Confirm a deliberately incorrect server name or certificate fails to connect.
 - Run migration preflight, then apply migrations on a fresh empty database. Re-run preflight and confirm zero pending migrations.
 - Launch web, event Job, and recovery Job in the new environment and complete one SMS and one Conversation Relay comic. Confirm `/admin` shows their saved records. Roll an image revision and confirm the same records remain.
 - Verify PostgreSQL backup and restore settings and rehearse the [user deletion procedure](DATA_DELETION.md). A deletion from the active database does not retroactively edit existing point in time backups; document their expiry and restore handling.

@@ -198,6 +198,7 @@ describe("advanceComicAgent", () => {
     const status = await advanceComicAgent(current, { text: "  Status.  ", channel: "voice" }, model);
     expect(status.nextState).toBe("done");
     expect(status.reply).toContain("Say CONTINUE");
+    expect(status.reply).toContain("within 14 days");
 
     const continuation = await advanceComicAgent(current, { text: "Continue!", channel: "voice" }, model);
     expect(continuation).toMatchObject({

@@ -72,8 +72,11 @@ function harness(overrides: {
   initial?: Partial<Stored>;
   model?: ComicAgentModel;
   beforeSave?: (next: Pick<Stored, "state" | "collected" | "activeStoryId">) => Promise<void>;
-  submit?: (input: Record<string, unknown>) => Promise<{ accepted: boolean; job: { id: string; status: string } }>;
-  lookupJob?: (key: string) => Promise<{ status: string } | null>;
+  submit?: (input: Record<string, unknown>) => Promise<{
+    accepted: boolean;
+    job: { id: string; status: string; lastError?: string | null };
+  }>;
+  lookupJob?: (key: string) => Promise<{ status: string; lastError?: string | null } | null>;
   onTurn?: (event: Record<string, unknown>) => Promise<void>;
   authorizeCall?: (input: Record<string, unknown>) => boolean | Promise<boolean>;
 } = {}) {
@@ -490,6 +493,35 @@ describe("ConversationRelay voice conversation", () => {
     expect(resultCode(approved)).toBe("quota_rejected");
     expect(h.row.state).toBe("confirming");
     expect((h.row.collected as AgentCollected & { generationRequestKey?: string }).generationRequestKey).toBeUndefined();
+  });
+
+  it("returns a daily capacity result while keeping the voice draft editable", async () => {
+    const h = harness({ submit: async () => ({
+      accepted: false,
+      job: { id: JOB_ID, status: "quota_rejected", lastError: "daily_generation_capacity" },
+    }) });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approved = await session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 5_000);
+    expect(resultCode(approved)).toBe("capacity_rejected");
+    expect(h.row.state).toBe("confirming");
+    expect((h.row.collected as AgentCollected & { generationRequestKey?: string }).generationRequestKey).toBeUndefined();
+  });
+
+  it("recognizes durable daily capacity denial after an uncertain submit result", async () => {
+    const h = harness({
+      submit: async () => { throw new Error("Database reply lost"); },
+      lookupJob: async () => ({ status: "quota_rejected", lastError: "daily_generation_capacity" }),
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approved = await session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 5_000);
+    expect(resultCode(approved)).toBe("capacity_rejected");
+    expect(h.row.state).toBe("confirming");
   });
 
   it.each(["pending", "enqueue_failed"])("keeps a %s job checkpoint for recovery", async (status) => {

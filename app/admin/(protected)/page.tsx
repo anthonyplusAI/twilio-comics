@@ -66,6 +66,10 @@ export default async function AdminDashboardPage() {
           <dl className={styles.healthList}>
             <div><dt>Comic links delivered</dt><dd>{counts.delivered.toLocaleString()}</dd></div>
             <div><dt>Delivery issues</dt><dd data-alert={counts.deliveryFailed > 0}>{counts.deliveryFailed.toLocaleString()}</dd></div>
+            <div>
+              <dt><Link className={styles.inlineLink} href="/admin/activity?filter=failed-agent-replies">Agent reply delivery issues</Link></dt>
+              <dd data-alert={counts.agentReplyDeliveryFailed > 0}>{counts.agentReplyDeliveryFailed.toLocaleString()}</dd>
+            </div>
             <div><dt>Generation failures</dt><dd data-alert={counts.comicsFailed > 0}>{counts.comicsFailed.toLocaleString()}</dd></div>
             <div><dt>Outbound texts recorded</dt><dd>{counts.outboundMessages.toLocaleString()}</dd></div>
             <div><dt>Message turns limited</dt><dd data-alert={counts.messageAgentTurnsDenied > 0}>{counts.messageAgentTurnsDenied.toLocaleString()}</dd></div>
@@ -86,7 +90,7 @@ export default async function AdminDashboardPage() {
             <h2 id="recent-heading">Recent activity</h2>
             <p>Message, voice, generation, and delivery events.</p>
           </div>
-          <Link className={styles.inlineLink} href="/admin/users">Find a participant</Link>
+          <Link className={styles.inlineLink} href="/admin/activity">View full activity</Link>
         </div>
         <ActivityList events={recentActivity} compact />
       </section>

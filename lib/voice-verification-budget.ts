@@ -5,6 +5,8 @@ const CALL_SID = /^CA[0-9a-f]{32}$/i;
 const E164 = /^\+[1-9]\d{6,14}$/;
 const MAX_STARTS_PER_HOUR = 4;
 const MAX_STARTS_PER_DAY = 10;
+const MAX_NUMBER_STARTS_PER_HOUR = 12;
+const MAX_NUMBER_STARTS_PER_DAY = 40;
 
 export interface VoiceVerificationRequest {
   callSid: string;
@@ -23,10 +25,15 @@ function rowsOf<T>(result: unknown): T[] {
   throw new Error("Unexpected Voice verification query result");
 }
 
+function numericCount(value: unknown): number {
+  if (typeof value === "number") return value;
+  return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+}
+
 /**
- * Bound Verify SMS starts before calling Twilio. The PostgreSQL advisory lock
- * serializes calls from one caller, while a CallSid key makes webhook retries
- * reuse a code that was already sent instead of creating another billable SMS.
+ * Bound Verify SMS starts before calling Twilio. Recipient and caller advisory
+ * locks serialize both budgets across app replicas. A CallSid key makes webhook
+ * retries reuse a code that was already sent instead of creating another SMS.
  */
 export async function reserveVoiceVerificationStart(
   input: VoiceVerificationRequest,
@@ -38,9 +45,17 @@ export async function reserveVoiceVerificationStart(
 
   try {
     return await db.transaction(async (tx): Promise<VoiceVerificationReservation> => {
+      // Acquire in the same order for every call. A hash collision only makes
+      // unrelated numbers or callers wait; counts match the full addresses.
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
-          hashtext('twilio-comics:voice-verify'),
+          hashtext('twilio-comics:voice-verify:recipient'),
+          hashtext(${input.toAddress})
+        )
+      `);
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtext('twilio-comics:voice-verify:caller'),
           hashtext(${input.fromAddress})
         )
       `);
@@ -67,34 +82,61 @@ export async function reserveVoiceVerificationStart(
             : { allowed: false, reason: "in_progress" };
       }
 
-      const usage = rowsOf<{ hour_count: number | string; day_count: number | string }>(
+      const usage = rowsOf<{
+        caller_hour_count: number | string;
+        caller_day_count: number | string;
+        number_hour_count: number | string;
+        number_day_count: number | string;
+      }>(
         await tx.execute(sql`
           SELECT
             COUNT(*) FILTER (
-              WHERE occurred_at >= statement_timestamp() - INTERVAL '1 hour'
-            )::integer AS hour_count,
-            COUNT(*)::integer AS day_count
+              WHERE address = ${input.fromAddress}
+                AND occurred_at >= statement_timestamp() - INTERVAL '1 hour'
+            )::integer AS caller_hour_count,
+            COUNT(*) FILTER (
+              WHERE address = ${input.fromAddress}
+            )::integer AS caller_day_count,
+            COUNT(*) FILTER (
+              WHERE details->>'toAddress' = ${input.toAddress}
+                AND occurred_at >= statement_timestamp() - INTERVAL '1 hour'
+            )::integer AS number_hour_count,
+            COUNT(*) FILTER (
+              WHERE details->>'toAddress' = ${input.toAddress}
+            )::integer AS number_day_count
           FROM activity_events
           WHERE kind = 'voice.verification.requested'
-            AND address = ${input.fromAddress}
             AND occurred_at >= statement_timestamp() - INTERVAL '24 hours'
+            AND (address = ${input.fromAddress}
+              OR details->>'toAddress' = ${input.toAddress})
         `),
       )[0];
-      const hourCount = Number(usage?.hour_count);
-      const dayCount = Number(usage?.day_count);
-      if (!usage || !Number.isSafeInteger(hourCount) || !Number.isSafeInteger(dayCount)) {
+      const callerHourCount = numericCount(usage?.caller_hour_count);
+      const callerDayCount = numericCount(usage?.caller_day_count);
+      const numberHourCount = numericCount(usage?.number_hour_count);
+      const numberDayCount = numericCount(usage?.number_day_count);
+      if (!usage || ![
+        callerHourCount, callerDayCount, numberHourCount, numberDayCount,
+      ].every((count) => Number.isSafeInteger(count) && count >= 0)) {
         throw new Error("Invalid Voice verification usage count");
       }
-      const allowed = hourCount < MAX_STARTS_PER_HOUR && dayCount < MAX_STARTS_PER_DAY;
+      let limit: "caller_hour" | "caller_day" | "number_hour" | "number_day" | null = null;
+      if (callerHourCount >= MAX_STARTS_PER_HOUR) limit = "caller_hour";
+      else if (callerDayCount >= MAX_STARTS_PER_DAY) limit = "caller_day";
+      else if (numberHourCount >= MAX_NUMBER_STARTS_PER_HOUR) limit = "number_hour";
+      else if (numberDayCount >= MAX_NUMBER_STARTS_PER_DAY) limit = "number_day";
+      const allowed = limit === null;
       const kind = allowed ? "voice.verification.requested" : "voice.verification.denied";
       const status = allowed ? "reserved" : "denied";
       const inserted = rowsOf<{ id: string }>(await tx.execute(sql`
         INSERT INTO activity_events
-          (event_key, channel, kind, direction, address, call_sid, status, details)
+          (event_key, occurred_at, channel, kind, direction, address, call_sid, status, details)
         VALUES (
-          ${eventKey}, 'voice', ${kind}, 'inbound', ${input.fromAddress},
+          ${eventKey}, statement_timestamp(), 'voice', ${kind}, 'inbound', ${input.fromAddress},
           ${input.callSid}, ${status},
-          jsonb_build_object('toAddress', ${input.toAddress})
+          jsonb_strip_nulls(jsonb_build_object(
+            'toAddress', ${input.toAddress}, 'budgetLimit', ${limit}
+          ))
         )
         ON CONFLICT (event_key) DO NOTHING
         RETURNING id
