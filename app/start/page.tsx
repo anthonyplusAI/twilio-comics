@@ -16,12 +16,10 @@ type ChannelChoice = {
   id: MarketingChannel;
   label: string;
   heading: string;
-  description: string;
   destination: string;
   href: string;
   action: string;
-  nextStep: string;
-  result: string;
+  expectation: string;
   qrTitle: string;
   qrCaption: string;
 };
@@ -49,44 +47,36 @@ export default function StartPage() {
     sms: {
       id: "sms",
       label: "Twilio SMS",
-      heading: "Text your idea.",
-      description:
-        "Start the chat, then tell the agent about a character, a joke, or one scene. You can add up to two reference photos.",
+      heading: "Text us.",
       destination: phoneNumber,
       href: contact.smsHref ?? "",
       action: "Open SMS draft",
-      nextStep: "Share your idea with the agent, then send CREATE when the story sounds right.",
-      result: "Your comic link arrives by SMS, with a preview when available.",
+      expectation: "Share your idea, then send CREATE. Your comic link arrives by SMS.",
       qrTitle: `Scan to text ${COMIC_START_MESSAGE} to ${phoneNumber}`,
-      qrCaption: `Scan, then send ${COMIC_START_MESSAGE} to begin.`,
+      qrCaption: "Scan to open a text.",
     },
     whatsapp: {
       id: "whatsapp",
       label: "Twilio WhatsApp",
-      heading: "Chat it through.",
-      description:
-        "Message your comic idea in WhatsApp. You can share up to two reference photos in the chat.",
+      heading: "Chat with us.",
       destination: whatsappNumber,
       href: contact.whatsappHref ?? "",
-      action: "Open WhatsApp draft",
-      nextStep: "Share your idea with the agent, then send CREATE when the story sounds right.",
-      result: "Your comic link arrives in the same WhatsApp chat.",
+      action: "Open WhatsApp",
+      expectation: "Share your idea, then send CREATE. Your comic link arrives in WhatsApp.",
       qrTitle: `Scan to start a WhatsApp chat with ${COMIC_START_MESSAGE}`,
-      qrCaption: `Scan, then send ${COMIC_START_MESSAGE} to begin.`,
+      qrCaption: "Scan to open WhatsApp.",
     },
     voice: {
       id: "voice",
       label: "Twilio Voice",
-      heading: "Talk to the agent.",
-      description:
-        "Call from a phone that can receive SMS. Enter the code we text you on your keypad, then tell the agent your idea out loud.",
+      heading: "Call us.",
       destination: phoneNumber,
       href: contact.callHref ?? "",
       action: "Call the agent",
-      nextStep: "Enter the six digit texted code on your keypad, answer out loud, then say “create it” when the story sounds right.",
-      result: "Your comic link arrives by SMS after the call.",
+      expectation:
+        "Call from a phone that receives texts. Enter the code on your keypad, share your idea, then say “create it.” Your comic link arrives by SMS.",
       qrTitle: `Scan to call ${phoneNumber}`,
-      qrCaption: "Scan with your phone to call the agent.",
+      qrCaption: "Scan to call.",
     },
   };
   const activeChoices = selectedChannels
@@ -108,39 +98,27 @@ export default function StartPage() {
       </header>
 
       <main>
-        <section className={styles.intro} aria-labelledby="start-title">
+        <section
+          className={styles.intro}
+          aria-labelledby="start-title"
+          role={activeChoices.length ? undefined : "status"}
+        >
           <div className={styles.introInner}>
-            <p className={styles.eyebrow}>Twilio Comics · Start here</p>
-            <h1 id="start-title">Pick your way into the story.</h1>
+            <h1 id="start-title">
+              {activeChoices.length ? "Choose how to start." : "Comic line opening soon."}
+            </h1>
             <p className={styles.introCopy}>
-              Choose a channel, share your idea, and shape the comic with our agent.
-              Your finished comic link comes back to your phone.
+              {activeChoices.length
+                ? "Tell our AI agent your idea. Get the comic link on your phone."
+                : "Come back to start your comic when a channel is ready."}
             </p>
-          </div>
-          <div className={styles.introMark} aria-hidden="true">
-            <span>YOUR</span>
-            <span>STORY</span>
-            <span>STARTS</span>
-            <span>HERE!</span>
           </div>
         </section>
 
-        <section className={styles.choicesSection} aria-labelledby="choices-title">
-          <div className={styles.sectionHeading}>
-            <span className={styles.sectionRule} aria-hidden="true" />
-            <h2 id="choices-title">
-              {activeChoices.length ? "Choose your channel" : "The comic line is opening soon"}
-            </h2>
-            <p>
-              {activeChoices.length
-                ? "Tap a button on your phone, or scan its QR code from another screen."
-                : "Available text and phone call options will appear here when they are ready."}
-            </p>
-          </div>
-
-          {activeChoices.length ? (
+        {activeChoices.length > 0 && (
+          <section className={styles.choicesSection} aria-label="Available channels">
             <div className={styles.cards}>
-              {activeChoices.map((choice, index) => (
+              {activeChoices.map((choice) => (
                 <article
                   className={`${styles.card} ${styles[choice.id]}`}
                   key={choice.id}
@@ -150,69 +128,55 @@ export default function StartPage() {
                       {choice.id === "voice" ? <Phone size={24} /> : <MessageCircle size={24} />}
                     </span>
                     <span className={styles.channelLabel}>{choice.label}</span>
-                    <span className={styles.channelIndex}>{String(index + 1).padStart(2, "0")}</span>
                   </div>
-                  <div className={styles.cardContent}>
-                    <h3>{choice.heading}</h3>
-                    <p className={styles.description}>{choice.description}</p>
-                    <p className={styles.destination}>
-                      <span>{choice.id === "voice" ? "Call" : "Message"}</span>
-                      <strong>{choice.destination}</strong>
-                    </p>
-                    <a className={styles.channelButton} href={choice.href}>
-                      {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
-                    </a>
+                  <div className={styles.cardTop}>
+                    <div className={styles.cardAction}>
+                      <h2>{choice.heading}</h2>
+                      <p className={styles.destination}>{choice.destination}</p>
+                      <a className={styles.channelButton} href={choice.href}>
+                        {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
+                      </a>
+                    </div>
+                    <div className={styles.qrPanel}>
+                      <div className={styles.qrFrame}>
+                        <QRCodeSVG
+                          value={choice.href}
+                          size={100}
+                          level="M"
+                          includeMargin
+                          bgColor="#ffffff"
+                          fgColor="#000d25"
+                          title={choice.qrTitle}
+                        />
+                      </div>
+                      <p><ScanLine size={16} aria-hidden="true" /> {choice.qrCaption}</p>
+                    </div>
+                  </div>
+                  <div className={styles.cardInfo}>
                     {choice.id !== "voice" && (
                       <p className={styles.sendInstruction}>
-                        <strong>Send {COMIC_START_MESSAGE} to begin.</strong> Opening a draft does not
-                        message the agent. Tap Send; if the draft is blank, type {COMIC_START_MESSAGE} first.
+                        <strong>{COMIC_START_MESSAGE} is in the draft. Tap Send to start.</strong>{" "}
+                        Blank draft? Type {COMIC_START_MESSAGE}.
                       </p>
                     )}
+                    <p className={styles.expectation}>{choice.expectation}</p>
                     {(choice.id === "sms" || choice.id === "voice") && (
                       <p className={styles.programDisclosure}>
                         {choice.id === "voice"
-                          ? "Twilio Comics' AI agent handles your call. Your comic result is sent by SMS to the number you call from. "
-                          : "Twilio Comics sends automated replies, generation updates, and your comic link after you text us. "}
-                        Message frequency varies with your requests. Message and data rates may apply.
-                        Reply HELP for help or STOP to opt out. Read our{" "}
-                        <Link href="/privacy">Privacy Policy</Link> and{" "}
+                          ? "An AI agent handles your call; verification and the comic link arrive by SMS. "
+                          : "Automated replies and comic updates. Message frequency varies. "}
+                        Message and data rates may apply.{" "}
+                        {choice.id === "sms" && "Reply HELP for help or STOP to opt out. "}
+                        <Link href="/privacy">Privacy Policy</Link> ·{" "}
                         <Link href="/terms">Terms of Service</Link>.
                       </p>
                     )}
-                    <div className={styles.flow}>
-                      <p><strong>Then</strong> {choice.nextStep}</p>
-                      <p><strong>Result</strong> {choice.result}</p>
-                    </div>
-                  </div>
-                  <div className={styles.qrPanel}>
-                    <div className={styles.qrFrame}>
-                      <QRCodeSVG
-                        value={choice.href}
-                        size={108}
-                        level="M"
-                        includeMargin
-                        bgColor="#ffffff"
-                        fgColor="#000d25"
-                        title={choice.qrTitle}
-                      />
-                    </div>
-                    <p><ScanLine size={19} aria-hidden="true" /> {choice.qrCaption}</p>
                   </div>
                 </article>
               ))}
             </div>
-          ) : (
-            <div className={styles.closedPanel} role="status">
-              <span className={styles.closedIcon} aria-hidden="true">
-                <MessageCircle size={30} />
-              </span>
-              <div>
-                <strong>Opening soon</strong>
-                <p>Come back when a Twilio channel is connected to start your comic.</p>
-              </div>
-            </div>
-          )}
-        </section>
+          </section>
+        )}
       </main>
 
       <footer className={marketingStyles.footer}>

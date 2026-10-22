@@ -390,6 +390,39 @@ describe("processGenerationJob", () => {
     }));
   });
 
+  it.each([
+    ["image failure", new Error("Image service unavailable"), 3],
+    ["content policy rejection", new ComicServiceError("content_policy", "Rejected"), 1],
+  ])("tells Voice callers to call again after %s", async (_reason, error, attemptCount) => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, source: "voice", attemptCount });
+    h.createComicStory.mockRejectedValue(error);
+
+    await processGenerationJob(job.id);
+
+    const notice = h.sendChannelMessage.mock.calls[0][0];
+    expect(notice.channel).toBe("sms");
+    expect(notice.body).toMatch(/Call again from this phone, verify, and say what to change or NEW\.$/);
+    expect(notice.body).not.toMatch(/send NEW/i);
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ source: "voice" }));
+  });
+
+  it("keeps WhatsApp failure instructions in the chat", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      source: "whatsapp",
+      recipientAddress: "whatsapp:+15551230000",
+      senderAddress: "whatsapp:+15550000000",
+      attemptCount: 3,
+    });
+    h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
+
+    await processGenerationJob(job.id);
+
+    const notice = h.sendChannelMessage.mock.calls[0][0];
+    expect(notice.channel).toBe("whatsapp");
+    expect(notice.body).toContain("Tell me what to change or send NEW.");
+  });
+
   it("records a transient retry without exposing the raw error message", async () => {
     h.createComicStory.mockRejectedValue(new Error("provider request included secret detail"));
 
@@ -460,6 +493,32 @@ describe("processGenerationJob", () => {
       expect.objectContaining({ source: "voice" }),
       "story-1",
     );
+  });
+
+  it("texts Voice callers to call again, verify, and say CONTINUE for another page", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, source: "voice" });
+
+    await processGenerationJob(job.id);
+
+    const result = h.sendChannelMessage.mock.calls[0][0];
+    expect(result.channel).toBe("sms");
+    expect(result.body).toMatch(/For another page, call again from this phone within 14 days and say CONTINUE after verification\.$/);
+    expect(result.body).not.toMatch(/reply CONTINUE/i);
+  });
+
+  it("invites WhatsApp users to reply CONTINUE in their chat", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      source: "whatsapp",
+      recipientAddress: "whatsapp:+15551230000",
+      senderAddress: "whatsapp:+15550000000",
+    });
+
+    await processGenerationJob(job.id);
+
+    const result = h.sendChannelMessage.mock.calls[0][0];
+    expect(result.channel).toBe("whatsapp");
+    expect(result.body).toContain("Reply CONTINUE within 14 days for another page.");
   });
 
   it("treats a duplicate queue message during active processing as handled", async () => {

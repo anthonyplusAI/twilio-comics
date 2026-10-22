@@ -55,18 +55,32 @@ describe("channel chooser", () => {
       "sms:+18669012028?body=NEW",
       "tel:+18669012028",
     ]);
-    expect(html).toMatch(/send NEW.+(?:tap|press) Send/i);
+    expect(html).toMatch(/NEW is in the draft\. Tap Send to start\./);
+    expect(html).toMatch(/Blank draft\? Type NEW\./);
     expect(html).not.toContain("Twilio WhatsApp");
     expect(html).toMatch(/Message frequency varies/i);
-    expect(html.match(/Message frequency varies/g)).toHaveLength(2);
+    expect(html.match(/Message frequency varies/g)).toHaveLength(1);
     expect(html).toMatch(/Message and data rates may apply/i);
     expect(html).toMatch(/Reply HELP for help or STOP to opt out/i);
+    expect(html).toMatch(/An AI agent handles your call; verification and the comic link arrive by SMS/i);
     expect(html).toContain('href="/privacy"');
     expect(html).toContain('href="/terms"');
-    expect(html).toMatch(/comic link[^<]*by SMS after the call/i);
-    expect(html).toMatch(/code.+keypad/i);
+    expect(html).toMatch(/Call from a phone that receives texts/i);
+    expect(html).toMatch(/Enter the code on your keypad/i);
+    expect(html).toMatch(/Your comic link arrives by SMS/i);
     expect(html).toContain('href="https://www.twilio.com/en-us/legal/privacy"');
     expect(html).toContain('href="https://www.twilio.com/en-us/legal/tos"');
+  });
+
+  it("shows one short introduction and keeps directions with each action", async () => {
+    const html = await renderPage({ channels: "sms,voice" });
+
+    expect(html.match(/<h1\b/g)).toHaveLength(1);
+    expect(html).toContain("Choose how to start.");
+    expect(html).not.toContain("Choose your channel");
+    expect(html).not.toMatch(/<strong>Then<\/strong>|<strong>Result<\/strong>/);
+    expect(html).toMatch(/Open SMS draft.+NEW is in the draft\. Tap Send to start/i);
+    expect(html).toMatch(/Call the agent.+Call from a phone that receives texts/i);
   });
 
   it("opens SMS from the only enabled channel", async () => {
