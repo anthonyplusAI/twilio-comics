@@ -186,6 +186,7 @@ Azure deployment is gated by the reusable `Validate` CI check and the explicit `
 
 - One-time Azure and GitHub setup: [`docs/INFRA_SETUP.md`](docs/INFRA_SETUP.md)
 - Private PostgreSQL network and migration setup: [`docs/AZURE_POSTGRES.md`](docs/AZURE_POSTGRES.md)
+- Early launch Azure cost estimate: [`docs/AZURE_COSTS.md`](docs/AZURE_COSTS.md)
 - Deployment behavior and operations: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - CI checks and dependency updates: [`docs/CICD.md`](docs/CICD.md)
 
