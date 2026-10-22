@@ -158,13 +158,18 @@ case "$1 $2 ${3:-}" in
     [[ "${*}" == *'--query id'* ]] && printf 'principal-deploy\n'
     exit 0 ;;
   'ad app federated-credential')
-    if [[ "${4:-}" == list ]]; then
-      if [[ "${AZURE_TEST_FEDERATED_EXISTS:-}" == 1 ]]; then
-        printf '[{"name":"gha-production","issuer":"https://token.actions.githubusercontent.com","subject":"repo:third-owner/twilio-comics:environment:production","audiences":["api://AzureADTokenExchange"]}]\n'
-      else
-        printf '[]\n'
-      fi
-    fi
+    case "${4:-}" in
+      list)
+        if [[ "${AZURE_TEST_FEDERATED_EXISTS:-}" == 1 ]]; then
+          jq -n --arg subject "${AZURE_TEST_FEDERATED_SUBJECT:-repo:third-owner/twilio-comics:environment:production}" \
+            '[{"name":"gha-production","issuer":"https://token.actions.githubusercontent.com","subject":$subject,"audiences":["api://AzureADTokenExchange"]}]'
+        else
+          printf '[]\n'
+        fi ;;
+      create|update)
+        printf '%s\n' "$*" >> "$AZURE_TEST_FEDERATED_LOG" ;;
+      *) printf 'Unexpected federated-credential action: %s\n' "${4:-}" >&2; exit 90 ;;
+    esac
     exit 0 ;;
   'containerapp show --name')
     [[ "${AZURE_TEST_MISSING_APP:-}" == 1 ]] && exit 1
@@ -409,10 +414,12 @@ esac
 GH_FULL
 chmod +x "$TEST_ROOT/bin/gh"
 AZURE_TEST_ACTION_LOG="$TEST_ROOT/role-actions"
+AZURE_TEST_FEDERATED_LOG="$TEST_ROOT/federated-actions"
 AZURE_TEST_GH_LOG="$TEST_ROOT/gh-actions"
 AZURE_TEST_GH_STATE_DIR="$TEST_ROOT/gh-state"
-export AZURE_TEST_ACTION_LOG AZURE_TEST_GH_LOG AZURE_TEST_GH_STATE_DIR
+export AZURE_TEST_ACTION_LOG AZURE_TEST_FEDERATED_LOG AZURE_TEST_GH_LOG AZURE_TEST_GH_STATE_DIR
 : > "$AZURE_TEST_ACTION_LOG"
+: > "$AZURE_TEST_FEDERATED_LOG"
 : > "$AZURE_TEST_GH_LOG"
 
 # A broad, direct legacy assignment requires a separate operator review. The
@@ -501,6 +508,68 @@ if grep -Eq 'api (PUT|POST|DELETE) repos/.*/environments/production' "$AZURE_TES
   printf 'Idempotent rerun unexpectedly changed GitHub environment policy.\n' >&2
   exit 1
 fi
+
+# Existing GitHub subjects may include immutable owner and repository IDs.
+# A path-only default must not overwrite an ID-based credential silently.
+id_subject='repo:third-owner@26190505/twilio-comics@1286817910:environment:production'
+: > "$AZURE_TEST_FEDERATED_LOG"
+: > "$AZURE_TEST_GH_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  AZURE_TEST_FEDERATED_SUBJECT="$id_subject" \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'GITHUB_OIDC_SUBJECT'* \
+  && "$output" == *"$id_subject"* ]] \
+  || { printf '%s\n' "$output" >&2; exit 1; }
+[[ ! -s "$AZURE_TEST_FEDERATED_LOG" && ! -s "$AZURE_TEST_GH_LOG" ]] || {
+  printf 'Subject drift unexpectedly mutated Azure OIDC or GitHub configuration.\n' >&2
+  exit 1
+}
+
+# An exact explicit claim should be accepted and leave the credential alone.
+: > "$AZURE_TEST_FEDERATED_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  AZURE_TEST_FEDERATED_SUBJECT="$id_subject" GITHUB_OIDC_SUBJECT="$id_subject" \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 0 && ! -s "$AZURE_TEST_FEDERATED_LOG" ]] \
+  || { printf '%s\n' "$output" >&2; exit 1; }
+
+# A deliberate explicit replacement claim still updates the Azure credential.
+replacement_subject='repo:third-owner@99999999/twilio-comics@88888888:environment:production'
+: > "$AZURE_TEST_FEDERATED_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  AZURE_TEST_FEDERATED_SUBJECT="$id_subject" \
+  GITHUB_OIDC_SUBJECT="$replacement_subject" \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 0 ]] || { printf '%s\n' "$output" >&2; exit 1; }
+grep -Fq 'ad app federated-credential update' "$AZURE_TEST_FEDERATED_LOG"
+grep -Fq "$replacement_subject" "$AZURE_TEST_FEDERATED_LOG"
 
 # A preexisting unrestricted environment is repaired without dropping its
 # reviewer or wait timer from the PUT payload.
