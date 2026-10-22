@@ -9,6 +9,7 @@
   "scripts": {
     "build": "next build --webpack",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:safe": "node --import tsx scripts/check-migration-preflight.ts && pnpm db:migrate",
     "dev": "next dev",
     "dev:voice": "tsx watch server/index.ts",
     "lint": "eslint .",
