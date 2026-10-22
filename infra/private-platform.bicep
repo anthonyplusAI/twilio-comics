@@ -13,6 +13,9 @@ param postgresAdminPassword string
 @description('PostgreSQL server administrator used only to bootstrap separate migration and runtime roles.')
 param postgresAdminLogin string = 'comics_bootstrap'
 
+@description('Availability zone for the Burstable PostgreSQL server in the selected region.')
+param postgresAvailabilityZone string = '2'
+
 @description('Resource tags required by the Twilio Comics Azure subscription.')
 param tags object = {
   created_by: 'github-actions'
@@ -140,6 +143,7 @@ resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' =
     tier: 'Burstable'
   }
   properties: {
+    availabilityZone: postgresAvailabilityZone
     administratorLogin: postgresAdminLogin
     administratorLoginPassword: postgresAdminPassword
     authConfig: {
