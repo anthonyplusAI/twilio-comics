@@ -232,16 +232,21 @@ async function ingestReferences(jobId: string, urls: string[]): Promise<string[]
   );
 }
 
-function failureMessage(error: unknown): string {
+function failureMessage(error: unknown, source: string): string {
+  const voiceRecovery = "Call again from this phone, verify, and say what to change or NEW.";
   if (error instanceof ComicServiceError) {
     if (error.type === "content_policy") {
-      return "That idea couldn't be illustrated. Tell me what to change, or send NEW for a new story.";
+      return source === "voice"
+        ? `That idea couldn't be illustrated. ${voiceRecovery}`
+        : "That idea couldn't be illustrated. Tell me what to change, or send NEW for a new story.";
     }
     if (error.type === "credit_limit") {
       return "Our comic studio is temporarily unavailable. Please try again later.";
     }
   }
-  return "Sorry, we couldn't create your comic this time. Tell me what to change or send NEW.";
+  return source === "voice"
+    ? `Sorry, we couldn't create your comic this time. ${voiceRecovery}`
+    : "Sorry, we couldn't create your comic this time. Tell me what to change or send NEW.";
 }
 
 function isPermanent(error: unknown, attempts: number): boolean {
@@ -371,7 +376,10 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const readyMessage = claimed.targetStoryId
       ? `Page ${result.page.pageNumber} of "${result.story.title}" is ready! View it here: ${link}`
       : `Your comic "${result.story.title}" is ready! View it here: ${link}`;
-    const body = `${readyMessage} Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page.`;
+    const continuationInstruction = claimed.source === "voice"
+      ? `For another page, call again from this phone within ${CONVERSATION_RESUME_DAYS} days and say CONTINUE after verification.`
+      : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page.`;
+    const body = `${readyMessage} ${continuationInstruction}`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;
@@ -557,7 +565,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       }
       const failureBody = generatedStoryId
         ? "Your comic was created, but I couldn't deliver the link. Reply STATUS to get it."
-        : failureMessage(error);
+        : failureMessage(error, claimed.source);
       const channel = (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel;
       const callbackBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
       const failureSid = await sendChannelMessage({
