@@ -24,7 +24,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs nextjs
-RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
+ENV COREPACK_HOME=/opt/corepack
+RUN install -d -o nextjs -g nodejs "$COREPACK_HOME" \
+  && corepack enable \
+  && corepack prepare pnpm@10.20.0 --activate \
+  && chown -R nextjs:nodejs "$COREPACK_HOME"
+ENV COREPACK_ENABLE_NETWORK=0
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -41,6 +46,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/auth.ts /app/auth.config.ts /app/
 COPY --from=builder --chown=nextjs:nodejs /app/package.json /app/pnpm-workspace.yaml /app/tsconfig.json /app/next.config.mjs ./
 
 USER nextjs
+RUN test "$(pnpm --version)" = "10.20.0"
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["pnpm", "start"]
