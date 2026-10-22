@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { ManagedIdentityCredential } from "@azure/identity";
 import { Client } from "pg";
 
@@ -273,36 +274,38 @@ export async function bootstrapRoles(
   });
 }
 
-class KeyVaultSecrets implements SecretStore {
-  private readonly credential: ManagedIdentityCredential;
-  private readonly baseUrl = `https://${POSTGRES_BOOTSTRAP.vaultName}.vault.azure.net`;
+const KEY_VAULT_AUTHORIZATION_WINDOW_MS = 12 * 60_000;
+const KEY_VAULT_RETRY_INTERVAL_MS = 5_000;
+const KEY_VAULT_MAX_OTHER_FAILURES = 12;
+const RETRYABLE_KEY_VAULT_STATUSES = new Set([403, 408, 429, 500, 502, 503, 504]);
+const REPORTABLE_KEY_VAULT_STATUSES = new Set([400, 401, 403, 404, 408, 429, 500, 502, 503, 504]);
 
-  constructor(clientId: string) {
-    this.credential = new ManagedIdentityCredential(clientId);
+export class KeyVaultHttpError extends Error {
+  constructor(readonly status: number) {
+    super("Key Vault request failed");
   }
+}
 
-  private async request(name: string, method: "GET" | "PUT", value?: string): Promise<Response> {
-    const endpoint = `${this.baseUrl}/secrets/${name}?api-version=7.4`;
+/** One RBAC propagation deadline is shared by every secret read and write. */
+export class KeyVaultRetryWindow {
+  private deadlineMs: number | undefined;
+
+  constructor(
+    private readonly now: () => number = () => performance.now(),
+    private readonly sleep: (durationMs: number) => Promise<void> =
+      (durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)),
+  ) {}
+
+  async request(method: "GET" | "PUT", send: () => Promise<Response>): Promise<Response> {
+    const deadlineMs = this.deadlineMs ??= this.now() + KEY_VAULT_AUTHORIZATION_WINDOW_MS;
     let otherTransientFailures = 0;
-    // Key Vault RBAC can need several minutes after a new identity grant.
-    // The Job has a 15-minute timeout, leaving room for this 5-minute retry.
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (;;) {
       let response: Response | undefined;
       try {
-        const token = await this.credential.getToken("https://vault.azure.net/.default");
-        if (!token) throw new Error("Managed identity token unavailable");
-        response = await fetch(endpoint, {
-          method,
-          headers: {
-            Authorization: `Bearer ${token.token}`,
-            ...(method === "PUT" ? { "Content-Type": "application/json" } : {}),
-          },
-          body: method === "PUT" ? JSON.stringify({ value }) : undefined,
-          signal: AbortSignal.timeout(10_000),
-        });
+        response = await send();
       } catch {
         otherTransientFailures++;
-        if (otherTransientFailures >= 12) {
+        if (otherTransientFailures >= KEY_VAULT_MAX_OTHER_FAILURES || this.now() >= deadlineMs) {
           throw new Error("Key Vault could not be reached from the private Container Apps Job");
         }
       }
@@ -315,22 +318,54 @@ class KeyVaultSecrets implements SecretStore {
             ? payload.error.code
             : undefined;
           if (errorCode === "ForbiddenByFirewall") {
-            throw new Error("The private Container Apps subnet is blocked by the Key Vault firewall");
+            throw new KeyVaultHttpError(403);
           }
         } else {
           otherTransientFailures++;
         }
         if (
-          ![403, 408, 429, 500, 502, 503, 504].includes(response.status) ||
-          attempt === 59 ||
-          otherTransientFailures >= 12
+          !RETRYABLE_KEY_VAULT_STATUSES.has(response.status) ||
+          this.now() >= deadlineMs ||
+          otherTransientFailures >= KEY_VAULT_MAX_OTHER_FAILURES
         ) {
-          throw new Error(`Key Vault ${method} ${name} failed with HTTP ${response.status}`);
+          throw new KeyVaultHttpError(response.status);
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      const remainingMs = deadlineMs - this.now();
+      if (remainingMs <= 0) {
+        throw new Error("Key Vault did not become available");
+      }
+      await this.sleep(Math.min(KEY_VAULT_RETRY_INTERVAL_MS, remainingMs));
     }
-    throw new Error("Key Vault did not become available");
+  }
+}
+
+class KeyVaultSecrets implements SecretStore {
+  private readonly credential: ManagedIdentityCredential;
+  private readonly baseUrl = `https://${POSTGRES_BOOTSTRAP.vaultName}.vault.azure.net`;
+  private readonly retry = new KeyVaultRetryWindow();
+
+  constructor(clientId: string) {
+    this.credential = new ManagedIdentityCredential(clientId);
+  }
+
+  private async request(name: string, method: "GET" | "PUT", value?: string): Promise<Response> {
+    const endpoint = `${this.baseUrl}/secrets/${name}?api-version=7.4`;
+    // Azure RBAC can take up to 10 minutes to propagate. The first request
+    // starts a shared 12-minute monotonic window, including both URL writes.
+    return this.retry.request(method, async () => {
+      const token = await this.credential.getToken("https://vault.azure.net/.default");
+      if (!token) throw new Error("Managed identity token unavailable");
+      return fetch(endpoint, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token.token}`,
+          ...(method === "PUT" ? { "Content-Type": "application/json" } : {}),
+        },
+        body: method === "PUT" ? JSON.stringify({ value }) : undefined,
+        signal: AbortSignal.timeout(10_000),
+      });
+    });
   }
 
   async get(name: string): Promise<string | undefined> {
@@ -370,6 +405,20 @@ function createPgClient(user: string, password: string): SqlClient {
   };
 }
 
+export function formatBootstrapFailure(stage: string, error: unknown): string {
+  // Never surface SDK/HTTP bodies, secret names, URLs, or PostgreSQL messages.
+  const httpStatus = error instanceof KeyVaultHttpError && REPORTABLE_KEY_VAULT_STATUSES.has(error.status)
+    ? ` (HTTP ${error.status})`
+    : "";
+  const rawCode = typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+  const code = typeof rawCode === "string" && /^(?:[0-9A-Z]{5}|E[A-Z]{3,12})$/.test(rawCode)
+    ? ` (code ${rawCode})`
+    : "";
+  return `PostgreSQL role bootstrap failed at ${stage}${httpStatus || code}.`;
+}
+
 async function main(): Promise<void> {
   let stage = "startup";
   try {
@@ -384,15 +433,7 @@ async function main(): Promise<void> {
     );
     console.log("PostgreSQL runtime and migration roles verified; Key Vault connection URLs are ready.");
   } catch (error) {
-    // Azure SDK and PostgreSQL errors can contain connection details. Report
-    // only our fixed stage name and an allowlisted machine error code.
-    const rawCode = typeof error === "object" && error !== null && "code" in error
-      ? error.code
-      : undefined;
-    const code = typeof rawCode === "string" && /^(?:[0-9A-Z]{5}|E[A-Z]{3,12})$/.test(rawCode)
-      ? ` (code ${rawCode})`
-      : "";
-    console.error(`PostgreSQL role bootstrap failed at ${stage}${code}.`);
+    console.error(formatBootstrapFailure(stage, error));
     process.exitCode = 1;
   }
 }

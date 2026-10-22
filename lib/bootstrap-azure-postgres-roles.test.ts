@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   POSTGRES_BOOTSTRAP,
+  KeyVaultHttpError,
+  KeyVaultRetryWindow,
   bootstrapRoles,
   buildDatabaseUrl,
+  formatBootstrapFailure,
   generateRolePassword,
   parseStoredRolePassword,
   type SecretStore,
@@ -69,6 +72,73 @@ function fixture(options: {
 }
 
 describe("private PostgreSQL role bootstrap", () => {
+  it("shares a monotonic authorization window across reads and both secret writes", async () => {
+    let elapsedMs = 0;
+    const retry = new KeyVaultRetryWindow(
+      () => elapsedMs,
+      async (durationMs) => { elapsedMs += durationMs; },
+    );
+    await expect(retry.request("GET", async () => new Response(null, { status: 200 })))
+      .resolves.toHaveProperty("status", 200);
+
+    // RBAC reads can succeed before PUT authorization has propagated.
+    elapsedMs = 9 * 60_000;
+    let firstWriteAttempts = 0;
+    await expect(retry.request("PUT", async () => {
+      firstWriteAttempts++;
+      return new Response(null, { status: elapsedMs < 605_000 ? 403 : 200 });
+    })).resolves.toHaveProperty("status", 200);
+    let secondWriteAttempts = 0;
+    await expect(retry.request("PUT", async () => {
+      secondWriteAttempts++;
+      return new Response(null, { status: elapsedMs < 715_000 ? 403 : 200 });
+    })).resolves.toHaveProperty("status", 200);
+
+    expect(elapsedMs).toBe(715_000);
+    expect(firstWriteAttempts).toBeGreaterThan(1);
+    expect(secondWriteAttempts).toBeGreaterThan(1);
+  });
+
+  it("stops retrying HTTP 403 at the shared deadline and logs only an allowlisted status", async () => {
+    let elapsedMs = 0;
+    const retry = new KeyVaultRetryWindow(
+      () => elapsedMs,
+      async (durationMs) => { elapsedMs += durationMs; },
+    );
+    await retry.request("GET", async () => new Response(null, { status: 200 }));
+    let attempts = 0;
+    let captured: unknown;
+    try {
+      await retry.request("PUT", async () => {
+        attempts++;
+        return new Response(JSON.stringify({ error: { code: "Forbidden", message: "postgresql://secret-value" } }), {
+          status: 403,
+        });
+      });
+    } catch (error) {
+      captured = error;
+    }
+    expect(captured).toBeInstanceOf(KeyVaultHttpError);
+    expect(attempts).toBeGreaterThan(100);
+    expect(elapsedMs).toBe(12 * 60_000);
+    expect(formatBootstrapFailure("migration-url-secret-write", captured))
+      .toBe("PostgreSQL role bootstrap failed at migration-url-secret-write (HTTP 403).");
+    expect(formatBootstrapFailure("migration-url-secret-write", captured))
+      .not.toContain("postgresql://");
+    expect(formatBootstrapFailure("runtime-url-secret-write", new KeyVaultHttpError(418)))
+      .toBe("PostgreSQL role bootstrap failed at runtime-url-secret-write.");
+  });
+
+  it("fails immediately on an explicit Key Vault firewall denial", async () => {
+    let attempts = 0;
+    const retry = new KeyVaultRetryWindow(() => 0, async () => undefined);
+    await expect(retry.request("GET", async () => {
+      attempts++;
+      return new Response(JSON.stringify({ error: { code: "ForbiddenByFirewall" } }), { status: 403 });
+    })).rejects.toBeInstanceOf(KeyVaultHttpError);
+    expect(attempts).toBe(1);
+  });
+
   it("accepts an Azure PostgreSQL administrator password with punctuation", async () => {
     const customAdminPassword = "Azure{admin}!password#2026?:longer";
     const { store, createClient, logins } = fixture({ adminPassword: customAdminPassword });

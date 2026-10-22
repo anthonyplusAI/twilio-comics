@@ -28,6 +28,13 @@ MIGRATION_JOB='twilio-comics-migrate-v2'
 BOOTSTRAP_JOB='twilio-comics-db-bootstrap-v2'
 SERVER='twilio-comics-pg-1a1d98'
 POSTGRES_FQDN="${SERVER}.postgres.database.azure.com"
+ACA_VNET='vnet-twilio-comics-v2'
+POSTGRES_VNET='vnet-twilio-comics-pg-cus'
+ACA_VNET_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$ACA_VNET"
+POSTGRES_VNET_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$POSTGRES_VNET"
+POSTGRES_SUBNET_ID="$POSTGRES_VNET_ID/subnets/postgresql"
+POSTGRES_DNS_ZONE='twilio-comics.postgres.database.azure.com'
+POSTGRES_DNS_ZONE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/privateDnsZones/$POSTGRES_DNS_ZONE"
 VAULT='kv-twilio-comics-1a1d98'
 RUNTIME_SECRET='postgres-comics-runtime-url'
 MIGRATION_SECRET='postgres-comics-migration-url'
@@ -55,7 +62,7 @@ active_subscription="$(az account show --query id --output tsv)" \
 environment_json="$(az containerapp env show --name "$ACA_ENVIRONMENT" \
   --resource-group "$RESOURCE_GROUP" --output json)" \
   || die 'The V2 private Container Apps environment is missing.'
-EXPECTED_SUBNET="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/vnet-twilio-comics-v2/subnets/aca-infrastructure"
+EXPECTED_SUBNET="$ACA_VNET_ID/subnets/aca-infrastructure"
 if ! jq --exit-status --arg subnet "$EXPECTED_SUBNET" \
   '(.properties.vnetConfiguration.infrastructureSubnetId // "" | ascii_downcase) == ($subnet | ascii_downcase)' \
   >/dev/null <<< "$environment_json"; then
@@ -67,10 +74,48 @@ server_json="$(az postgres flexible-server show --name "$SERVER" \
   --resource-group "$RESOURCE_GROUP" --output json)" \
   || die 'The private PostgreSQL Flexible Server is missing.'
 if ! jq --exit-status --arg fqdn "$POSTGRES_FQDN" \
-  '.network.publicNetworkAccess == "Disabled" and .fullyQualifiedDomainName == $fqdn' \
+    --arg subnet "$POSTGRES_SUBNET_ID" --arg zone "$POSTGRES_DNS_ZONE_ID" '
+  .network.publicNetworkAccess == "Disabled"
+  and .fullyQualifiedDomainName == $fqdn
+  and .sku.name == "Standard_B1ms"
+  and ((.location // "" | ascii_downcase | gsub(" "; "")) == "centralus")
+  and ((.network.delegatedSubnetResourceId // "" | ascii_downcase) == ($subnet | ascii_downcase))
+  and ((.network.privateDnsZoneArmResourceId // "" | ascii_downcase) == ($zone | ascii_downcase))
+  ' \
   >/dev/null <<< "$server_json"; then
-  die 'PostgreSQL must have the expected FQDN and disabled public network access.'
+  die 'PostgreSQL must be the reviewed private Central US B1ms server with the expected FQDN and DNS zone.'
 fi
+
+require_peering() {
+  local source_vnet="$1" peering_name="$2" remote_vnet_id="$3" peering_json
+  peering_json="$(az network vnet peering show --resource-group "$RESOURCE_GROUP" \
+    --vnet-name "$source_vnet" --name "$peering_name" --output json)" \
+    || die "Private network peering '$peering_name' is missing."
+  if ! jq --exit-status --arg remote "$remote_vnet_id" '
+    .peeringState == "Connected"
+    and .allowVirtualNetworkAccess == true
+    and ((.remoteVirtualNetwork.id // "" | ascii_downcase) == ($remote | ascii_downcase))
+  ' >/dev/null <<< "$peering_json"; then
+    die "Private network peering '$peering_name' is not connected to its intended VNet."
+  fi
+}
+require_peering "$ACA_VNET" aca-to-postgres-centralus "$POSTGRES_VNET_ID"
+require_peering "$POSTGRES_VNET" postgres-to-aca-eastus2 "$ACA_VNET_ID"
+
+require_dns_link() {
+  local link_name="$1" vnet_id="$2" link_json
+  link_json="$(az network private-dns link vnet show --resource-group "$RESOURCE_GROUP" \
+    --zone-name "$POSTGRES_DNS_ZONE" --name "$link_name" --output json)" \
+    || die "PostgreSQL private DNS link '$link_name' is missing."
+  if ! jq --exit-status --arg vnet "$vnet_id" '
+    .registrationEnabled == false
+    and ((.virtualNetwork.id // "" | ascii_downcase) == ($vnet | ascii_downcase))
+  ' >/dev/null <<< "$link_json"; then
+    die "PostgreSQL private DNS link '$link_name' targets the wrong VNet."
+  fi
+}
+require_dns_link twilio-comics-v2-link "$ACA_VNET_ID"
+require_dns_link twilio-comics-pg-cus-link "$POSTGRES_VNET_ID"
 
 vault_json="$(az keyvault show --name "$VAULT" --resource-group "$RESOURCE_GROUP" --output json)" \
   || die 'The private Key Vault is missing.'
@@ -197,15 +242,18 @@ revoke_bootstrap_access() {
 }
 trap revoke_bootstrap_access EXIT
 
+# Always store an executable startup command. Azure CLI turns empty quoted
+# values into literal [""] arrays, and its --args parser rejects leading -ec.
 bootstrap_job_json="$(az containerapp job show --name "$BOOTSTRAP_JOB" \
   --resource-group "$RESOURCE_GROUP" --output json 2>/dev/null || true)"
 if [[ -z "$bootstrap_job_json" ]]; then
   az containerapp job create --name "$BOOTSTRAP_JOB" \
     --resource-group "$RESOURCE_GROUP" --environment "$ACA_ENVIRONMENT" \
     --trigger-type Manual --image "$BOOTSTRAP_IMAGE" \
+    --command pnpm --args exec tsx scripts/bootstrap-azure-postgres-roles.ts \
     --mi-user-assigned "$BOOT_ID" "$PULL_ID" \
     --registry-server "$ACR_SERVER" --registry-identity "$PULL_ID" \
-    --cpu 0.5 --memory 1.0Gi --replica-timeout 900 --replica-retry-limit 0 \
+    --cpu 0.5 --memory 1.0Gi --replica-timeout 1200 --replica-retry-limit 0 \
     --parallelism 1 --replica-completion-count 1 \
     --env-vars "AZURE_CLIENT_ID=$BOOT_CLIENT_ID" \
     --tags "${TAGS[@]}" purpose=postgres-role-bootstrap \
@@ -228,14 +276,15 @@ else
     --identity "$PULL_ID" --only-show-errors --output none
   az containerapp job update --name "$BOOTSTRAP_JOB" \
     --resource-group "$RESOURCE_GROUP" --image "$BOOTSTRAP_IMAGE" \
-    --command "" --args "" --replica-timeout 900 --replica-retry-limit 0 \
+    --command pnpm --args exec tsx scripts/bootstrap-azure-postgres-roles.ts \
+    --replica-timeout 1200 --replica-retry-limit 0 \
     --parallelism 1 --replica-completion-count 1 \
     --set-env-vars "AZURE_CLIENT_ID=$BOOT_CLIENT_ID" \
     --only-show-errors --output none
 fi
 
 start_json="$(az containerapp job start --name "$BOOTSTRAP_JOB" \
-  --resource-group "$RESOURCE_GROUP" --image "$BOOTSTRAP_IMAGE" \
+  --resource-group "$RESOURCE_GROUP" \
   --output json --only-show-errors)" \
   || die 'Could not start the private PostgreSQL role bootstrap Job.'
 execution_name="$(jq -r '.name // empty' <<< "$start_json")"
@@ -244,10 +293,11 @@ execution_name="$(jq -r '.name // empty' <<< "$start_json")"
 printf 'Started private PostgreSQL role bootstrap execution %s.\n' "$execution_name"
 
 poll_interval="${ROLE_BOOTSTRAP_POLL_SECONDS:-10}"
-max_polls="${ROLE_BOOTSTRAP_MAX_POLLS:-120}"
+# The default 25-minute poll window exceeds the 20-minute replica timeout.
+max_polls="${ROLE_BOOTSTRAP_MAX_POLLS:-150}"
 [[ "$poll_interval" =~ ^[0-9]+$ && "$max_polls" =~ ^[1-9][0-9]*$ ]] \
   || die 'Invalid role bootstrap polling settings.'
-(( poll_interval <= 60 && max_polls <= 180 )) \
+(( poll_interval <= 60 && max_polls <= 180 && poll_interval * max_polls <= 1800 )) \
   || die 'Role bootstrap polling settings exceed their safety limits.'
 last_status=''
 completed=false
@@ -337,6 +387,7 @@ if [[ -z "$migration_job_json" ]]; then
   az containerapp job create --name "$MIGRATION_JOB" \
     --resource-group "$RESOURCE_GROUP" --environment "$ACA_ENVIRONMENT" \
     --trigger-type Manual --image "$MIGRATION_IMAGE" \
+    --command pnpm --args run db:migrate:safe \
     --mi-user-assigned "$MIG_ID" "$PULL_ID" \
     --registry-server "$ACR_SERVER" --registry-identity "$PULL_ID" \
     --cpu 0.5 --memory 1.0Gi --replica-timeout 1800 --replica-retry-limit 0 \
@@ -369,7 +420,8 @@ else
     --only-show-errors --output none
   az containerapp job update --name "$MIGRATION_JOB" \
     --resource-group "$RESOURCE_GROUP" --image "$MIGRATION_IMAGE" \
-    --command "" --args "" --replica-timeout 1800 --replica-retry-limit 0 \
+    --command pnpm --args run db:migrate:safe \
+    --replica-timeout 1800 --replica-retry-limit 0 \
     --parallelism 1 --replica-completion-count 1 \
     --set-env-vars "DATABASE_URL=secretref:${MIGRATION_APP_SECRET}" \
     --only-show-errors --output none
