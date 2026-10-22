@@ -52,9 +52,10 @@ describe("channel chooser", () => {
     });
 
     expect(directDestinations(html)).toEqual([
-      "sms:+18669012028",
+      "sms:+18669012028?body=NEW",
       "tel:+18669012028",
     ]);
+    expect(html).toMatch(/send NEW.+(?:tap|press) Send/i);
     expect(html).not.toContain("Twilio WhatsApp");
     expect(html).toMatch(/Message frequency varies/i);
     expect(html.match(/Message frequency varies/g)).toHaveLength(2);
@@ -71,7 +72,7 @@ describe("channel chooser", () => {
   it("opens SMS from the only enabled channel", async () => {
     const html = await renderPage({ channels: "sms" });
 
-    expect(directDestinations(html)).toEqual([`sms:${PHONE}`]);
+    expect(directDestinations(html)).toEqual([`sms:${PHONE}?body=NEW`]);
     expect(qrTitles(html)).toEqual([expect.stringMatching(/text|sms/i)]);
     expect(html).toMatch(/Twilio SMS/);
     expect(html).toContain(PHONE);
@@ -83,7 +84,7 @@ describe("channel chooser", () => {
       phone: "",
     });
 
-    expect(directDestinations(html)).toEqual(["https://wa.me/447700900123"]);
+    expect(directDestinations(html)).toEqual(["https://wa.me/447700900123?text=NEW"]);
     expect(qrTitles(html)).toEqual([expect.stringMatching(/whatsapp/i)]);
     expect(html).toMatch(/Twilio WhatsApp/);
   });
@@ -100,7 +101,7 @@ describe("channel chooser", () => {
   it("keeps the call action unavailable until Voice verification is configured", async () => {
     const html = await renderPage({ channels: "sms,voice", voiceReady: false });
 
-    expect(directDestinations(html)).toEqual([`sms:${PHONE}`]);
+    expect(directDestinations(html)).toEqual([`sms:${PHONE}?body=NEW`]);
     expect(html).not.toContain("Twilio Voice");
   });
 
@@ -109,8 +110,8 @@ describe("channel chooser", () => {
 
     expect(directDestinations(html)).toEqual([
       `tel:${PHONE}`,
-      "https://wa.me/447700900123",
-      `sms:${PHONE}`,
+      "https://wa.me/447700900123?text=NEW",
+      `sms:${PHONE}?body=NEW`,
     ]);
     expect(qrTitles(html)).toEqual([
       expect.stringMatching(/call|voice/i),

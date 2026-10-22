@@ -190,6 +190,21 @@
   color: var(--ink);
 }
 
+.sendHint {
+  max-width: 570px;
+  margin: 14px 0 0;
+  border: 2px solid var(--ink);
+  background: var(--pale-blue);
+  padding: 11px 13px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.sendHint strong {
+  font-weight: 800;
+}
+
 .programDisclosure {
   max-width: 570px;
   margin: 15px 0 0;

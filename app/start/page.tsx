@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
+  COMIC_START_MESSAGE,
   getMarketingContact,
   type MarketingChannel,
 } from "@/lib/marketing-contact";
@@ -50,14 +51,14 @@ export default function StartPage() {
       label: "Twilio SMS",
       heading: "Text your idea.",
       description:
-        "Send a character, a joke, or one scene. You can add up to two reference photos for your characters.",
+        "Start the chat, then tell the agent about a character, a joke, or one scene. You can add up to two reference photos.",
       destination: phoneNumber,
       href: contact.smsHref ?? "",
-      action: "Open Messages",
-      nextStep: "Reply to the agent, then send CREATE when the story sounds right.",
+      action: "Open SMS draft",
+      nextStep: "Share your idea with the agent, then send CREATE when the story sounds right.",
       result: "Your comic link arrives by SMS, with a preview when available.",
-      qrTitle: `Scan to text ${phoneNumber}`,
-      qrCaption: "Scan with your phone to start a text.",
+      qrTitle: `Scan to text ${COMIC_START_MESSAGE} to ${phoneNumber}`,
+      qrCaption: `Scan, then send ${COMIC_START_MESSAGE} to begin.`,
     },
     whatsapp: {
       id: "whatsapp",
@@ -67,11 +68,11 @@ export default function StartPage() {
         "Message your comic idea in WhatsApp. You can share up to two reference photos in the chat.",
       destination: whatsappNumber,
       href: contact.whatsappHref ?? "",
-      action: "Open WhatsApp",
-      nextStep: "Reply to the agent, then send CREATE when the story sounds right.",
+      action: "Open WhatsApp draft",
+      nextStep: "Share your idea with the agent, then send CREATE when the story sounds right.",
       result: "Your comic link arrives in the same WhatsApp chat.",
-      qrTitle: "Scan for WhatsApp to start a comic",
-      qrCaption: "Scan with your phone to open WhatsApp.",
+      qrTitle: `Scan to start a WhatsApp chat with ${COMIC_START_MESSAGE}`,
+      qrCaption: `Scan, then send ${COMIC_START_MESSAGE} to begin.`,
     },
     voice: {
       id: "voice",
@@ -161,6 +162,12 @@ export default function StartPage() {
                     <a className={styles.channelButton} href={choice.href}>
                       {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
                     </a>
+                    {choice.id !== "voice" && (
+                      <p className={styles.sendInstruction}>
+                        <strong>Send {COMIC_START_MESSAGE} to begin.</strong> Opening a draft does not
+                        message the agent. Tap Send; if the draft is blank, type {COMIC_START_MESSAGE} first.
+                      </p>
+                    )}
                     {(choice.id === "sms" || choice.id === "voice") && (
                       <p className={styles.programDisclosure}>
                         {choice.id === "voice"

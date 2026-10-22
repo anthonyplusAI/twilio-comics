@@ -52,6 +52,15 @@ describe("inbound messaging AI turn budget", () => {
     expect(queries()[4].params).toEqual(expect.arrayContaining([
       "message:SM123:agent-turn", "message.agent_turn.reserved", "reserved",
     ]));
+    // jsonb_build_object(VARIADIC "any") cannot infer a prepared parameter's
+    // type. Verify the SQL sent to PostgreSQL gives each detail a concrete type.
+    const insert = queries()[4];
+    expect(insert.params.slice(-5)).toEqual([request.toAddress, 19, 79, 199, 200]);
+    expect(insert.sql).toMatch(/'toAddress', \$\d+::text/);
+    expect(insert.sql).toMatch(/'hourCount', \$\d+::integer/);
+    expect(insert.sql).toMatch(/'dayCount', \$\d+::integer/);
+    expect(insert.sql).toMatch(/'globalCount', \$\d+::integer/);
+    expect(insert.sql).toMatch(/'globalLimit', \$\d+::bigint/);
   });
 
   it("uses the same phone budget for a WhatsApp turn", async () => {
