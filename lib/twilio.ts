@@ -78,6 +78,7 @@ export async function sendChannelMessage({
   body,
   mediaUrl,
   statusCallback,
+  validityPeriod,
 }: {
   channel: TwilioMessageChannel;
   to: string;
@@ -85,6 +86,8 @@ export async function sendChannelMessage({
   body: string;
   mediaUrl?: string;
   statusCallback?: string;
+  /** SMS/MMS queue lifetime in seconds; omit for ordinary replies and WhatsApp. */
+  validityPeriod?: number;
 }): Promise<string> {
   const resolvedTo = channel === "whatsapp" ? whatsappAddress(to) : to;
   const defaultFrom = from ||
@@ -99,9 +102,16 @@ export async function sendChannelMessage({
     body: string;
     mediaUrl?: string[];
     statusCallback?: string;
+    validityPeriod?: number;
   } = { to: resolvedTo, from: resolvedFrom, body };
   if (mediaUrl) params.mediaUrl = [mediaUrl];
   if (statusCallback) params.statusCallback = statusCallback;
+  if (channel === "sms" && validityPeriod !== undefined) {
+    if (!Number.isInteger(validityPeriod) || validityPeriod < 1 || validityPeriod > 36000) {
+      throw new Error("validityPeriod must be an integer from 1 to 36000 seconds");
+    }
+    params.validityPeriod = validityPeriod;
+  }
 
   const message = await client().messages.create(params);
   if (!message.sid) throw new Error("Twilio returned no message SID");

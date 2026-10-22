@@ -35,6 +35,12 @@ export interface VoiceSubmitInput {
 export interface VoiceRelayDependencies {
   expectedAccountSid: string;
   senderAddress: string;
+  authorizeCall: (input: {
+    callSid: string;
+    from: string;
+    to: string;
+    authorization: string;
+  }) => boolean | Promise<boolean>;
   load: (from: string) => Promise<VoiceConversationSnapshot>;
   save: (
     previous: VoiceConversationSnapshot,
@@ -44,6 +50,14 @@ export interface VoiceRelayDependencies {
   identity: (from: string) => Promise<{ userId: string }>;
   submit: (input: VoiceSubmitInput) => Promise<{ accepted: boolean; job: { status: string } }>;
   lookupJob: (idempotencyKey: string) => Promise<{ status: string } | null>;
+  onCallStart?: (event: { callSid: string; from: string; to: string }) => Promise<void>;
+  onTurn?: (event: {
+    callSid: string;
+    from: string;
+    sequence: number;
+    role: "caller" | "agent";
+    content: string;
+  }) => Promise<void>;
   onError?: (context: string, error: unknown) => void;
 }
 
@@ -59,25 +73,30 @@ export interface VoiceRelayInbound {
   to?: string;
   last?: boolean;
   voicePrompt?: string;
+  customParameters?: Record<string, unknown>;
 }
 
 export interface VoiceRelaySession {
   handle: (message: VoiceRelayInbound, receivedAt?: number) => Promise<VoiceRelayOutbound[]>;
   close: () => void;
+  timeout: () => VoiceRelayOutbound[];
 }
 
-type EndResult = "queued" | "quota_rejected" | "checking" | "invalid_setup" | "stale" | "service_error";
+type EndResult = "queued" | "quota_rejected" | "checking" | "invalid_setup" | "stale" | "service_error" | "limit_reached";
 
 const DUPLICATE_FINAL_WINDOW_MS = 1_500;
+const MAX_VOICE_TURNS = 20;
+const MAX_VOICE_SESSION_MS = 10 * 60_000;
 const TWILIO_CALL_SID = /^CA[0-9a-f]{32}$/i;
+const TWILIO_ACCOUNT_SID = /^AC[0-9a-f]{32}$/i;
 const E164 = /^\+[1-9]\d{6,14}$/;
 
 function text(token: string): VoiceRelayOutbound[] {
   return [{ type: "text", token, last: true }];
 }
 
-function end(result: EndResult): VoiceRelayOutbound[] {
-  return [{ type: "end", handoffData: JSON.stringify({ result }) }];
+function end(result: EndResult, turn: number): VoiceRelayOutbound[] {
+  return [{ type: "end", handoffData: JSON.stringify({ result, turn }) }];
 }
 
 function draftFingerprint(collected: AgentCollected): string {
@@ -97,48 +116,98 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
   let from: string | undefined;
   let to: string | undefined;
   let snapshot: VoiceConversationSnapshot | undefined;
+  let startedAt: number | undefined;
   let turn = 0;
   let lastFinalText: string | undefined;
   let lastFinalAt = -Infinity;
   let approvalKey: string | undefined;
+  let handling = 0;
+  let timeoutPending = false;
 
-  async function handle(message: VoiceRelayInbound, receivedAt = Date.now()): Promise<VoiceRelayOutbound[]> {
+  function finish(result: EndResult): VoiceRelayOutbound[] {
+    ended = true;
+    return end(result, turn);
+  }
+
+  async function recordTurn(role: "caller" | "agent", content: string): Promise<boolean> {
+    if (!callSid || !from || turn < 1) return true;
+    try {
+      await deps.onTurn?.({ callSid, from, sequence: turn, role, content });
+      return true;
+    } catch (error) {
+      deps.onError?.("voice turn history failed", error);
+      return false;
+    }
+  }
+
+  async function speak(token: string): Promise<VoiceRelayOutbound[]> {
+    if (closed || timeoutPending) return [];
+    await recordTurn("agent", token);
+    return closed || timeoutPending ? [] : text(token);
+  }
+
+  async function processMessage(message: VoiceRelayInbound, receivedAt: number): Promise<VoiceRelayOutbound[]> {
     if (closed || ended) return [];
 
     if (message.type === "setup") {
       if (snapshot) {
         if (message.callSid === callSid && message.from === from) return [];
-        ended = true;
-        return end("invalid_setup");
+        return finish("invalid_setup");
       }
       if (
+        !TWILIO_ACCOUNT_SID.test(deps.expectedAccountSid) ||
         message.accountSid !== deps.expectedAccountSid ||
         !message.callSid || !TWILIO_CALL_SID.test(message.callSid) ||
         !message.from || !E164.test(message.from) ||
         !message.to || !E164.test(message.to) ||
         !E164.test(deps.senderAddress)
       ) {
-        ended = true;
-        return end("invalid_setup");
+        return finish("invalid_setup");
+      }
+      const authorization = message.customParameters?.authorization;
+      if (typeof authorization !== "string" || !authorization || authorization.length > 100) {
+        return finish("invalid_setup");
+      }
+      try {
+        if (!(await deps.authorizeCall({
+          callSid: message.callSid,
+          from: message.from,
+          to: message.to,
+          authorization,
+        }))) {
+          return finish("invalid_setup");
+        }
+      } catch (error) {
+        deps.onError?.("voice call authorization failed", error);
+        return finish("invalid_setup");
       }
       try {
         snapshot = await deps.load(message.from);
       } catch (error) {
         deps.onError?.("voice conversation load failed", error);
-        ended = true;
-        return end("service_error");
+        return finish("service_error");
       }
       callSid = message.callSid;
       from = message.from;
       to = message.to;
+      startedAt = receivedAt;
+      try {
+        await deps.onCallStart?.({ callSid, from, to });
+      } catch (error) {
+        deps.onError?.("voice call history failed", error);
+      }
       return [];
     }
 
     if (message.type !== "prompt" || message.last !== true) return [];
     if (!snapshot || !callSid || !from || !to) {
-      ended = true;
-      return end("invalid_setup");
+      return finish("invalid_setup");
     }
+
+    if (startedAt !== undefined && receivedAt - startedAt >= MAX_VOICE_SESSION_MS) {
+      return finish("limit_reached");
+    }
+    if (turn >= MAX_VOICE_TURNS) return finish("limit_reached");
 
     const utterance = (message.voicePrompt || "").trim();
     if (!utterance) {
@@ -155,6 +224,10 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
     lastFinalText = normalized;
     lastFinalAt = receivedAt;
     turn += 1;
+    if (!(await recordTurn("caller", utterance))) {
+      return closed ? [] : finish("service_error");
+    }
+    if (closed) return [];
 
     let advanced: ComicAgentResult;
     try {
@@ -166,17 +239,18 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         },
         { text: utterance, channel: "voice" },
       );
+      if (closed || ended) return [];
     } catch (error) {
       deps.onError?.("voice agent failed", error);
       lastFinalText = undefined;
-      return text("I had trouble with that idea. Please say it again and I'll try again.");
+      return speak("I had trouble with that idea. Please say it again and I'll try again.");
     }
 
     if (advanced.action === "submit") {
       if (!advanced.submission) {
         deps.onError?.("voice agent omitted submission", new Error("Missing submission"));
         lastFinalText = undefined;
-        return text("I couldn't start your comic. Please say create it again to try again.");
+        return speak("I couldn't start your comic. Please say create it again to try again.");
       }
       approvalKey ||= `twilio-call:${callSid}:turn:${turn}`;
       const beforeSubmission = snapshot;
@@ -187,14 +261,13 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
           activeStoryId: advanced.activeStoryId,
         });
         if (!saved) {
-          ended = true;
-          return end("stale");
+          return finish("stale");
         }
         snapshot = saved;
       } catch (error) {
         deps.onError?.("voice submission checkpoint failed", error);
         lastFinalText = undefined;
-        return text("I couldn't save your request. Please say create it again to try again.");
+        return speak("I couldn't save your request. Please say create it again to try again.");
       }
 
       async function rollback(): Promise<boolean> {
@@ -238,45 +311,38 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
           deps.onError?.("voice job status lookup failed", lookupError);
         }
         if (["queued", "processing", "succeeded"].includes(jobStatus || "")) {
-          ended = true;
-          return end("queued");
+          return finish("queued");
         }
         if (jobStatus === null || jobStatus === "quota_rejected" || jobStatus === "failed") {
           if (await rollback()) {
             if (jobStatus === "quota_rejected") {
-              ended = true;
-              return end("quota_rejected");
+              return finish("quota_rejected");
             }
             if (jobStatus === "failed") approvalKey = undefined;
             lastFinalText = undefined;
-            return text("I couldn't start your comic yet. Please say create it again to try again.");
+            return speak("I couldn't start your comic yet. Please say create it again to try again.");
           }
         }
-        ended = true;
-        return end("checking");
+        return finish("checking");
       }
       if (!submission.accepted) {
         const status = submission.job.status;
         // A pending job may still be published by recovery or claimed by a
         // worker. Keep its request key so completion can update this draft.
         if (status !== "quota_rejected" && status !== "failed") {
-          ended = true;
-          return end(["queued", "processing", "succeeded"].includes(status) ? "queued" : "checking");
+          return finish(["queued", "processing", "succeeded"].includes(status) ? "queued" : "checking");
         }
         if (!(await rollback())) {
-          ended = true;
-          return end("checking");
+          return finish("checking");
         }
         if (status === "quota_rejected") {
-          ended = true;
-          return end("quota_rejected");
+          return finish("quota_rejected");
         }
         approvalKey = undefined;
         lastFinalText = undefined;
-        return text("That comic attempt failed. Please say create it again to try again.");
+        return speak("That comic attempt failed. Please say create it again to try again.");
       }
-      ended = true;
-      return end("queued");
+      return finish("queued");
     }
 
     if (draftFingerprint(snapshot.collected) !== draftFingerprint(advanced.collected)) {
@@ -289,20 +355,34 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         activeStoryId: advanced.activeStoryId,
       });
       if (!saved) {
-        ended = true;
-        return end("stale");
+        return finish("stale");
       }
       snapshot = saved;
     } catch (error) {
       deps.onError?.("voice conversation save failed", error);
       lastFinalText = undefined;
-      return text("I couldn't save that idea. Please say it again to try again.");
+      return speak("I couldn't save that idea. Please say it again to try again.");
     }
-    return text(advanced.reply);
+    return speak(advanced.reply);
+  }
+
+  async function handle(message: VoiceRelayInbound, receivedAt = Date.now()): Promise<VoiceRelayOutbound[]> {
+    if (closed || ended || timeoutPending) return [];
+    handling += 1;
+    try {
+      return await processMessage(message, receivedAt);
+    } finally {
+      handling -= 1;
+    }
   }
 
   return {
     handle,
     close: () => { closed = true; },
+    timeout: () => {
+      if (closed || ended) return [];
+      timeoutPending = true;
+      return handling > 0 ? [] : finish("limit_reached");
+    },
   };
 }

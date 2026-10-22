@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   send: vi.fn(),
   reserve: vi.fn(),
   release: vi.fn(),
+  recordActivityEvent: vi.fn(),
   beforeSelect: null as null | (() => Promise<void>),
 }));
 
@@ -27,6 +28,7 @@ vi.mock("@/lib/quota", () => ({
   reserveFreeTierQuota: h.reserve,
   releaseFreeTierQuota: h.release,
 }));
+vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
 import {
   GenerationJobLeaseLostError,
@@ -115,6 +117,7 @@ beforeEach(() => {
     status: "reserved",
   });
   h.release.mockReset().mockResolvedValue(undefined);
+  h.recordActivityEvent.mockReset().mockResolvedValue(undefined);
   h.execute.mockReset().mockResolvedValue({ rows: [] });
 
   h.insert.mockReset().mockImplementation(() => {
@@ -189,6 +192,50 @@ beforeEach(() => {
 });
 
 describe("submitGenerationJob", () => {
+  it("records the request and queue acceptance with the user's prompt and job ID", async () => {
+    const submission = await submitGenerationJob(input);
+
+    expect(submission.accepted).toBe(true);
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${submission.job.id}:requested`,
+      kind: "generation.requested",
+      userId: "user-1",
+      channel: "sms",
+      address: "+15555550123",
+      content: "Rabbits fly to the moon",
+      details: expect.objectContaining({ referenceCount: 0, continuation: false }),
+    }));
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${submission.job.id}:queued`,
+      kind: "generation.queued",
+      status: "queued",
+    }));
+  });
+
+  it("records a quota rejection without publishing generation work", async () => {
+    h.reserve.mockResolvedValue({ allowed: false, remaining: 0, reset: null, status: "rejected" });
+
+    const submission = await submitGenerationJob(input);
+
+    expect(submission.accepted).toBe(false);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${submission.job.id}:rejected`,
+      kind: "generation.rejected",
+      status: "quota_rejected",
+    }));
+  });
+
+  it("still queues generation if the optional activity insert fails", async () => {
+    h.recordActivityEvent.mockRejectedValue(new Error("analytics unavailable"));
+
+    const submission = await submitGenerationJob(input);
+
+    expect(submission.accepted).toBe(true);
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.recordActivityEvent).toHaveBeenCalled();
+  });
+
   it("preserves worker processing when the queue delivers before publish returns", async () => {
     h.send.mockImplementation(async (jobId: string) => {
       expect(h.row?.id).toBe(jobId);

@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import next from "next";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
+import { recordVoiceCallStart, recordVoiceTurn } from "@/lib/activity-events";
 import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { advanceComicAgent, emptyAgentCollected } from "@/lib/comic-agent";
 import { db } from "@/lib/db";
@@ -15,6 +16,8 @@ import {
   type VoiceConversationUpdate,
   type VoiceRelayInbound,
 } from "@/lib/voice-conversation";
+import { verifyVoiceCallAuthorization } from "@/lib/voice-call-authorization";
+import { getConversationRelayUrl } from "@/lib/voice-twiml";
 
 function snapshot(row: Conversation): VoiceConversationSnapshot {
   return {
@@ -26,6 +29,8 @@ function snapshot(row: Conversation): VoiceConversationSnapshot {
   };
 }
 
+const MAX_VOICE_SOCKET_MS = 10 * 60_000;
+
 // The driver exposes timestamps as millisecond-precision Dates. Truncate the
 // stored revision too, so a returned Date compares exactly in the next CAS.
 const millisecondNow = sql`date_trunc('milliseconds', NOW())`;
@@ -35,6 +40,13 @@ const nextRevision = sql`GREATEST(
 )`;
 
 async function loadVoiceConversation(from: string): Promise<VoiceConversationSnapshot> {
+  // SET expressions read the old row before updated_at moves forward.
+  // A completed old draft must not be exposed to someone who now owns this
+  // phone number. A generating row keeps its job marker until completion.
+  const staleDraft = sql<boolean>`
+    ${conversations.updatedAt} < NOW() - INTERVAL '24 hours'
+    AND ${conversations.state} <> 'generating'
+  `;
   const [row] = await db
     .insert(conversations)
     .values({
@@ -46,7 +58,12 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
     })
     .onConflictDoUpdate({
       target: [conversations.channel, conversations.phoneNumber],
-      set: { updatedAt: nextRevision },
+      set: {
+        state: sql`CASE WHEN ${staleDraft} THEN 'collecting' ELSE ${conversations.state} END`,
+        collected: sql`CASE WHEN ${staleDraft} THEN '{}'::jsonb ELSE ${conversations.collected} END`,
+        activeStoryId: sql`CASE WHEN ${staleDraft} THEN NULL ELSE ${conversations.activeStoryId} END`,
+        updatedAt: nextRevision,
+      },
     })
     .returning();
   if (!row) throw new Error("Failed to load voice conversation");
@@ -83,20 +100,16 @@ async function main(): Promise<void> {
   );
   const voiceNumber = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS)
     .includes("voice") ? contact.phoneNumber : null;
-  const configuredWsUrl = voiceNumber ? process.env.CONVERSATION_RELAY_WS_URL : undefined;
-  const publicWss = configuredWsUrl ? new URL(configuredWsUrl).toString() : "";
-  if (publicWss) {
-    const relayUrl = new URL(publicWss);
-    if (relayUrl.protocol !== "wss:" || relayUrl.pathname !== "/relay") {
-      throw new Error("CONVERSATION_RELAY_WS_URL must point to the secure /relay endpoint");
-    }
+  const publicWss = voiceNumber ? getConversationRelayUrl() : "";
+  if (voiceNumber && !publicWss) {
+    throw new Error("CONVERSATION_RELAY_WS_URL must point to the secure /relay endpoint");
   }
   if (process.env.NODE_ENV === "production") {
     const required = [
       "DATABASE_URL",
       "AUTH_SECRET",
-      "AUTH_GOOGLE_ID",
-      "AUTH_GOOGLE_SECRET",
+      "ADMIN_USERNAME",
+      "ADMIN_PASSWORD_HASH",
       "AZURE_STORAGE_BLOB_ENDPOINT",
       "AZURE_STORAGE_QUEUE_ENDPOINT",
       "AZURE_STORAGE_CONTAINER_NAME",
@@ -105,7 +118,7 @@ async function main(): Promise<void> {
       "MEDIA_SIGNING_SECRET",
       "OPENAI_API_KEY",
       "PUBLIC_BASE_URL",
-      ...(voiceNumber ? ["CONVERSATION_RELAY_WS_URL"] : []),
+      ...(voiceNumber ? ["CONVERSATION_RELAY_WS_URL", "TWILIO_VERIFY_SERVICE_SID"] : []),
       "TWILIO_ACCOUNT_SID",
       "TWILIO_AUTH_TOKEN",
     ].filter((name) => !process.env[name]);
@@ -130,24 +143,87 @@ async function main(): Promise<void> {
   }
 
   relay.on("connection", (ws) => {
+    let voiceUserId: string | null = null;
+    async function identity(from: string): Promise<{ userId: string }> {
+      const found = await getOrCreateChannelIdentity("voice", from);
+      voiceUserId = found.userId;
+      return found;
+    }
     const session = createVoiceRelaySession({
       expectedAccountSid: process.env.TWILIO_ACCOUNT_SID || "",
       senderAddress: voiceNumber || "",
+      authorizeCall: ({ authorization, callSid, from, to }) =>
+        verifyVoiceCallAuthorization(
+          authorization,
+          { callSid, from, to },
+          process.env.AUTH_SECRET,
+        ),
       load: loadVoiceConversation,
       save: saveVoiceConversation,
       advance: advanceComicAgent,
-      identity: (from) => getOrCreateChannelIdentity("voice", from),
+      identity,
       submit: submitGenerationJob,
       lookupJob: getGenerationJobByIdempotencyKey,
+      onCallStart: async ({ callSid, from, to }) => {
+        try {
+          await identity(from);
+        } catch (error) {
+          console.error("Voice caller identity lookup failed", error);
+        }
+        await recordVoiceCallStart({
+          callSid,
+          fromAddress: from,
+          toAddress: to,
+          userId: voiceUserId,
+        });
+      },
+      onTurn: ({ callSid, from, sequence, role, content }) => recordVoiceTurn({
+        callSid,
+        address: from,
+        userId: voiceUserId,
+        sequence,
+        role,
+        content,
+      }),
       onError: (context, error) => console.error(context, error),
     });
     let chain = Promise.resolve();
+    let deadlineReached = false;
+    let limitSent = false;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function finishTimeout(): void {
+      if (limitSent || ws.readyState !== WebSocket.OPEN) return;
+      const outbound = session.timeout();
+      if (outbound.length === 0) return;
+      limitSent = true;
+      for (const event of outbound) send(ws, event);
+      // ConversationRelay should return to the signed action callback on
+      // `end`; close a stuck socket if it has not done so a few seconds later.
+      closeTimer = setTimeout(() => ws.close(1000, "Session limit reached"), 5_000);
+      closeTimer.unref();
+    }
+
+    const sessionTimer = setTimeout(() => {
+      deadlineReached = true;
+      // A prompt may be saving its checkpoint or submitting a job. Defer the
+      // limit handoff until it can report queued/checking or finish safely.
+      finishTimeout();
+      chain = chain.then(finishTimeout);
+    }, MAX_VOICE_SOCKET_MS);
+    sessionTimer.unref();
 
     ws.on("error", (error) => console.error("ConversationRelay socket error", error));
-    ws.on("close", () => session.close());
+    ws.on("close", () => {
+      clearTimeout(sessionTimer);
+      if (closeTimer) clearTimeout(closeTimer);
+      session.close();
+    });
     ws.on("message", (raw) => {
+      if (deadlineReached) return;
       const receivedAt = Date.now();
       chain = chain.then(async () => {
+        if (deadlineReached) return;
         let message: VoiceRelayInbound & { description?: string };
         try {
           const parsed: unknown = JSON.parse(raw.toString());

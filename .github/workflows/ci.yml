@@ -55,6 +55,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: docker build --tag twilio-comics:test .
+      - run: docker build --file Dockerfile.migrate --tag twilio-comics-migrate:test .
 
   security:
     name: Security checks

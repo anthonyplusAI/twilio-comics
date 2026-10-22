@@ -1,32 +1,89 @@
-import { neon } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-http";
+import { isIP } from "node:net";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool, type PoolConfig } from "pg";
 import "../envConfig.ts";
 
-type NeonClient = ReturnType<typeof neon>;
-let client: NeonClient | undefined;
-
-function getClient(): NeonClient {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    throw new Error("DATABASE_URL environment variable is not set");
+/** Keep TLS verification explicit; node-postgres URL SSL options override ssl config. */
+export function createPostgresPoolConfig(databaseUrl: string): PoolConfig {
+  let url: URL;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+    throw new Error("DATABASE_URL must be a PostgreSQL connection URL");
+  }
+  if (
+    !["postgres:", "postgresql:"].includes(url.protocol) ||
+    !url.hostname ||
+    !url.username ||
+    url.pathname.length <= 1
+  ) {
+    throw new Error("DATABASE_URL must include a PostgreSQL host, user, and database");
   }
 
-  return (client ??= neon(databaseUrl));
+  for (const key of url.searchParams.keys()) {
+    if (["ssl", "sslcert", "sslkey", "sslrootcert", "sslpassword"].includes(key.toLowerCase())) {
+      throw new Error("Put certificate settings in the PostgreSQL client configuration, not the DATABASE_URL");
+    }
+  }
+
+  const sslModes = url.searchParams.getAll("sslmode");
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname.toLowerCase());
+  if (
+    sslModes.length > 1 ||
+    (loopback
+      ? sslModes.some((mode) => mode !== "disable" && mode !== "verify-full")
+      : sslModes.some((mode) => mode !== "verify-full"))
+  ) {
+    throw new Error("Remote PostgreSQL connections require sslmode=verify-full (or no sslmode to use the same strict default)");
+  }
+  url.searchParams.delete("sslmode");
+
+  const tlsRequired = !loopback || sslModes[0] === "verify-full";
+  return {
+    connectionString: url.toString(),
+    ssl: tlsRequired
+      ? { rejectUnauthorized: true, ...(isIP(url.hostname) ? {} : { servername: url.hostname }) }
+      : false,
+    max: 4,
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 5_000,
+    allowExitOnIdle: true,
+  };
 }
 
-// Drizzle and Auth.js need a real NeonHttpDatabase during module evaluation.
-// Defer the Neon URL requirement until the first query reaches the client.
-const lazyClient = Object.assign(
-  (strings: TemplateStringsArray, ...params: unknown[]) =>
-    getClient()(strings, ...params),
-  {
-    query: (...args: Parameters<NeonClient["query"]>) =>
-      getClient().query(...args),
-    transaction: (...args: Parameters<NeonClient["transaction"]>) =>
-      getClient().transaction(...args),
-    unsafe: (...args: Parameters<NeonClient["unsafe"]>) =>
-      getClient().unsafe(...args),
-  },
-) as NeonClient;
+// Auth.js and Drizzle inspect db during module evaluation. A Pool instance is
+// still required for Drizzle transactions to pin all statements to one client.
+// Delay both URL validation and socket creation until the first database call.
+class LazyPool extends Pool {
+  private actualPool?: Pool;
 
-export const db = drizzle(lazyClient);
+  private getActualPool(): Pool {
+    if (!this.actualPool) {
+      const databaseUrl = process.env.DATABASE_URL;
+      if (!databaseUrl) {
+        throw new Error("DATABASE_URL environment variable is not set");
+      }
+      this.actualPool = new Pool(createPostgresPoolConfig(databaseUrl));
+      this.actualPool.on("error", (error) => {
+        console.error("PostgreSQL idle connection error", error);
+      });
+    }
+    return this.actualPool;
+  }
+
+  override query = ((...args: unknown[]) => {
+    const pool = this.getActualPool();
+    return Reflect.apply(pool.query, pool, args);
+  }) as Pool["query"];
+
+  override connect = ((...args: unknown[]) => {
+    const pool = this.getActualPool();
+    return Reflect.apply(pool.connect, pool, args);
+  }) as Pool["connect"];
+
+  override end = async () => {
+    await this.actualPool?.end();
+  };
+}
+
+export const db = drizzle(new LazyPool());

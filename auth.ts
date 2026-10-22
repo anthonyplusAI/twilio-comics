@@ -1,6 +1,15 @@
 import NextAuth from "next-auth";
+import Credentials from "next-auth/providers/credentials";
 import { DrizzleAdapter } from "@auth/drizzle-adapter";
-import authConfig from "@/auth.config";
+import authConfig, {
+  isStudioTesterEmailAllowed,
+  verifiedGoogleEmail,
+} from "@/auth.config";
+import {
+  adminCredentialVersion,
+  authenticateAdminCredentials,
+  isAdminJwtFresh,
+} from "@/lib/admin-auth";
 import { db } from "@/lib/db";
 import {
   accounts,
@@ -11,6 +20,18 @@ import {
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
+  providers: [
+    ...authConfig.providers,
+    Credentials({
+      id: "admin",
+      name: "Administrator",
+      credentials: {
+        username: { label: "Username", type: "text" },
+        password: { label: "Password", type: "password" },
+      },
+      authorize: authenticateAdminCredentials,
+    }),
+  ],
   adapter: DrizzleAdapter(db, {
     usersTable: users,
     accountsTable: accounts,
@@ -20,16 +41,54 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
   callbacks: {
     ...authConfig.callbacks,
-    jwt({ token, user }) {
+    jwt({ token, user, account, profile }) {
       if (user) {
         token.id = user.id;
+        if (account?.provider === "admin" && user.role === "admin") {
+          token.role = "admin";
+          delete token.studioEmail;
+          token.adminIssuedAt = Date.now();
+          token.adminCredentialVersion = adminCredentialVersion(
+            process.env.ADMIN_PASSWORD_HASH ?? "",
+          );
+        } else {
+          token.role = "user";
+          token.studioEmail = account?.provider === "google"
+            ? verifiedGoogleEmail(profile)
+            : null;
+          delete token.adminIssuedAt;
+          delete token.adminCredentialVersion;
+        }
+      }
+      if (token.role === "admin" && !isAdminJwtFresh(
+        typeof token.adminIssuedAt === "number" ? token.adminIssuedAt : undefined,
+        typeof token.adminCredentialVersion === "string"
+          ? token.adminCredentialVersion
+          : undefined,
+        process.env.ADMIN_PASSWORD_HASH,
+      )) {
+        return null;
+      }
+      if (process.env.NODE_ENV === "production" && token.role !== "admin" &&
+        !isStudioTesterEmailAllowed(
+          typeof token.studioEmail === "string" ? token.studioEmail : null,
+          process.env.STUDIO_TESTER_EMAILS,
+        )) {
+        return null;
       }
       return token;
     },
     session({ session, token }) {
-      const userId = typeof token.id === "string" ? token.id : token.sub;
-      if (session.user && userId) {
-        session.user.id = userId;
+      if (session.user) {
+        session.user.role = token.role === "admin" ? "admin" : "user";
+        // Browser creation APIs check for a user ID. Admin sessions have a
+        // signed role claim but no browser-studio identity.
+        if (token.role === "admin") {
+          session.user.id = "";
+        } else {
+          const userId = typeof token.id === "string" ? token.id : token.sub;
+          session.user.id = userId ?? "";
+        }
       }
       return session;
     },

@@ -8,14 +8,41 @@ const WHATSAPP = "whatsapp:+447700900123";
 
 afterEach(() => vi.unstubAllEnvs());
 
-function renderPage(channels: string): string {
+function renderPage(channels: string | undefined, voiceReady = true): string {
   vi.stubEnv("TWILIO_PHONE_NUMBER", PHONE);
   vi.stubEnv("TWILIO_WHATSAPP_NUMBER", WHATSAPP);
   vi.stubEnv("TWILIO_ENABLED_CHANNELS", channels);
+  vi.stubEnv("TWILIO_ACCOUNT_SID", `AC${"a".repeat(32)}`);
+  vi.stubEnv("TWILIO_AUTH_TOKEN", "test-token");
+  vi.stubEnv("AUTH_SECRET", "test-secret");
+  vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", voiceReady ? `VA${"b".repeat(32)}` : "");
+  vi.stubEnv("CONVERSATION_RELAY_WS_URL", "wss://comics.example/relay");
   return renderToStaticMarkup(createElement(Home));
 }
 
 describe("Twilio channel invitation", () => {
+  it("discloses the SMS program and Voice result delivery beside the launch actions", () => {
+    const html = renderPage("sms,voice");
+
+    expect(html).toContain(`href="sms:${PHONE}"`);
+    expect(html).toContain(`href="tel:${PHONE}"`);
+    expect(html).not.toContain("https://wa.me/");
+    expect(html).toMatch(/Message frequency varies/i);
+    expect(html).toMatch(/Message and data rates may apply/i);
+    expect(html).toMatch(/Reply HELP for help or STOP to opt out/i);
+    const actionEnd = html.indexOf(`href="tel:${PHONE}"`);
+    const disclosure = html.indexOf("Message frequency varies");
+    const heroEnd = html.indexOf("</section>");
+    expect(disclosure).toBeGreaterThan(actionEnd);
+    expect(disclosure).toBeLessThan(heroEnd);
+    expect(html).toContain('href="/privacy"');
+    expect(html).toContain('href="/terms"');
+    expect(html).toMatch(/phone that (?:can )?receive SMS|number you call from/i);
+    expect(html).toMatch(/code.+keypad/i);
+    expect(html).toContain('href="https://www.twilio.com/en-us/legal/privacy"');
+    expect(html).toContain('href="https://www.twilio.com/en-us/legal/tos"');
+  });
+
   it("shows only SMS entry and SMS flow when SMS is selected", () => {
     const html = renderPage("sms");
 
@@ -43,6 +70,13 @@ describe("Twilio channel invitation", () => {
     expect(html).toContain("Scan to call");
   });
 
+  it("does not advertise a Voice action before verification is configured", () => {
+    const html = renderPage("sms,voice", false);
+
+    expect(html).toContain(`href="sms:${PHONE}"`);
+    expect(html).not.toContain(`href="tel:${PHONE}"`);
+  });
+
   it("shows only WhatsApp entry and chat delivery when WhatsApp is selected", () => {
     const html = renderPage("whatsapp");
 
@@ -67,6 +101,12 @@ describe("Twilio channel invitation", () => {
     expect(html).toContain("Scan to call");
   });
 
+  it("links to the dedicated channel chooser", () => {
+    const html = renderPage("sms,whatsapp,voice");
+
+    expect(html).toContain('href="/start"');
+  });
+
   it("limits photo guidance to the enabled messaging channel", () => {
     const html = renderPage("voice,whatsapp");
 
@@ -77,6 +117,16 @@ describe("Twilio channel invitation", () => {
 
   it("does not advertise a start action for an explicit empty selection", () => {
     const html = renderPage("");
+
+    expect(html).toContain("Opening soon");
+    expect(html).not.toContain('href="sms:');
+    expect(html).not.toContain('href="tel:');
+    expect(html).not.toContain("https://wa.me/");
+    expect(html).not.toContain("Scan to");
+  });
+
+  it("does not advertise contact actions when channel selection is missing despite valid senders", () => {
+    const html = renderPage(undefined);
 
     expect(html).toContain("Opening soon");
     expect(html).not.toContain('href="sms:');

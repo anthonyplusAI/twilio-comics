@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+# Run Drizzle inside the private Container Apps environment, with only the
+# checked-in migration inputs and the tooling they need.
+FROM node:22-bookworm-slim
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates tini \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable \
+  && corepack prepare pnpm@10.20.0 --activate \
+  && chown node:node /app
+
+USER node
+COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY --chown=node:node drizzle ./drizzle
+COPY --chown=node:node lib/db.ts lib/schema.ts ./lib/
+COPY --chown=node:node scripts/check-migration-preflight.ts ./scripts/
+COPY --chown=node:node drizzle.config.ts envConfig.ts tsconfig.json ./
+
+ENV NODE_ENV=production
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/sh", "-ec", "node --import tsx scripts/check-migration-preflight.ts && pnpm db:migrate"]

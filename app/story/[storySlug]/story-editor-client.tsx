@@ -43,6 +43,14 @@ interface StoryData {
   isOwner?: boolean;
 }
 
+interface StoryApiPage {
+  id?: string;
+  pageNumber: number;
+  generatedImageUrl: string | null;
+  prompt?: string;
+  characterImageUrls?: string[];
+}
+
 export function StoryEditorClient() {
   const params = useParams();
   const slug = params.storySlug as string;
@@ -83,7 +91,11 @@ export function StoryEditorClient() {
           throw new Error("Story not found");
         }
 
-        const result = await response.json();
+        const result = (await response.json()) as {
+          story: StoryData;
+          pages: StoryApiPage[];
+          isOwner: boolean;
+        };
     
         const {
           story: storyData,
@@ -91,27 +103,25 @@ export function StoryEditorClient() {
           isOwner: ownerStatus,
         } = result;
         
+        const owner = ownerStatus === true;
         setStory(storyData);
-        setIsOwner(ownerStatus ?? false); // Default to false if undefined
+        setIsOwner(owner);
         setPages(
-          pagesData.map((page: any) => ({
+          pagesData.map((page) => ({
             id: page.pageNumber,
             title: storyData.title,
             image: page.generatedImageUrl || "",
-            prompt: page.prompt,
-            characterUploads: page.characterImageUrls,
+            prompt: owner ? page.prompt || "" : "",
+            characterUploads: owner ? page.characterImageUrls || [] : [],
             style: storyData.style || "noir",
-            dbId: page.id,
+            dbId: owner ? page.id : undefined,
           }))
         );
 
         // Load existing character images for reuse
-        const uniqueImages = [
-          ...new Set(
-            pagesData.flatMap((page: any) => page.characterImageUrls || [])
-          ),
-        ];
-        setExistingCharacterImages(uniqueImages as string[]);
+        setExistingCharacterImages(owner
+          ? [...new Set(pagesData.flatMap((page) => page.characterImageUrls || []))]
+          : []);
       } catch (error) {
         console.error("Error loading story:", error);
         toast({
@@ -204,7 +214,7 @@ export function StoryEditorClient() {
       } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
         event.preventDefault();
         setCurrentPage((current) => (current > 0 ? current - 1 : current));
-      } else if (event.key.toLowerCase() === "i") {
+      } else if (event.key.toLowerCase() === "i" && isOwner && pages[currentPage]) {
         event.preventDefault();
         setShowInfoSheet(true);
       } else if (event.key.toLowerCase() === "c" && isOwner) {
@@ -215,7 +225,7 @@ export function StoryEditorClient() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [pages.length, isOwner]);
+  }, [pages, currentPage, isOwner]);
 
   const handleRedrawPage = () => {
     if (!isLoaded || !isSignedIn || !isOwner) {
@@ -502,7 +512,7 @@ export function StoryEditorClient() {
           totalPages={pages.length}
           isLoading={loadingPageId === currentPage}
           isOwner={isOwner}
-          onInfoClick={() => setShowInfoSheet(true)}
+          onInfoClick={isOwner ? () => setShowInfoSheet(true) : undefined}
           onRedrawClick={handleRedrawPage}
           onDeletePage={() => handleDeletePage(currentPage)}
           onNextPage={() =>
@@ -542,6 +552,7 @@ export function StoryEditorClient() {
         isOpen={showInfoSheet}
         onClose={() => setShowInfoSheet(false)}
         page={pages[currentPage]}
+        isOwner={isOwner}
       />
 
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

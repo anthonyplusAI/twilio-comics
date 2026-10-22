@@ -1,32 +1,34 @@
 import { type NextRequest } from "next/server";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { validateTwilioSignature } from "@/lib/twilio";
+import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
+import {
+  finishVoiceVerificationStart,
+  reserveVoiceVerificationStart,
+} from "@/lib/voice-verification-budget";
+import { getConversationRelayUrl, voiceHangupTwiML, voiceVerificationGatherTwiML } from "@/lib/voice-twiml";
+import { isVoiceVerificationConfigured, startVoiceVerification } from "@/lib/voice-verification";
 
 export const runtime = "nodejs";
 
-function escapeXmlAttr(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+const E164 = /^\+[1-9]\d{6,14}$/;
+const CALL_SID = /^CA[0-9a-f]{32}$/i;
 
-export async function POST(request: NextRequest) {
-  const rawBody = await request.text();
-  const params: Record<string, string> = {};
-  new URLSearchParams(rawBody).forEach((v, k) => {
-    params[k] = v;
-  });
+export async function POST(request: NextRequest): Promise<Response> {
+  const form = await readTwilioWebhookForm(request);
+  if (!form.ok) return form.response;
+  const { params } = form;
 
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
   if (!publicBaseUrl) {
     return new Response("Voice service unavailable", { status: 503 });
   }
-  const url = `${publicBaseUrl}/api/twilio/voice`;
-  const signature = request.headers.get("x-twilio-signature");
   try {
-    if (!validateTwilioSignature({ signature, url, params })) {
+    if (!validateTwilioSignature({
+      signature: request.headers.get("x-twilio-signature"),
+      url: `${publicBaseUrl}/api/twilio/voice`,
+      params,
+    })) {
       return new Response("Invalid signature", { status: 403 });
     }
   } catch {
@@ -39,37 +41,59 @@ export async function POST(request: NextRequest) {
   );
   const configuredNumber = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS)
     .includes("voice") ? contact.phoneNumber : null;
-  if (!configuredNumber) {
+  if (!configuredNumber || !process.env.TWILIO_ACCOUNT_SID ||
+      !isVoiceVerificationConfigured() || !process.env.AUTH_SECRET ||
+      !getConversationRelayUrl()) {
     return new Response("Voice service unavailable", { status: 503 });
   }
-  if (params.To !== configuredNumber) {
+  if (params.AccountSid !== process.env.TWILIO_ACCOUNT_SID || params.To !== configuredNumber) {
     return new Response("Unexpected Voice sender", { status: 403 });
   }
-
-  const configuredWsUrl = process.env.CONVERSATION_RELAY_WS_URL;
-  let relayUrl: URL;
-  try {
-    relayUrl = new URL(configuredWsUrl || "");
-  } catch {
-    console.error("CONVERSATION_RELAY_WS_URL is missing or invalid");
-    return new Response("Voice service unavailable", { status: 503 });
+  if (!CALL_SID.test(params.CallSid || "")) {
+    return new Response("Invalid Voice call", { status: 400 });
   }
-  if (
-    relayUrl.protocol !== "wss:" ||
-    relayUrl.pathname !== "/relay" ||
-    relayUrl.username || relayUrl.password || relayUrl.hash
-  ) {
-    console.error("CONVERSATION_RELAY_WS_URL must point to the secure /relay endpoint");
-    return new Response("Voice service unavailable", { status: 503 });
+  if (!E164.test(params.From || "")) {
+    return voiceHangupTwiML(
+      "Please call from a phone number that can receive text messages, then try again.",
+    );
   }
 
-  const wsUrl = escapeXmlAttr(relayUrl.toString());
-  const actionUrl = escapeXmlAttr(`${publicBaseUrl}/api/twilio/voice/action`);
-  const greeting = escapeXmlAttr(
-    "Welcome to Twilio Comics! Tell me your comic idea. If you have a finished story, say continue to add another page.",
+  const reservation = await reserveVoiceVerificationStart({
+    callSid: params.CallSid,
+    fromAddress: params.From,
+    toAddress: params.To,
+  });
+  if (!reservation.allowed) {
+    return voiceHangupTwiML(reservation.reason === "rate_limit"
+      ? "This number has requested too many verification codes. Please try again later."
+      : "I couldn't start verification for this call. Please try again later.");
+  }
+
+  if (reservation.sendCode) {
+    try {
+      await startVoiceVerification(params.From);
+    } catch (error) {
+      console.error("Voice caller verification could not start", error instanceof Error ? error.name : "unknown");
+      await finishVoiceVerificationStart(params.CallSid, "failed").catch((finishError) =>
+        console.error("Voice verification failure history could not finish", finishError instanceof Error ? finishError.name : "unknown"),
+      );
+      return voiceHangupTwiML(
+        "I couldn't send a verification code right now. Please try again later.",
+      );
+    }
+    try {
+      await finishVoiceVerificationStart(params.CallSid, "sent");
+    } catch (error) {
+      console.error("Voice verification history could not finish", error instanceof Error ? error.name : "unknown");
+      return voiceHangupTwiML(
+        "I couldn't complete verification for this call. Please try again later.",
+      );
+    }
+  }
+
+  return voiceVerificationGatherTwiML(
+    publicBaseUrl,
+    1,
+    "To protect your comic ideas, we just sent a text with a six digit code to the phone you are calling from. When it arrives, enter the code on your keypad.",
   );
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect action="${actionUrl}" method="POST"><ConversationRelay url="${wsUrl}" welcomeGreeting="${greeting}" ttsProvider="Google" transcriptionProvider="Deepgram" language="en-US" interruptible="any"/></Connect></Response>`;
-
-  return new Response(xml, { headers: { "Content-Type": "text/xml", "Cache-Control": "no-store" } });
 }

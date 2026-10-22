@@ -14,6 +14,16 @@ const SMS_FROM = "+15550001111";
 const STORY_ID = "11111111-1111-4111-8111-111111111111";
 const JOB_ID = "22222222-2222-4222-8222-222222222222";
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((accept, fail) => {
+    resolve = accept;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 type Stored = {
   id: string;
   state: string;
@@ -25,6 +35,7 @@ type Stored = {
 type RelaySession = {
   handle: (message: Record<string, unknown>, receivedAt?: number) => Promise<Array<Record<string, unknown>>>;
   close: () => void;
+  timeout: () => Array<Record<string, unknown>>;
 };
 
 type RelayFactory = (deps: Record<string, unknown>) => RelaySession;
@@ -36,6 +47,7 @@ const setup = {
   sessionId: `VX${"c".repeat(32)}`,
   from: FROM,
   to: TO,
+  customParameters: { authorization: "test-authorized-call" },
 };
 
 const model: ComicAgentModel = async (input) => {
@@ -59,8 +71,11 @@ const model: ComicAgentModel = async (input) => {
 function harness(overrides: {
   initial?: Partial<Stored>;
   model?: ComicAgentModel;
+  beforeSave?: (next: Pick<Stored, "state" | "collected" | "activeStoryId">) => Promise<void>;
   submit?: (input: Record<string, unknown>) => Promise<{ accepted: boolean; job: { id: string; status: string } }>;
   lookupJob?: (key: string) => Promise<{ status: string } | null>;
+  onTurn?: (event: Record<string, unknown>) => Promise<void>;
+  authorizeCall?: (input: Record<string, unknown>) => boolean | Promise<boolean>;
 } = {}) {
   let row: Stored = {
     id: "voice-conversation",
@@ -72,16 +87,23 @@ function harness(overrides: {
   };
   const submitted: Array<Record<string, unknown>> = [];
   const atSubmit: Stored[] = [];
+  const activity: Array<Record<string, unknown>> = [];
+  const authorizations: Array<Record<string, unknown>> = [];
   const activeModel = overrides.model || model;
   const deps = {
     expectedAccountSid: ACCOUNT_SID,
     senderAddress: SMS_FROM,
+    authorizeCall: async (input: Record<string, unknown>) => {
+      authorizations.push(input);
+      return overrides.authorizeCall ? overrides.authorizeCall(input) : true;
+    },
     load: async (from: string) => {
       expect(from).toBe(FROM);
       row.updatedAt = new Date(row.updatedAt.getTime() + 1);
       return structuredClone(row);
     },
     save: async (previous: Stored, next: Pick<Stored, "state" | "collected" | "activeStoryId">) => {
+      await overrides.beforeSave?.(next);
       if (previous.updatedAt.getTime() !== row.updatedAt.getTime()) return null;
       row = { ...row, ...next, updatedAt: new Date(row.updatedAt.getTime() + 1) };
       return structuredClone(row);
@@ -98,6 +120,13 @@ function harness(overrides: {
       return overrides.submit ? overrides.submit(input) : { accepted: true, job: { id: JOB_ID, status: "queued" } };
     },
     lookupJob: overrides.lookupJob || (async () => null),
+    onCallStart: async (event: Record<string, unknown>) => {
+      activity.push({ type: "started", ...event });
+    },
+    onTurn: async (event: Record<string, unknown>) => {
+      await overrides.onTurn?.(event);
+      activity.push({ type: "turn", ...event });
+    },
   };
   const create = () => {
     const factory = (voice as unknown as { createVoiceRelaySession?: RelayFactory }).createVoiceRelaySession;
@@ -108,6 +137,8 @@ function harness(overrides: {
     create,
     submitted,
     atSubmit,
+    activity,
+    authorizations,
     completeExternally: () => {
       row = {
         ...row,
@@ -129,6 +160,256 @@ function resultCode(messages: Array<Record<string, unknown>>): string | undefine
 }
 
 describe("ConversationRelay voice conversation", () => {
+  it("authorizes the exact call before loading any saved draft or recording a call", async () => {
+    const h = harness({ authorizeCall: () => false });
+    const session = h.create();
+
+    const response = await session.handle(setup, 1_000);
+
+    expect(resultCode(response)).toBe("invalid_setup");
+    expect(h.authorizations).toEqual([{
+      callSid: CALL_SID,
+      from: FROM,
+      to: TO,
+      authorization: "test-authorized-call",
+    }]);
+    expect(h.row.updatedAt).toEqual(new Date(1_000));
+    expect(h.activity).toEqual([]);
+  });
+
+  it("rejects a missing authorization token and an authorization error", async () => {
+    const missing = harness();
+    expect(resultCode(await missing.create().handle({
+      ...setup,
+      customParameters: {},
+    }, 1_000))).toBe("invalid_setup");
+    expect(missing.activity).toEqual([]);
+
+    const failed = harness({ authorizeCall: () => { throw new Error("bad token"); } });
+    expect(resultCode(await failed.create().handle(setup, 1_000))).toBe("invalid_setup");
+    expect(failed.activity).toEqual([]);
+  });
+
+  it("records only finalized caller speech and the answer with a stable CallSid and turn", async () => {
+    const h = harness();
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: false, voicePrompt: "A robot" }, 1_500);
+    const final = { type: "prompt", last: true, voicePrompt: "A robot detective" };
+    await session.handle(final, 2_000);
+    await session.handle(final, 2_100);
+
+    expect(h.activity).toEqual([
+      expect.objectContaining({ type: "started", callSid: CALL_SID, from: FROM, to: TO }),
+      expect.objectContaining({ type: "turn", role: "caller", callSid: CALL_SID, sequence: 1, content: "A robot detective" }),
+      expect.objectContaining({ type: "turn", role: "agent", callSid: CALL_SID, sequence: 1, content: expect.stringMatching(/robot detective/i) }),
+    ]);
+  });
+
+  it("ends a call before another model turn after ten minutes", async () => {
+    const h = harness();
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 601_001);
+
+    expect(resultCode(response)).toBe("limit_reached");
+    expect(h.row.state).toBe("collecting");
+    expect(h.activity.filter((event) => event.role === "agent")).toHaveLength(0);
+  });
+
+  it("ends before a twenty-first AI turn and exposes a server timeout hook", async () => {
+    const h = harness();
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    for (let index = 1; index <= 20; index++) {
+      await session.handle({ type: "prompt", last: true, voicePrompt: `Comic idea ${index}` }, 1_000 + index * 1_000);
+    }
+
+    expect(resultCode(await session.handle({ type: "prompt", last: true, voicePrompt: "One more idea" }, 23_000))).toBe("limit_reached");
+    expect(h.activity.filter((event) => event.role === "agent")).toHaveLength(20);
+    expect(h.submitted).toHaveLength(0);
+
+    const another = h.create();
+    await another.handle({ ...setup, callSid: `CA${"d".repeat(32)}` }, 30_000);
+    expect(resultCode(another.timeout())).toBe("limit_reached");
+    expect(await another.handle({ type: "prompt", last: true, voicePrompt: "Ignored" }, 31_000)).toEqual([]);
+  });
+
+  it("defers the deadline through checkpoint save and accepted submission", async () => {
+    const checkpointStarted = deferred<void>();
+    const resumeCheckpoint = deferred<void>();
+    const submissionStarted = deferred<void>();
+    const finishSubmission = deferred<{ accepted: boolean; job: { id: string; status: string } }>();
+    const h = harness({
+      beforeSave: async (next) => {
+        if (next.state === "generating") {
+          checkpointStarted.resolve();
+          await resumeCheckpoint.promise;
+        }
+      },
+      submit: async () => {
+        submissionStarted.resolve();
+        return finishSubmission.promise;
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approval = session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 600_000);
+    await checkpointStarted.promise;
+    expect(session.timeout()).toEqual([]);
+    expect(h.row.state).toBe("confirming");
+    expect(await session.handle({ type: "prompt", last: true, voicePrompt: "A second idea" }, 600_001)).toEqual([]);
+
+    resumeCheckpoint.resolve();
+    await submissionStarted.promise;
+    expect(session.timeout()).toEqual([]);
+    finishSubmission.resolve({ accepted: true, job: { id: JOB_ID, status: "queued" } });
+
+    expect(resultCode(await approval)).toBe("queued");
+    expect(h.submitted).toHaveLength(1);
+    expect(session.timeout()).toEqual([]);
+  });
+
+  it("returns checking when the deadline lands during an uncertain submission", async () => {
+    const submissionStarted = deferred<void>();
+    const finishSubmission = deferred<{ accepted: boolean; job: { id: string; status: string } }>();
+    const h = harness({
+      submit: async () => {
+        submissionStarted.resolve();
+        return finishSubmission.promise;
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approval = session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 600_000);
+    await submissionStarted.promise;
+    expect(session.timeout()).toEqual([]);
+    finishSubmission.resolve({ accepted: false, job: { id: JOB_ID, status: "pending" } });
+
+    expect(resultCode(await approval)).toBe("checking");
+    expect(h.row.state).toBe("generating");
+    expect(session.timeout()).toEqual([]);
+  });
+
+  it("sends only the limit handoff after an in-flight draft save finishes", async () => {
+    const saveStarted = deferred<void>();
+    const finishSave = deferred<void>();
+    const h = harness({
+      beforeSave: async (next) => {
+        if (next.state === "confirming") {
+          saveStarted.resolve();
+          await finishSave.promise;
+        }
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const prompt = session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 600_000);
+    await saveStarted.promise;
+    expect(session.timeout()).toEqual([]);
+    finishSave.resolve();
+
+    expect(await prompt).toEqual([]);
+    expect(h.row.state).toBe("confirming");
+    expect(resultCode(session.timeout())).toBe("limit_reached");
+    expect(h.activity.filter((event) => event.role === "agent")).toHaveLength(0);
+  });
+
+  it("has no new comic or transcript side effects after a limit handoff", async () => {
+    const h = harness();
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+    const beforeLimit = h.activity.length;
+
+    expect(resultCode(session.timeout())).toBe("limit_reached");
+    expect(await session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 5_000)).toEqual([]);
+    expect(h.row.state).toBe("confirming");
+    expect(h.activity).toHaveLength(beforeLimit);
+    expect(h.submitted).toHaveLength(0);
+  });
+
+  it("ends before model work when caller history cannot be saved", async () => {
+    let modelCalls = 0;
+    const h = harness({
+      model: async (input) => {
+        modelCalls++;
+        return model(input);
+      },
+      onTurn: async (event) => {
+        if (event.role === "caller") throw new Error("History unavailable");
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    expect(resultCode(response)).toBe("service_error");
+    expect(modelCalls).toBe(0);
+    expect(h.row.state).toBe("collecting");
+    expect(h.submitted).toHaveLength(0);
+  });
+
+  it("stops before model work if the socket closes while caller history is saving", async () => {
+    const transcriptStarted = deferred<void>();
+    const resumeTranscript = deferred<void>();
+    let modelCalls = 0;
+    const h = harness({
+      model: async (input) => {
+        modelCalls++;
+        return model(input);
+      },
+      onTurn: async (event) => {
+        if (event.role === "caller") {
+          transcriptStarted.resolve();
+          await resumeTranscript.promise;
+        }
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const prompt = session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+    await transcriptStarted.promise;
+    session.close();
+    resumeTranscript.resolve();
+
+    expect(await prompt).toEqual([]);
+    expect(modelCalls).toBe(0);
+    expect(h.row.state).toBe("collecting");
+  });
+
+  it("finishes an approved request after the socket closes during submission", async () => {
+    const submissionStarted = deferred<void>();
+    const finishSubmission = deferred<{ accepted: boolean; job: { id: string; status: string } }>();
+    const h = harness({
+      submit: async () => {
+        submissionStarted.resolve();
+        return finishSubmission.promise;
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approval = session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 5_000);
+    await submissionStarted.promise;
+    session.close();
+    finishSubmission.resolve({ accepted: true, job: { id: JOB_ID, status: "queued" } });
+
+    expect(resultCode(await approval)).toBe("queued");
+    expect(h.row.state).toBe("generating");
+    expect(h.submitted).toHaveLength(1);
+    expect(session.timeout()).toEqual([]);
+  });
+
   it("treats the first utterance as an idea, lets the caller revise, and submits only after spoken approval", async () => {
     const h = harness();
     const session = h.create();

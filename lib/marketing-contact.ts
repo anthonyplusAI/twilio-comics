@@ -19,7 +19,7 @@ export function getEnabledChannels(
   contact: MarketingContact,
   raw: string | undefined,
 ): MarketingChannel[] {
-  const requested = raw === undefined ? ["sms", "voice", "whatsapp"] : raw.split(",");
+  const requested = raw?.split(",") ?? [];
   const enabled: MarketingChannel[] = [];
 
   for (const token of requested) {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { recordActivityEvent } from "@/lib/activity-events";
 import { db } from "@/lib/db";
 import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { sendGenerationJob } from "@/lib/generation-queue";
@@ -32,6 +33,37 @@ function assertProcessingLeaseUpdated(rows: { id: string }[], jobId: string): vo
 
 function rowsOf<T>(result: unknown): T[] {
   return (result as { rows?: T[] }).rows ?? (result as T[]);
+}
+
+async function logGenerationEvent(
+  job: GenerationJob,
+  kind: string,
+  suffix: string,
+  status: string,
+  details: Record<string, unknown>,
+  content?: string,
+): Promise<void> {
+  try {
+    await recordActivityEvent({
+      eventKey: `job:${job.id}:${suffix}`,
+      userId: job.userId,
+      channel: job.source,
+      kind,
+      direction: "internal",
+      address: job.recipientAddress,
+      jobId: job.id,
+      storyId: job.targetStoryId || null,
+      content,
+      status,
+      details,
+    });
+  } catch (error) {
+    console.error("Generation history failed", {
+      jobId: job.id,
+      kind,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 export async function getGenerationJob(
@@ -73,6 +105,12 @@ export async function submitGenerationJob(
 
   let job = inserted || (await getGenerationJobByIdempotencyKey(input.idempotencyKey));
   if (!job) throw new Error("Failed to create generation job");
+
+  await logGenerationEvent(job, "generation.requested", "requested", "received", {
+    style: job.style,
+    referenceCount: job.characterImageUrls.length,
+    continuation: Boolean(job.targetStoryId),
+  }, job.prompt);
 
   if (["queued", "processing", "succeeded"].includes(job.status)) {
     return { job, accepted: true, remaining: 0 };
@@ -165,6 +203,12 @@ export async function submitGenerationJob(
         ),
       )
       .returning();
+    if (rejected) {
+      await logGenerationEvent(rejected, "generation.rejected", "rejected", "quota_rejected", {
+        reason: "free_tier_quota",
+        remaining: reservation.remaining,
+      });
+    }
     return { job: rejected || job, accepted: false, remaining: 0 };
   }
 
@@ -198,6 +242,9 @@ export async function submitGenerationJob(
     }
     throw error;
   }
+  await logGenerationEvent(job, "generation.queued", "queued", "queued", {
+    queueAcceptedAt: new Date().toISOString(),
+  });
   let queued: GenerationJob | undefined;
   try {
     [queued] = await db

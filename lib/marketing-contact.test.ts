@@ -63,12 +63,12 @@ describe("getMarketingContact", () => {
 describe("getEnabledChannels", () => {
   const both = getMarketingContact("+14155552671", "whatsapp:+447700900123");
 
-  it("infers SMS and Voice from a configured phone and WhatsApp from its sender when selection is omitted", () => {
-    expect(getEnabledChannels(both, undefined)).toEqual(["sms", "voice", "whatsapp"]);
+  it("keeps every channel closed when the selection is omitted, even with valid senders", () => {
+    expect(getEnabledChannels(both, undefined)).toEqual([]);
     expect(getEnabledChannels(getMarketingContact("+14155552671", undefined), undefined))
-      .toEqual(["sms", "voice"]);
+      .toEqual([]);
     expect(getEnabledChannels(getMarketingContact(undefined, "whatsapp:+447700900123"), undefined))
-      .toEqual(["whatsapp"]);
+      .toEqual([]);
   });
 
   it("treats an explicitly empty selection as no enabled channels", () => {
@@ -94,6 +94,7 @@ describe("public comic invitation", () => {
   it("shows a WhatsApp action and QR with no SMS or Voice number", () => {
     vi.stubEnv("TWILIO_PHONE_NUMBER", "");
     vi.stubEnv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+447700900123");
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "whatsapp");
 
     const html = renderToStaticMarkup(createElement(Home));
 

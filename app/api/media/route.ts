@@ -2,6 +2,7 @@ import { type NextRequest } from "next/server";
 import { downloadBlob, getBlobMetadata, isValidMediaToken } from "@/lib/blob-storage";
 
 export const runtime = "nodejs";
+const MEDIA_CACHE_CONTROL = "private, no-store, max-age=0";
 
 function authorizedKey(request: NextRequest): string | null {
   const key = request.nextUrl.searchParams.get("key") || "";
@@ -11,7 +12,10 @@ function authorizedKey(request: NextRequest): string | null {
 
 export async function HEAD(request: NextRequest) {
   const key = authorizedKey(request);
-  if (!key) return new Response(null, { status: 404 });
+  if (!key) return new Response(null, {
+    status: 404,
+    headers: { "Cache-Control": MEDIA_CACHE_CONTROL },
+  });
 
   try {
     const blob = await getBlobMetadata(key);
@@ -19,31 +23,40 @@ export async function HEAD(request: NextRequest) {
       headers: {
         "Content-Type": blob.contentType,
         "Content-Length": String(blob.contentLength),
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": MEDIA_CACHE_CONTROL,
         "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {
     console.error("Media metadata lookup failed", error);
-    return new Response(null, { status: 404 });
+    return new Response(null, {
+      status: 404,
+      headers: { "Cache-Control": MEDIA_CACHE_CONTROL },
+    });
   }
 }
 
 export async function GET(request: NextRequest) {
   const key = authorizedKey(request);
-  if (!key) return new Response("Not found", { status: 404 });
+  if (!key) return new Response("Not found", {
+    status: 404,
+    headers: { "Cache-Control": MEDIA_CACHE_CONTROL },
+  });
 
   try {
     const blob = await downloadBlob(key);
     return new Response(new Uint8Array(blob.buffer), {
       headers: {
         "Content-Type": blob.contentType,
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": MEDIA_CACHE_CONTROL,
         "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {
     console.error("Media download failed", error);
-    return new Response("Not found", { status: 404 });
+    return new Response("Not found", {
+      status: 404,
+      headers: { "Cache-Control": MEDIA_CACHE_CONTROL },
+    });
   }
 }

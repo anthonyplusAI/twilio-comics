@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   limit: vi.fn(),
   getStoryById: vi.fn(),
   sendChannelMessage: vi.fn(),
+  recordActivityEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -20,10 +21,12 @@ vi.mock("@/lib/db", () => ({
 }));
 vi.mock("@/lib/db-actions", () => ({ getStoryById: h.getStoryById }));
 vi.mock("@/lib/twilio", () => ({ sendChannelMessage: h.sendChannelMessage }));
+vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 import {
   isMediaDeliveryFailure,
   recordGeneratedMessageStatus,
   recordFallbackMessageStatus,
+  recordFailedGenerationNoticeStatus,
   recoverFailedMmsTextFallbacks,
   sendFailedMmsTextFallback,
   shouldRecordDeliveryStatus,
@@ -34,6 +37,7 @@ const messageSid = "SM1234567890abcdef1234567890abcdef";
 
 beforeEach(() => {
   Object.values(h).forEach((mock) => mock.mockReset());
+  h.recordActivityEvent.mockResolvedValue(undefined);
 });
 
 describe("Twilio message delivery transitions", () => {
@@ -63,6 +67,75 @@ describe("Twilio message delivery transitions", () => {
 });
 
 describe("recordGeneratedMessageStatus", () => {
+  it("records a failed-generation notice without changing comic result delivery", async () => {
+    h.select.mockReturnValue({ from: h.from });
+    h.from.mockReturnValue({ where: h.selectWhere });
+    h.selectWhere.mockReturnValue({ limit: h.limit });
+    h.limit.mockResolvedValue([{
+      id: jobId,
+      userId: "user-1",
+      source: "voice",
+      recipientAddress: "+15551112222",
+      attemptCount: 3,
+    }]);
+    await expect(recordFailedGenerationNoticeStatus({
+      jobId,
+      messageSid,
+      status: "delivered",
+      errorCode: null,
+    })).resolves.toBe(true);
+    expect(h.update).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `message:${messageSid}:status:delivered`,
+      kind: "message.delivery",
+      channel: "sms",
+      address: "+15551112222",
+      jobId,
+      details: expect.objectContaining({ purpose: "generation_failure_notice" }),
+    }));
+  });
+
+  it("adds a delivery history event with the job, channel, attempt and error code", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning.mockResolvedValue([{
+      id: jobId,
+      userId: "user-1",
+      source: "voice",
+      recipientAddress: "+15551112222",
+      storyId: "story-1",
+      attemptCount: 2,
+    }]);
+
+    await recordGeneratedMessageStatus({ jobId, messageSid, status: "undelivered", errorCode: "30008" });
+
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `message:${messageSid}:status:undelivered`,
+      kind: "message.delivery",
+      channel: "sms",
+      direction: "outbound",
+      address: "+15551112222",
+      jobId,
+      messageSid,
+      status: "undelivered",
+      details: { source: "voice", fallback: false, errorCode: "30008", attemptCount: 2 },
+    }));
+  });
+
+  it("keeps the recorded delivery transition when optional history fails", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning.mockResolvedValue([{ id: jobId, source: "sms", recipientAddress: "+15551112222" }]);
+    h.recordActivityEvent.mockRejectedValue(new Error("analytics unavailable"));
+
+    await expect(recordGeneratedMessageStatus({
+      jobId, messageSid, status: "delivered", errorCode: null,
+    })).resolves.toBe(true);
+    expect(h.recordActivityEvent).toHaveBeenCalledOnce();
+  });
+
   it("uses one conditional update tied to the job and Twilio Message SID", async () => {
     h.update.mockReturnValue({ set: h.set });
     h.set.mockReturnValue({ where: h.where });
@@ -93,7 +166,14 @@ describe("recordGeneratedMessageStatus", () => {
     h.update.mockReturnValue({ set: h.set });
     h.set.mockReturnValue({ where: h.where });
     h.where.mockReturnValue({ returning: h.returning });
-    h.returning.mockResolvedValue([{ id: jobId }]);
+    h.returning.mockResolvedValue([{
+      id: jobId,
+      userId: "user-1",
+      source: "sms",
+      recipientAddress: "+15551112222",
+      storyId: "story-1",
+      attemptCount: 1,
+    }]);
     await expect(recordFallbackMessageStatus({
       jobId,
       messageSid,
@@ -104,6 +184,11 @@ describe("recordGeneratedMessageStatus", () => {
     expect(query.sql).toContain('"generation_jobs"."delivery_fallback_sid"');
     expect(query.sql).toContain('"generation_jobs"."delivery_fallback_status"');
     expect(query.params).toContain(messageSid);
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `message:${messageSid}:status:delivered`,
+      kind: "message.delivery",
+      details: { source: "sms", fallback: true, errorCode: null, attemptCount: 1 },
+    }));
   });
 
   it("captures an early queued fallback SID without regressing its sending state", async () => {
@@ -128,6 +213,83 @@ describe("recordGeneratedMessageStatus", () => {
 });
 
 describe("sendFailedMmsTextFallback", () => {
+  it("durably suppresses an expired MMS text fallback and keeps its comic history", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: jobId,
+        userId: "user-1",
+        source: "sms",
+        recipientAddress: "+15551112222",
+        storyId: "story-1",
+        attemptCount: 1,
+      }]);
+
+    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
+
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(h.getStoryById).not.toHaveBeenCalled();
+    expect(h.set).toHaveBeenCalledWith(expect.objectContaining({
+      deliveryFallbackStatus: "suppressed",
+    }));
+    const claim = new PgDialect().sqlToQuery(h.where.mock.calls[0][0]);
+    expect(claim.sql).toContain('"generation_jobs"."created_at"');
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${jobId}:fallback:suppressed`,
+      kind: "generation.delivery",
+      status: "suppressed",
+      storyId: "story-1",
+      details: expect.objectContaining({ reason: "delivery_window_expired", fallback: true }),
+    }));
+  });
+
+  it("suppresses a fallback if the lookup crosses the 24-hour deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.update.mockReturnValue({ set: h.set });
+      h.set.mockReturnValue({ where: h.where });
+      h.where.mockReturnValue({ returning: h.returning });
+      h.returning
+        .mockResolvedValueOnce([{
+          id: jobId,
+          createdAt: startedAt,
+          storyId: "story-1",
+          source: "sms",
+          recipientAddress: "+15551112222",
+          senderAddress: "+15550000000",
+          deliveryFallbackAttempts: 1,
+        }])
+        .mockResolvedValueOnce([{
+          id: jobId,
+          userId: "user-1",
+          source: "sms",
+          recipientAddress: "+15551112222",
+          storyId: "story-1",
+          attemptCount: 1,
+        }]);
+      h.getStoryById.mockImplementation(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 + 1000));
+        return { slug: "dragon", title: "Dragon Story" };
+      });
+      process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+
+      await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
+
+      expect(h.getStoryById).toHaveBeenCalledOnce();
+      expect(h.sendChannelMessage).not.toHaveBeenCalled();
+      expect(h.set).toHaveBeenLastCalledWith(expect.objectContaining({
+        deliveryFallbackStatus: "suppressed",
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("claims one bounded attempt and sends the existing story link", async () => {
     h.update.mockReturnValue({ set: h.set });
     h.set.mockReturnValue({ where: h.where });
@@ -139,17 +301,26 @@ describe("sendFailedMmsTextFallback", () => {
       recipientAddress: "+15551112222",
       senderAddress: "+15550000000",
       deliveryFallbackAttempts: 1,
+      createdAt: new Date(Date.now() - 60_000),
     }]);
     h.getStoryById.mockResolvedValue({ slug: "dragon", title: "Dragon Story" });
     h.sendChannelMessage.mockResolvedValue("SMfallback");
     process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
     await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: `job:${jobId}:fallback:SMfallback:accepted`,
+      kind: "generation.delivery",
+      messageSid: "SMfallback",
+      status: "accepted",
+      details: expect.objectContaining({ fallback: true, hadMedia: false }),
+    }));
     expect(h.sendChannelMessage).toHaveBeenCalledWith({
       channel: "sms",
       to: "+15551112222",
       from: "+15550000000",
       body: 'Your comic "Dragon Story" is ready. View it here: https://comics.example.com/story/dragon',
+      validityPeriod: 36000,
       statusCallback: `https://comics.example.com/api/twilio/status?jobId=${jobId}&fallback=1#rc=3&rp=5xx,ct,rt`,
     });
     const claim = new PgDialect().sqlToQuery(h.where.mock.calls[0][0]);
@@ -158,11 +329,42 @@ describe("sendFailedMmsTextFallback", () => {
     expect(claim.sql).toContain('"generation_jobs"."delivery_fallback_sid"');
   });
 
+  it("bounds an MMS fallback's Twilio queue time to the remaining lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.update.mockReturnValue({ set: h.set });
+      h.set.mockReturnValue({ where: h.where });
+      h.where.mockReturnValue({ returning: h.returning });
+      h.returning.mockResolvedValueOnce([{
+        id: jobId,
+        createdAt: startedAt,
+        storyId: "story-1",
+        source: "voice",
+        recipientAddress: "+15551112222",
+        senderAddress: "+15550000000",
+        deliveryFallbackAttempts: 1,
+      }]);
+      h.getStoryById.mockResolvedValue({ slug: "dragon", title: "Dragon Story" });
+      h.sendChannelMessage.mockResolvedValue("SMfallback");
+      process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+
+      await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+
+      expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+        validityPeriod: 20,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not send when another callback already claimed the fallback", async () => {
     h.update.mockReturnValue({ set: h.set });
     h.set.mockReturnValue({ where: h.where });
     h.where.mockReturnValue({ returning: h.returning });
-    h.returning.mockResolvedValueOnce([]);
+    h.returning.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
@@ -183,6 +385,7 @@ describe("sendFailedMmsTextFallback", () => {
       recipientAddress: "+15551112222",
       senderAddress: "+15550000000",
       deliveryFallbackAttempts: 2,
+      createdAt: new Date(Date.now() - 60_000),
     }]);
     h.getStoryById.mockResolvedValue({ slug: "dragon", title: "Dragon Story" });
     h.sendChannelMessage.mockResolvedValue("SMfallback");

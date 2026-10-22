@@ -72,6 +72,23 @@ export async function blobExists(key: string): Promise<boolean> {
   return getContainerClient().getBlockBlobClient(key).exists();
 }
 
+/** Read-only listing for a reviewed, per-owner deletion inventory. */
+export async function listBlobKeysByPrefixes(prefixes: readonly string[]): Promise<string[]> {
+  const keys = new Set<string>();
+  for (const prefix of new Set(prefixes)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9/_-]*\/$/.test(prefix)) {
+      throw new Error("Invalid blob owner prefix");
+    }
+    for await (const blob of getContainerClient().listBlobsFlat({ prefix })) {
+      if (!blob.name.startsWith(prefix)) {
+        throw new Error("Blob listing returned a key outside the requested owner prefix");
+      }
+      keys.add(blob.name);
+    }
+  }
+  return [...keys].sort();
+}
+
 export async function getBlobMetadata(key: string): Promise<{
   contentType: string;
   contentLength: number;

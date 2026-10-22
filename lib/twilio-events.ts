@@ -1,4 +1,5 @@
-import { and, asc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { recordActivityEvent } from "@/lib/activity-events";
 import { db } from "@/lib/db";
 import { sendInboundMessage } from "@/lib/generation-queue";
 import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
@@ -120,6 +121,47 @@ export async function getOldestOpenInboundMessage(
   return row ? toStored(row) : null;
 }
 
+/** The receipt is already durable before this is called under the sender lease. */
+export async function getInboundMessagePosition(message: Pick<
+  StoredInboundMessage,
+  "messageSid" | "channel" | "fromAddress" | "createdAt"
+>): Promise<{ dailyCount: number; firstMessage: boolean }> {
+  const dayStart = new Date(Date.UTC(
+    message.createdAt.getUTCFullYear(),
+    message.createdAt.getUTCMonth(),
+    message.createdAt.getUTCDate(),
+  ));
+  const nextDay = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const sender = and(
+    eq(twilioInboundMessages.channel, message.channel),
+    eq(twilioInboundMessages.fromAddress, message.fromAddress),
+  );
+
+  const [daily] = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(twilioInboundMessages)
+    .where(and(
+      sender,
+      gte(twilioInboundMessages.createdAt, dayStart),
+      lt(twilioInboundMessages.createdAt, nextDay),
+      or(
+        lt(twilioInboundMessages.createdAt, message.createdAt),
+        and(
+          eq(twilioInboundMessages.createdAt, message.createdAt),
+          lte(twilioInboundMessages.messageSid, message.messageSid),
+        ),
+      ),
+    ));
+  const [first] = await db
+    .select({ messageSid: twilioInboundMessages.messageSid })
+    .from(twilioInboundMessages)
+    .where(sender)
+    .orderBy(asc(twilioInboundMessages.createdAt), asc(twilioInboundMessages.messageSid))
+    .limit(1);
+
+  return { dailyCount: daily?.count ?? 0, firstMessage: first?.messageSid === message.messageSid };
+}
+
 export async function claimConversationLease(
   channel: TwilioMessageChannel,
   fromAddress: string,
@@ -131,9 +173,19 @@ export async function claimConversationLease(
     .values({ phoneNumber: fromAddress, channel, state: "collecting", collected: {} })
     .onConflictDoNothing({ target: [conversations.channel, conversations.phoneNumber] });
 
+  // SET expressions read the row before this UPDATE changes updated_at.
+  // Generating rows retain their request marker until the job reaches a
+  // terminal state; clearing it here would detach a late result from its draft.
+  const staleDraft = sql<boolean>`
+    ${conversations.updatedAt} < NOW() - INTERVAL '24 hours'
+    AND ${conversations.state} <> 'generating'
+  `;
   const [claimed] = await db
     .update(conversations)
     .set({
+      state: sql`CASE WHEN ${staleDraft} THEN 'collecting' ELSE ${conversations.state} END`,
+      collected: sql`CASE WHEN ${staleDraft} THEN '{}'::jsonb ELSE ${conversations.collected} END`,
+      activeStoryId: sql`CASE WHEN ${staleDraft} THEN NULL ELSE ${conversations.activeStoryId} END`,
       leaseOwner,
       leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
       updatedAt: new Date(),
@@ -257,6 +309,79 @@ export async function completeInboundReply(
     .limit(1);
   if (existing?.status === "completed" && existing.outboundSid === outboundSid) return;
   throw new Error(`Unable to complete inbound reply for ${messageSid}`);
+}
+
+/** Close a checkpointed rate-limit denial without creating an outbound SMS. */
+export async function completeInboundWithoutReply(messageSid: string): Promise<void> {
+  const [updated] = rowsOf<{ message_sid: string }>(await db.execute(sql`
+    UPDATE twilio_inbound_messages
+    SET status = 'completed', updated_at = NOW()
+    WHERE message_sid = ${messageSid}
+      AND status = 'reply_pending'
+      AND reply_body = ''
+      AND submission IS NULL
+      AND outbound_sid IS NULL
+    RETURNING message_sid
+  `));
+  if (updated?.message_sid === messageSid) return;
+
+  const [existing] = rowsOf<{
+    status: string;
+    reply_body: string | null;
+    submission: ComicAgentSubmission | null;
+    outbound_sid: string | null;
+  }>(await db.execute(sql`
+    SELECT status, reply_body, submission, outbound_sid
+    FROM twilio_inbound_messages
+    WHERE message_sid = ${messageSid}
+    LIMIT 1
+  `));
+  if (existing?.status === "completed" && existing.reply_body === "" &&
+      existing.submission === null && existing.outbound_sid === null) return;
+  throw new Error(`Unable to complete silent inbound message ${messageSid}`);
+}
+
+/**
+ * Twilio can acknowledge an outbound reply before messages.create returns.
+ * Use that signed callback to close the receipt so a worker crash after send
+ * does not make the recovery Job send the same conversational reply again.
+ */
+export async function recordAgentMessageStatus(input: {
+  inboundSid: string;
+  messageSid: string;
+  status: string;
+  errorCode: string | null;
+}): Promise<boolean> {
+  const [receipt] = rowsOf<{ channel: string; from_address: string }>(await db.execute(sql`
+    UPDATE twilio_inbound_messages
+    SET status = 'completed',
+        outbound_sid = ${input.messageSid},
+        updated_at = NOW()
+    WHERE message_sid = ${input.inboundSid}
+      AND channel IN ('sms', 'whatsapp')
+      AND (
+        (status = 'reply_pending' AND outbound_sid IS NULL)
+        OR (status = 'completed' AND outbound_sid = ${input.messageSid})
+      )
+    RETURNING channel, from_address
+  `));
+  if (!receipt) return false;
+
+  await recordActivityEvent({
+    eventKey: `message:${input.messageSid}:status:${input.status}`,
+    channel: receipt.channel,
+    kind: "message.delivery",
+    direction: "outbound",
+    address: receipt.from_address,
+    messageSid: input.messageSid,
+    status: input.status,
+    details: {
+      inReplyTo: input.inboundSid,
+      errorCode: input.errorCode,
+      purpose: "agent_reply",
+    },
+  });
+  return true;
 }
 
 /** Scheduled safety net for a receipt saved while Azure Queue was unavailable. */

@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
 
 const h = vi.hoisted(() => ({
   insert: vi.fn(),
@@ -6,6 +8,7 @@ const h = vi.hoisted(() => ({
   update: vi.fn(),
   execute: vi.fn(),
   sendInboundMessage: vi.fn(),
+  recordActivityEvent: vi.fn(),
   insertedValues: null as Record<string, unknown> | null,
 }));
 
@@ -20,12 +23,19 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/lib/generation-queue", () => ({
   sendInboundMessage: h.sendInboundMessage,
 }));
+vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
 import {
+  claimConversationLease,
   checkpointInboundTurn,
+  completeInboundWithoutReply,
+  getInboundMessagePosition,
   recordInboundMessage,
   recoverPendingInboundMessages,
+  recordAgentMessageStatus,
 } from "@/lib/twilio-events";
+
+const dialect = new PgDialect();
 
 const input = {
   messageSid: "SM123",
@@ -57,14 +67,109 @@ function setExistingRow(row: Record<string, unknown>) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   h.insertedValues = null;
   setInsertResult([{ messageSid: "SM123" }]);
   h.execute.mockResolvedValue({ rows: [{ message_sid: "SM123" }] });
   h.sendInboundMessage.mockResolvedValue(undefined);
+  h.recordActivityEvent.mockResolvedValue(undefined);
 });
 
 describe("durable Twilio receipts", () => {
+  it("atomically completes a checkpointed silent limit denial without a Twilio SID", async () => {
+    h.execute.mockResolvedValueOnce({ rows: [{ message_sid: "SM123" }] });
+
+    await expect(completeInboundWithoutReply("SM123")).resolves.toBeUndefined();
+
+    const update = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(update.sql).toMatch(/UPDATE twilio_inbound_messages[\s\S]*SET status = 'completed'/i);
+    expect(update.sql).toMatch(/status = 'reply_pending'/i);
+    expect(update.sql).toMatch(/reply_body = ''/i);
+    expect(update.sql).toMatch(/submission IS NULL/i);
+    expect(update.sql).toMatch(/outbound_sid IS NULL/i);
+    expect(update.params).toContain("SM123");
+  });
+
+  it("treats an already completed silent denial as an idempotent retry", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        status: "completed", reply_body: "", submission: null, outbound_sid: null,
+      }] });
+
+    await expect(completeInboundWithoutReply("SM123")).resolves.toBeUndefined();
+  });
+
+  it("refuses to suppress an ordinary saved reply", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        status: "reply_pending", reply_body: "Tell me your idea", submission: null, outbound_sid: null,
+      }] });
+
+    await expect(completeInboundWithoutReply("SM123")).rejects.toThrow(/silent/i);
+  });
+
+  it("reports the daily turn position and whether this is the sender's first stored message", async () => {
+    const dailyWhere = vi.fn().mockResolvedValue([{ count: 100 }]);
+    const firstLimit = vi.fn().mockResolvedValue([{ messageSid: "SM123" }]);
+    h.select
+      .mockReturnValueOnce({ from: () => ({ where: dailyWhere }) })
+      .mockReturnValueOnce({ from: () => ({
+        where: () => ({ orderBy: () => ({ limit: firstLimit }) }),
+      }) });
+
+    await expect(getInboundMessagePosition({
+      ...input,
+      createdAt: new Date("2026-10-21T23:59:59.000Z"),
+    })).resolves.toEqual({ dailyCount: 100, firstMessage: true });
+
+    expect(dailyWhere).toHaveBeenCalledOnce();
+    expect(firstLimit).toHaveBeenCalledWith(1);
+  });
+
+  it("atomically completes an agent reply receipt when its callback beats the send response", async () => {
+    h.execute.mockResolvedValueOnce({
+      rows: [{ channel: "sms", from_address: "+15551112222" }],
+    });
+
+    await expect(recordAgentMessageStatus({
+      inboundSid: "SM123",
+      messageSid: "SMoutbound",
+      status: "delivered",
+      errorCode: null,
+    })).resolves.toBe(true);
+
+    const update = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(update.sql).toMatch(/UPDATE twilio_inbound_messages[\s\S]*SET status = 'completed'/i);
+    expect(update.sql).toMatch(/status = 'reply_pending' AND outbound_sid IS NULL/i);
+    expect(update.sql).toMatch(/status = 'completed' AND outbound_sid =/i);
+    expect(update.params).toEqual(expect.arrayContaining(["SM123", "SMoutbound"]));
+
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SMoutbound:status:delivered",
+      kind: "message.delivery",
+      direction: "outbound",
+      address: "+15551112222",
+      messageSid: "SMoutbound",
+      status: "delivered",
+      details: { inReplyTo: "SM123", errorCode: null, purpose: "agent_reply" },
+    }));
+  });
+
+  it("ignores a callback with a different SID than the saved reply", async () => {
+    h.execute.mockResolvedValueOnce({ rows: [] });
+
+    await expect(recordAgentMessageStatus({
+      inboundSid: "SM123",
+      messageSid: "SMother",
+      status: "failed",
+      errorCode: "30008",
+    })).resolves.toBe(false);
+
+    expect(h.recordActivityEvent).not.toHaveBeenCalled();
+  });
+
   it("persists the inbound body and media before requesting queue publication", async () => {
     const result = await recordInboundMessage(input);
 
@@ -159,5 +264,45 @@ describe("durable Twilio receipts", () => {
     h.sendInboundMessage.mockRejectedValue(new Error("Azure Queue unavailable"));
 
     await expect(recoverPendingInboundMessages()).rejects.toThrow("Azure Queue unavailable");
+  });
+});
+
+describe("conversation leases", () => {
+  it("atomically clears a draft inactive for over 24 hours, except while generating", async () => {
+    let updateSet: Record<string, unknown> | undefined;
+    let updateWhere: SQL | undefined;
+    const claimed = { id: "conversation-1", state: "collecting", collected: {}, activeStoryId: null };
+    h.update.mockReturnValue({
+      set: (values: Record<string, unknown>) => {
+        updateSet = values;
+        return {
+          where: (condition: SQL) => {
+            updateWhere = condition;
+            return { returning: async () => [claimed] };
+          },
+        };
+      },
+    });
+
+    await expect(claimConversationLease("sms", input.fromAddress, "worker-1", 300))
+      .resolves.toBe(claimed);
+
+    expect(updateSet).toBeDefined();
+    expect(Object.keys(updateSet!)).toEqual(expect.arrayContaining([
+      "state", "collected", "activeStoryId", "leaseOwner", "leaseExpiresAt", "updatedAt",
+    ]));
+
+    const expression = (key: string) =>
+      dialect.sqlToQuery(updateSet![key] as SQL).sql.replace(/\s+/g, " ");
+    const staleCondition = /"conversations"\."updated_at" < NOW\(\) - INTERVAL '24 hours' AND "conversations"\."state" <> 'generating'/;
+    expect(expression("state")).toMatch(staleCondition);
+    expect(expression("state")).toContain("THEN 'collecting' ELSE \"conversations\".\"state\" END");
+    expect(expression("collected")).toMatch(staleCondition);
+    expect(expression("collected")).toContain("THEN '{}'::jsonb ELSE \"conversations\".\"collected\" END");
+    expect(expression("activeStoryId")).toMatch(staleCondition);
+    expect(expression("activeStoryId")).toContain("THEN NULL ELSE \"conversations\".\"active_story_id\" END");
+
+    const leasePredicate = dialect.sqlToQuery(updateWhere!).sql.replace(/\s+/g, " ");
+    expect(leasePredicate).toContain('"conversations"."lease_expires_at" <= NOW()');
   });
 });

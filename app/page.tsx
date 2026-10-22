@@ -3,10 +3,10 @@ import Link from "next/link";
 import { ArrowUpRight, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
-  getEnabledChannels,
   getMarketingContact,
   type MarketingChannel,
 } from "@/lib/marketing-contact";
+import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import styles from "./marketing.module.css";
 
 type ChannelInvitation = {
@@ -14,7 +14,6 @@ type ChannelInvitation = {
   label: string;
   href: string;
   action: string;
-  finalAction: string;
   heading: string;
   heroCopy: string;
   contactCopy: string;
@@ -34,7 +33,7 @@ export default function Home() {
     process.env.TWILIO_PHONE_NUMBER,
     process.env.TWILIO_WHATSAPP_NUMBER,
   );
-  const selectedChannels = getEnabledChannels(
+  const selectedChannels = getPublicEnabledChannels(
     contact,
     process.env.TWILIO_ENABLED_CHANNELS,
   );
@@ -46,7 +45,6 @@ export default function Home() {
       label: "Twilio SMS",
       href: contact.smsHref ?? "",
       action: "Text your idea",
-      finalAction: "Text the Twilio number",
       heading: "Make a comic by text.",
       heroCopy: "Start with Twilio SMS: text a comic idea, shape it with the agent, and get your comic link by SMS.",
       contactCopy: `Text ${phoneNumber}. Your comic link comes back to this number by SMS.`,
@@ -62,7 +60,6 @@ export default function Home() {
       label: "Twilio WhatsApp",
       href: contact.whatsappHref ?? "",
       action: "Message on WhatsApp",
-      finalAction: "Open Twilio WhatsApp",
       heading: "Make a comic in WhatsApp.",
       heroCopy: "Start on Twilio WhatsApp: message a comic idea, shape it with the agent, and get your comic link in the same chat.",
       contactCopy: `Message ${whatsappNumber} on WhatsApp. Your finished comic link arrives in the same chat.`,
@@ -78,11 +75,10 @@ export default function Home() {
       label: "Twilio Voice",
       href: contact.callHref ?? "",
       action: "Call the agent",
-      finalAction: "Call the Twilio number",
       heading: "Make a comic by phone.",
-      heroCopy: "Start with Twilio Voice: call and talk through a comic idea with the agent. We text you the comic link after the call.",
-      contactCopy: `Call ${phoneNumber} from a phone that receives SMS. Your comic link arrives by text after the call.`,
-      start: `Call ${phoneNumber} and talk to the comic agent through Twilio ConversationRelay.`,
+      heroCopy: "Start with Twilio Voice: call, enter the code we text you, and talk through a comic idea with the agent. We text you the comic link after the call.",
+      contactCopy: `Call ${phoneNumber} from a phone that receives SMS. Enter the texted code on your keypad, then talk to the agent.`,
+      start: `Call ${phoneNumber}, enter the six digit SMS code on your keypad, and talk to the comic agent through Twilio ConversationRelay.`,
       shape: "Answer out loud, then say “create it” when the story sounds right.",
       delivery: "Your comic link and a preview when available arrive by SMS after the call. Call again to continue the story.",
       qrTitle: `Scan to call ${phoneNumber}`,
@@ -118,13 +114,15 @@ export default function Home() {
         </Link>
         <nav className={styles.headerNav} aria-label="Main navigation">
           <a href="#how-it-works">How it works</a>
-          {primaryChannel ? (
-            <a className={styles.headerAction} href="#start">
-              Start a comic <ArrowUpRight size={17} aria-hidden="true" />
-            </a>
-          ) : (
-            <span className={styles.headerPending}>Opening soon</span>
-          )}
+          <Link className={styles.headerAction} href="/start">
+            <span className={styles.headerActionFull}>
+              {primaryChannel ? "Choose a channel" : "See channels"}
+            </span>
+            <span className={styles.headerActionShort}>
+              {primaryChannel ? "Start" : "Channels"}
+            </span>
+            <ArrowUpRight size={17} aria-hidden="true" />
+          </Link>
         </nav>
       </header>
 
@@ -170,6 +168,19 @@ export default function Home() {
                       ? primaryChannel.contactCopy
                       : "Pick a channel to begin. Follow its steps below to create your comic and see how the result arrives."}
                   </p>
+                  {(hasSms || hasVoice) && (
+                    <p className={styles.programDisclosure}>
+                      {hasSms && hasVoice
+                        ? "Twilio Comics: text for automated comic replies, or call the AI agent. Both send your comic result by SMS; call from a phone that can receive SMS. "
+                        : hasVoice
+                          ? "Calls use an AI agent; comic results are texted to the number you call from. "
+                          : "Twilio Comics sends automated replies, generation updates, and your comic link after you text us. "}
+                      Message frequency varies with your requests. Message and data rates may apply.
+                      Reply HELP for help or STOP to opt out. Read our{" "}
+                      <Link href="/privacy">Privacy Policy</Link> and{" "}
+                      <Link href="/terms">Terms of Service</Link>.
+                    </p>
+                  )}
                 </>
               ) : (
                 <div className={styles.comingSoon} role="status">
@@ -300,9 +311,9 @@ export default function Home() {
         <section className={styles.lastWord} aria-label="Start your comic">
           <p>Ready when your imagination is.</p>
           {primaryChannel ? (
-            <a href={primaryChannel.href}>
-              {primaryChannel.finalAction} <ArrowUpRight size={22} aria-hidden="true" />
-            </a>
+            <Link href="/start">
+              Choose your channel <ArrowUpRight size={22} aria-hidden="true" />
+            </Link>
           ) : (
             <span>Opening soon</span>
           )}
@@ -318,6 +329,12 @@ export default function Home() {
           Forked from <a href="https://github.com/Nutlope/make-comics">Make Comics</a>.{" "}
           Thanks to its original creators and contributors.
         </p>
+        <nav className={styles.footerLinks} aria-label="Policies">
+          <Link href="/privacy">Twilio Comics Privacy Policy</Link>
+          <Link href="/terms">Twilio Comics Terms of Service</Link>
+          <a href="https://www.twilio.com/en-us/legal/privacy">Twilio provider privacy notice</a>
+          <a href="https://www.twilio.com/en-us/legal/tos">Twilio provider terms</a>
+        </nav>
       </footer>
     </div>
   );

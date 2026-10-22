@@ -3,12 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => {
   const uploadData = vi.fn();
   const exists = vi.fn();
+  const listBlobsFlat = vi.fn();
   const getBlockBlobClient = vi.fn((key: string) => ({
     url: `https://account.blob.core.windows.net/comics/${key}`,
     uploadData,
     exists,
   }));
-  const getContainerClient = vi.fn(() => ({ getBlockBlobClient }));
+  const getContainerClient = vi.fn(() => ({ getBlockBlobClient, listBlobsFlat }));
   const serviceClient = { getContainerClient };
   return {
     credential: {},
@@ -20,6 +21,7 @@ const h = vi.hoisted(() => {
     getBlockBlobClient,
     uploadData,
     exists,
+    listBlobsFlat,
   };
 });
 
@@ -57,6 +59,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.uploadData.mockResolvedValue({});
   h.exists.mockResolvedValue(true);
+  h.listBlobsFlat.mockImplementation(({ prefix }: { prefix: string }) => ({
+    async *[Symbol.asyncIterator]() {
+      yield { name: `${prefix}one.png` };
+    },
+  }));
   for (const name of environmentVariables) {
     delete process.env[name];
   }
@@ -124,5 +131,19 @@ describe("blob storage", () => {
       h.credential,
     );
     expect(h.getContainerClient).toHaveBeenCalledOnce();
+  });
+
+  it("lists only keys inside explicitly scoped owner prefixes", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    const storage = await import("@/lib/blob-storage");
+
+    await expect(storage.listBlobKeysByPrefixes([
+      "uploads/twilio_abc/",
+      "stories/11111111-1111-4111-8111-111111111111/",
+    ])).resolves.toEqual([
+      "stories/11111111-1111-4111-8111-111111111111/one.png",
+      "uploads/twilio_abc/one.png",
+    ]);
+    await expect(storage.listBlobKeysByPrefixes([""])).rejects.toThrow(/prefix/);
   });
 });

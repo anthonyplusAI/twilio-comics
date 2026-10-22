@@ -5,14 +5,18 @@ const h = vi.hoisted(() => ({
   claimConversationLease: vi.fn(),
   renewConversationLease: vi.fn(),
   getOldestOpenInboundMessage: vi.fn(),
+  getInboundMessagePosition: vi.fn(),
   markInboundProcessing: vi.fn(),
   checkpointInboundTurn: vi.fn(),
   completeInboundReply: vi.fn(),
+  completeInboundWithoutReply: vi.fn(),
   releaseConversationLease: vi.fn(),
   advanceComicAgent: vi.fn(),
   getOrCreateChannelIdentity: vi.fn(),
   submitGenerationJob: vi.fn(),
   sendChannelMessage: vi.fn(),
+  recordActivityEvent: vi.fn(),
+  reserveMessageAgentTurn: vi.fn(),
 }));
 
 vi.mock("@/lib/twilio-events", () => ({
@@ -20,9 +24,11 @@ vi.mock("@/lib/twilio-events", () => ({
   claimConversationLease: h.claimConversationLease,
   renewConversationLease: h.renewConversationLease,
   getOldestOpenInboundMessage: h.getOldestOpenInboundMessage,
+  getInboundMessagePosition: h.getInboundMessagePosition,
   markInboundProcessing: h.markInboundProcessing,
   checkpointInboundTurn: h.checkpointInboundTurn,
   completeInboundReply: h.completeInboundReply,
+  completeInboundWithoutReply: h.completeInboundWithoutReply,
   releaseConversationLease: h.releaseConversationLease,
 }));
 vi.mock("@/lib/comic-agent", () => ({ advanceComicAgent: h.advanceComicAgent }));
@@ -31,6 +37,8 @@ vi.mock("@/lib/channel-identities", () => ({
 }));
 vi.mock("@/lib/generation-jobs", () => ({ submitGenerationJob: h.submitGenerationJob }));
 vi.mock("@/lib/twilio", () => ({ sendChannelMessage: h.sendChannelMessage }));
+vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
+vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserveMessageAgentTurn }));
 
 import { processInboundMessage } from "@/lib/process-inbound-message";
 
@@ -147,18 +155,182 @@ beforeEach(() => {
     receipts[sid].status = "completed";
     receipts[sid].outboundSid = outboundSid;
   });
+  h.completeInboundWithoutReply.mockImplementation(async (sid: string) => {
+    receipts[sid].status = "completed";
+  });
   h.releaseConversationLease.mockImplementation(async (_id: string, owner: string) => {
     if (conversation.leaseOwner === owner) conversation.leaseOwner = null;
   });
   h.getOrCreateChannelIdentity.mockResolvedValue({ userId: "channel-user" });
+  h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: false });
   h.submitGenerationJob.mockResolvedValue({ accepted: true, job: { id: "job-1" }, remaining: 2 });
   h.sendChannelMessage.mockImplementation(async (message: { body: string; to: string; from: string; channel: string }) => {
     sends.push(message);
     return `SM-out-${sends.length}`;
   });
+  h.recordActivityEvent.mockResolvedValue(undefined);
+  h.reserveMessageAgentTurn.mockResolvedValue({ allowed: true, duplicate: false });
 });
 
 describe("ordered inbound messaging processor", () => {
+  it("introduces Twilio Comics and opt-out instructions on only the first SMS reply", async () => {
+    receipts.SM2 = receipt("SM2", "Make it manga", "2026-10-01T00:00:02Z");
+    h.getInboundMessagePosition.mockImplementation(async (message: Receipt) => ({
+      dailyCount: message.messageSid === "SM1" ? 1 : 2,
+      firstMessage: message.messageSid === "SM1",
+    }));
+    h.advanceComicAgent.mockImplementation(async (_current: unknown, turn: { text: string }) => ({
+      nextState: "collecting",
+      collected: { prompt: turn.text },
+      activeStoryId: null,
+      reply: `Draft: ${turn.text}`,
+      action: "none",
+    }));
+
+    await processInboundMessage("SM2");
+
+    expect(sends[0].body).toMatch(/^Twilio Comics: Draft: A robot detective/);
+    expect(sends[0].body).toMatch(/HELP.*STOP.*Msg & data rates may apply/i);
+    expect(sends[1].body).toBe("Draft: Make it manga");
+  });
+
+  it("caps SMS AI turns at 100 per sender per UTC day without changing the saved draft", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Saved robot detective", style: "noir" };
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 101, firstMessage: false });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(h.submitGenerationJob).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected).toEqual({ prompt: "Saved robot detective", style: "noir" });
+    expect(sends[0].body).toMatch(/daily message limit.*try again/i);
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SM1:rate_limited",
+      kind: "message.rate_limited",
+      address: FROM,
+      details: { dailyCount: 101, dailyLimit: 100 },
+    }));
+  });
+
+  it("silently completes later texts above the daily receipt cap", async () => {
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 102, firstMessage: false });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(h.reserveMessageAgentTurn).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+    expect(receipts.SM1).toMatchObject({ status: "completed", replyBody: "", outboundSid: null });
+  });
+
+  it("sends one AI-turn limit notice without changing the draft", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Saved robot detective", style: "noir" };
+    h.reserveMessageAgentTurn.mockResolvedValue({
+      allowed: false, reason: "rate_limit", sendNotice: true,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.reserveMessageAgentTurn).toHaveBeenCalledWith({
+      messageSid: "SM1", channel: "sms", fromAddress: FROM, toAddress: TO,
+    });
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected).toEqual({ prompt: "Saved robot detective", style: "noir" });
+    expect(sends[0].body).toMatch(/message limit.*draft is saved.*later/i);
+  });
+
+  it("does not send another paid reply for a repeat AI-turn denial", async () => {
+    h.reserveMessageAgentTurn.mockResolvedValue({
+      allowed: false, reason: "rate_limit", sendNotice: false,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+    expect(receipts.SM1).toMatchObject({ status: "completed", replyBody: "", outboundSid: null });
+  });
+
+  it("keeps a silent denial retryable from its checkpoint without reserving or sending again", async () => {
+    h.reserveMessageAgentTurn.mockResolvedValue({
+      allowed: false, reason: "rate_limit", sendNotice: false,
+    });
+    h.completeInboundWithoutReply.mockRejectedValueOnce(new Error("database unavailable"))
+      .mockImplementationOnce(async (sid: string) => { receipts[sid].status = "completed"; });
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow("database unavailable");
+    expect(receipts.SM1).toMatchObject({ status: "reply_pending", replyBody: "" });
+
+    await processInboundMessage("SM1");
+
+    expect(h.reserveMessageAgentTurn).toHaveBeenCalledOnce();
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("does not call OpenAI or Twilio when the durable turn budget is unavailable", async () => {
+    h.reserveMessageAgentTurn.mockResolvedValue({ allowed: false, reason: "unavailable" });
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow(/budget unavailable/i);
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(receipts.SM1.status).toBe("processing");
+  });
+
+  it("tracks the agent SMS reply and requests a signed delivery callback", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "Reply CREATE to approve.",
+      action: "none",
+    });
+
+    try {
+      await processInboundMessage("SM1");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      statusCallback: "https://comics.example.com/api/twilio/status?inboundSid=SM1#rc=3&rp=5xx,ct,rt",
+    }));
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "message:SM-out-1:outbound",
+      kind: "message.outbound",
+      channel: "sms",
+      direction: "outbound",
+      address: FROM,
+      messageSid: "SM-out-1",
+      content: "Reply CREATE to approve.",
+      details: { inReplyTo: "SM1", purpose: "agent_reply" },
+    }));
+  });
+
+  it("completes an accepted SMS reply even if activity storage fails", async () => {
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "Reply CREATE to approve.",
+      action: "none",
+    });
+    h.recordActivityEvent.mockRejectedValue(new Error("analytics unavailable"));
+
+    await expect(processInboundMessage("SM1")).resolves.toBeUndefined();
+
+    expect(receipts.SM1).toMatchObject({ status: "completed", outboundSid: "SM-out-1" });
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(h.recordActivityEvent).toHaveBeenCalledOnce();
+  });
+
   it("saves an idea and its reply before sending one outbound SMS", async () => {
     h.advanceComicAgent.mockResolvedValue({
       nextState: "confirming",

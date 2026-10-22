@@ -92,7 +92,21 @@ case "$1 $2 ${3:-}" in
       loginServer) printf 'testacr.azurecr.io\n' ;;
     esac
     exit 0 ;;
-  'containerapp env show') exit 0 ;;
+  'containerapp env show')
+    if [[ "${*}" == *'--query properties.provisioningState'* ]]; then
+      if [[ "${AZURE_TEST_ENV_READ_FAIL_ONCE:-}" == 1 && ! -e "${AZURE_TEST_ENV_READ_FILE:-/dev/null}" ]]; then
+        : > "$AZURE_TEST_ENV_READ_FILE"
+        printf 'Transient Azure transport error\n' >&2
+        exit 55
+      fi
+      if [[ "${AZURE_TEST_ENV_WAIT_ONCE:-}" == 1 && ! -e "${AZURE_TEST_ENV_STATE_FILE:-/dev/null}" ]]; then
+        : > "$AZURE_TEST_ENV_STATE_FILE"
+        printf 'Waiting\n'
+      else
+        printf '%s\n' "${AZURE_TEST_ENV_STATE:-Succeeded}"
+      fi
+    fi
+    exit 0 ;;
   'storage account show')
     [[ "${*}" == *'--query id'* ]] && printf '/storage\n'
     exit 0 ;;
@@ -144,7 +158,10 @@ set -e
 arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_LOG"; }
 [[ "$(arg_after --name)" == twilio-comics-recovery ]]
 [[ "$(arg_after --trigger-type)" == Schedule ]]
-[[ "$(arg_after --cron-expression)" == '*/5 * * * *' ]]
+[[ "$(arg_after --cron-expression)" == '0 0 1 1 *' ]] || {
+  printf 'Recovery placeholder must remain dormant until first deploy.\n' >&2
+  exit 1
+}
 [[ "$(arg_after --command)" == pnpm ]]
 [[ "$(arg_after --args)" == start:worker ]]
 [[ "$(arg_after --image)" == 'mcr.microsoft.com/dotnet/samples:aspnetapp' ]]
@@ -168,6 +185,35 @@ set -e
 [[ "$(arg_after --image)" == 'mcr.microsoft.com/dotnet/samples:aspnetapp' ]]
 [[ "$(arg_after --target-port)" == 8080 ]]
 [[ "$(arg_after --termination-grace-period)" == 240 ]]
+
+# A resumed run waits for an existing ACA environment to finish provisioning
+# before it attempts to create a Container App inside that environment.
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_MISSING_APP=1 AZURE_TEST_ENV_WAIT_ONCE=1 \
+  AZURE_TEST_ENV_STATE_FILE="$TEST_ROOT/env-wait-seen" AZURE_ENV_POLL_SECONDS=0 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 76 && -e "$TEST_ROOT/env-wait-seen" ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+# A single failed ARM read during environment provisioning should be retried.
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_MISSING_APP=1 AZURE_TEST_ENV_READ_FAIL_ONCE=1 \
+  AZURE_TEST_ENV_READ_FILE="$TEST_ROOT/env-read-failed" AZURE_ENV_POLL_SECONDS=0 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 76 && -e "$TEST_ROOT/env-read-failed" ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
 
 # A reused app on the wrong port must fail before identity/env/registry
 # modifications, so the operator can switch its live ingress deliberately.

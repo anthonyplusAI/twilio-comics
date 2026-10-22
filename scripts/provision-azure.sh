@@ -105,6 +105,39 @@ else
   printf 'Reusing Container Apps environment %s and its existing log destination.\n' "$ACA_ENVIRONMENT"
 fi
 
+# An interrupted `az containerapp env create` can leave a visible environment
+# in Waiting/InProgress for several minutes. Creating its first app before the
+# environment reaches Succeeded then fails with ManagedEnvironmentNotProvisioned.
+environment_ready=false
+environment_read_failures=0
+for ((attempt = 1; attempt <= 120; attempt++)); do
+  if environment_state="$(az containerapp env show --name "$ACA_ENVIRONMENT" \
+    --resource-group "$RESOURCE_GROUP" --query properties.provisioningState --output tsv)"; then
+    environment_read_failures=0
+  else
+    environment_read_failures=$((environment_read_failures + 1))
+    ((environment_read_failures < 5)) \
+      || die "Cannot read Container Apps environment '$ACA_ENVIRONMENT' provisioning state after five attempts."
+    printf 'Retrying Container Apps environment read (%s/5)...\n' "$environment_read_failures"
+    sleep "${AZURE_ENV_POLL_SECONDS:-15}"
+    continue
+  fi
+  case "$environment_state" in
+    Succeeded)
+      environment_ready=true
+      break ;;
+    Failed|Canceled|Cancelled)
+      die "Container Apps environment '$ACA_ENVIRONMENT' finished in state '$environment_state'. Inspect its Azure activity log before rerunning." ;;
+  esac
+  if ((attempt % 4 == 1)); then
+    printf 'Waiting for Container Apps environment %s (state: %s)...\n' \
+      "$ACA_ENVIRONMENT" "${environment_state:-unknown}"
+  fi
+  sleep "${AZURE_ENV_POLL_SECONDS:-15}"
+done
+[[ "$environment_ready" == true ]] \
+  || die "Container Apps environment '$ACA_ENVIRONMENT' did not become ready within 30 minutes."
+
 if ! az storage account show --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az storage account create --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
     --location "$LOCATION" --sku Standard_LRS --kind StorageV2 \
@@ -325,13 +358,13 @@ ensure_infrastructure_env job "$ACA_JOB_NAME" "${WORKER_ENV[@]}"
 ensure_registry_pull job "$ACA_JOB_NAME"
 
 # A scheduled sweep republishes receipts/jobs left pending after transient
-# database or queue failures. It uses the same workload identities and storage
-# configuration as the event-driven worker, with RECOVERY_MODE selecting the
-# bounded recovery path in worker/index.ts.
+# database or queue failures. Keep the placeholder dormant until deploy.yml
+# replaces its image, runtime secrets, and cron schedule with the real worker.
+# Otherwise the ASP.NET placeholder would try to run pnpm every five minutes.
 if ! az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az containerapp job create --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
     --environment "$ACA_ENVIRONMENT" --trigger-type Schedule \
-    --cron-expression '*/5 * * * *' \
+    --cron-expression '0 0 1 1 *' \
     --replica-timeout 900 --replica-retry-limit 0 \
     --replica-completion-count 1 --parallelism 1 \
     --image "$PLACEHOLDER_IMAGE" --cpu 1 --memory 2Gi \
@@ -421,5 +454,8 @@ Recovery job: ${ACA_RECOVERY_JOB_NAME}
 ACR server:  ${ACR_SERVER}
 
 Set runtime secrets on both Jobs and public URLs from docs/INFRA_SETUP.md before the first deploy.
-Set DATABASE_URL in the GitHub production environment for Drizzle migrations.
+Store runtime and migration DATABASE_URL values as Azure Container Apps secrets. The
+production GitHub environment needs only Azure OIDC identifiers. Set the repository
+variable PRODUCTION_RELEASE_READY=true only after the private Azure PostgreSQL server,
+migration Job, application secrets, and Twilio sender are configured.
 EOF

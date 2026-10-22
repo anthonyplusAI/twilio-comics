@@ -1,3 +1,4 @@
+import { recordActivityEvent } from "@/lib/activity-events";
 import { blobExists, getBlobPublicUrl, uploadBufferToBlob } from "@/lib/blob-storage";
 import {
   cleanupFailedContinuationPage,
@@ -28,6 +29,105 @@ import {
 } from "@/lib/db-actions";
 import { createMmsPreview } from "@/lib/mms-preview";
 import sharp from "sharp";
+import type { GenerationJob } from "@/lib/schema";
+
+const RESULT_DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TWILIO_VALIDITY_SAFETY_SECONDS = 10;
+const MIN_TWILIO_VALIDITY_SECONDS = 6;
+const EXPIRED_DELIVERY_REASON = "Result delivery expired after 24 hours";
+
+function resultDeliveryValiditySeconds(job: Pick<GenerationJob, "createdAt">): number | null {
+  const createdAt = job.createdAt instanceof Date ? job.createdAt.getTime() : NaN;
+  if (!Number.isFinite(createdAt)) return null;
+  // Twilio measures validity from API acceptance, so leave a small margin for
+  // request travel and never set a queue period beyond the job's deadline.
+  const seconds = Math.floor(
+    (createdAt + RESULT_DELIVERY_MAX_AGE_MS - Date.now()) / 1000,
+  ) - TWILIO_VALIDITY_SAFETY_SECONDS;
+  return seconds >= MIN_TWILIO_VALIDITY_SECONDS ? Math.min(seconds, 36000) : null;
+}
+
+function resultDeliveryExpired(job: Pick<GenerationJob, "createdAt">): boolean {
+  return resultDeliveryValiditySeconds(job) === null;
+}
+
+function elapsedMs(since: Date | null | undefined): number | null {
+  return since instanceof Date ? Math.max(0, Date.now() - since.getTime()) : null;
+}
+
+function errorDetails(error: unknown): Record<string, unknown> {
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code: unknown }).code)
+    : "";
+  return {
+    errorType: error instanceof ComicServiceError
+      ? error.type : error instanceof Error ? error.name : "unknown",
+    httpStatus: error instanceof ComicServiceError ? error.status || null : null,
+    errorCode: /^[A-Za-z0-9_-]{1,32}$/.test(code) ? code : null,
+  };
+}
+
+async function logGenerationEvent(
+  job: GenerationJob,
+  kind: string,
+  suffix: string,
+  status: string,
+  details: Record<string, unknown>,
+  options: { storyId?: string | null; messageSid?: string | null; content?: string } = {},
+): Promise<void> {
+  try {
+    await recordActivityEvent({
+      eventKey: `job:${job.id}:${suffix}`,
+      userId: job.userId,
+      channel: job.source,
+      kind,
+      direction: kind === "generation.delivery" && status !== "suppressed"
+        ? "outbound" : "internal",
+      address: job.recipientAddress,
+      jobId: job.id,
+      storyId: options.storyId || job.storyId || null,
+      messageSid: options.messageSid || null,
+      content: options.content,
+      status,
+      details: { attemptCount: job.attemptCount, ...details },
+    });
+  } catch (error) {
+    console.error("Generation history failed", {
+      jobId: job.id,
+      kind,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
+}
+
+async function logGenerationSuccess(job: GenerationJob, storyId: string, deliverySid: string): Promise<void> {
+  await logGenerationEvent(job, "generation.succeeded", "succeeded", "succeeded", {
+    deliverySid,
+    totalDurationMs: elapsedMs(job.createdAt),
+    processingMs: elapsedMs(job.updatedAt),
+  }, { storyId, messageSid: deliverySid });
+}
+
+async function suppressExpiredResult(
+  job: GenerationJob,
+  workerId: string,
+  storyId: string | null = job.storyId,
+): Promise<void> {
+  // The existing failed state is terminal and releases the reserved quota.
+  // Any generated story and page remain saved; a late result is never sent to
+  // a number that may now belong to someone else.
+  await markGenerationJobFailed(job.id, workerId, EXPIRED_DELIVERY_REASON);
+  await logGenerationEvent(job, "generation.delivery", "delivery:expired", "suppressed", {
+    reason: "delivery_window_expired",
+    resultGenerated: Boolean(storyId),
+    ageMs: elapsedMs(job.createdAt),
+  }, { storyId });
+  await logGenerationEvent(job, "generation.failed", "failed", "failed", {
+    reason: "delivery_window_expired",
+    resultGenerated: Boolean(storyId),
+    totalDurationMs: elapsedMs(job.createdAt),
+  }, { storyId });
+}
 
 function extensionFor(contentType: string): string {
   return contentType.includes("png") ? "png" : "jpg";
@@ -92,6 +192,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const existing = await getGenerationJob(jobId);
     if (!existing) return;
     if (existing.status === "succeeded" && existing.storyId) {
+      await logGenerationSuccess(existing, existing.storyId, existing.deliverySid || "");
       try {
         await completeConversationForGeneration(existing, existing.storyId);
       } catch (error) {
@@ -104,6 +205,17 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     }
     throw new Error("Generation job is already being processed");
   }
+
+  await logGenerationEvent(
+    claimed,
+    "generation.started",
+    `attempt:${claimed.attemptCount}:started`,
+    "processing",
+    {
+      queueWaitMs: elapsedMs(claimed.queuedAt),
+      totalElapsedMs: elapsedMs(claimed.createdAt),
+    },
+  );
 
   let acceptedDeliverySid: string | null = claimed.deliverySid;
   try {
@@ -118,11 +230,17 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         imageUrl: claimed.imageUrl,
         deliverySid: claimed.deliverySid,
       });
+      await logGenerationSuccess(claimed, claimed.storyId, claimed.deliverySid);
       try {
         await completeConversationForGeneration(claimed, claimed.storyId);
       } catch (error) {
         console.error("Failed to update completed conversation", error);
       }
+      return;
+    }
+
+    if (resultDeliveryExpired(claimed)) {
+      await suppressExpiredResult(claimed, workerId);
       return;
     }
 
@@ -132,6 +250,10 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       claimed.id,
       claimed.characterImageUrls,
     );
+    if (resultDeliveryExpired(claimed)) {
+      await suppressExpiredResult(claimed, workerId);
+      return;
+    }
     const imageKey = claimed.targetStoryId
       ? `stories/${claimed.targetStoryId}/page-${claimed.id}.png`
       : `stories/${claimed.id}/page-1.png`;
@@ -156,6 +278,16 @@ export async function processGenerationJob(jobId: string): Promise<void> {
           preserveOnFailure: true,
         });
 
+    if (resultDeliveryExpired(claimed)) {
+      await checkpointGenerationOutput(claimed.id, workerId, {
+        storyId: result.story.id,
+        imageUrl: result.imageUrl,
+        deliveryHadMedia: false,
+      });
+      await suppressExpiredResult(claimed, workerId, result.story.id);
+      return;
+    }
+
     const link = `${publicBaseUrl}/story/${result.story.slug}`;
     const body = claimed.targetStoryId
       ? `Page ${result.page.pageNumber} of "${result.story.title}" is ready! View it here: ${link}`
@@ -163,6 +295,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;
+    let deliveryHadMedia = current?.deliveryHadMedia || claimed.deliveryHadMedia || false;
     acceptedDeliverySid = deliverySid;
     if (!deliverySid) {
       let mediaUrl: string | undefined;
@@ -179,12 +312,20 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         imageUrl: result.imageUrl,
         deliveryHadMedia: Boolean(mediaUrl),
       });
+      deliveryHadMedia = Boolean(mediaUrl);
+      const validityPeriod = resultDeliveryValiditySeconds(claimed);
+      if (validityPeriod === null) {
+        await suppressExpiredResult(claimed, workerId, result.story.id);
+        return;
+      }
+      const channel = (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel;
       const message = {
-        channel: (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel,
+        channel,
         to: claimed.recipientAddress,
         from: claimed.senderAddress,
         body,
         statusCallback,
+        ...(channel === "sms" ? { validityPeriod } : {}),
       };
       try {
         deliverySid = await sendChannelMessage({ ...message, mediaUrl });
@@ -196,10 +337,28 @@ export async function processGenerationJob(jobId: string): Promise<void> {
           imageUrl: result.imageUrl,
           deliveryHadMedia: false,
         });
-        deliverySid = await sendChannelMessage(message);
+        deliveryHadMedia = false;
+        const retryValidityPeriod = resultDeliveryValiditySeconds(claimed);
+        if (retryValidityPeriod === null) {
+          await suppressExpiredResult(claimed, workerId, result.story.id);
+          return;
+        }
+        deliverySid = await sendChannelMessage({
+          ...message,
+          ...(channel === "sms" ? { validityPeriod: retryValidityPeriod } : {}),
+        });
       }
       acceptedDeliverySid = deliverySid;
     }
+
+    await logGenerationEvent(
+      claimed,
+      "generation.delivery",
+      `delivery:${deliverySid}`,
+      "accepted",
+      { hadMedia: deliveryHadMedia, fallback: false },
+      { storyId: result.story.id, messageSid: deliverySid, content: body },
+    );
 
     await checkpointGenerationDelivery(claimed.id, workerId, {
       storyId: result.story.id,
@@ -212,6 +371,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       imageUrl: result.imageUrl,
       deliverySid,
     });
+    await logGenerationSuccess(claimed, result.story.id, deliverySid);
 
     try {
       await completeConversationForGeneration(claimed, result.story.id);
@@ -230,15 +390,30 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       // release the reservation or send a false generation-failed message.
       try {
         await returnGenerationJobToQueue(claimed.id, workerId, message);
+        await logGenerationEvent(
+          claimed,
+          "generation.retry",
+          `attempt:${claimed.attemptCount}:retry`,
+          "queued",
+          { ...errorDetails(error), acceptedDeliverySid },
+        );
       } catch (checkpointError) {
         if (checkpointError instanceof GenerationJobLeaseLostError) return;
         console.error("Failed to requeue an accepted delivery", checkpointError);
       }
       throw error;
     }
-    if (!isPermanent(error, claimed.attemptCount)) {
+    const expired = resultDeliveryExpired(claimed);
+    if (!expired && !isPermanent(error, claimed.attemptCount)) {
       try {
         await returnGenerationJobToQueue(claimed.id, workerId, message);
+        await logGenerationEvent(
+          claimed,
+          "generation.retry",
+          `attempt:${claimed.attemptCount}:retry`,
+          "queued",
+          errorDetails(error),
+        );
       } catch (checkpointError) {
         if (checkpointError instanceof GenerationJobLeaseLostError) return;
         throw checkpointError;
@@ -247,7 +422,23 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     }
 
     try {
-      await markGenerationJobFailed(claimed.id, workerId, message);
+      await markGenerationJobFailed(
+        claimed.id,
+        workerId,
+        expired ? EXPIRED_DELIVERY_REASON : message,
+      );
+      await logGenerationEvent(claimed, "generation.failed", "failed", "failed", {
+        ...errorDetails(error),
+        ...(expired ? { reason: "delivery_window_expired" } : {}),
+        totalDurationMs: elapsedMs(claimed.createdAt),
+        processingMs: elapsedMs(claimed.updatedAt),
+      });
+      if (expired) {
+        await logGenerationEvent(claimed, "generation.delivery", "delivery:expired", "suppressed", {
+          reason: "delivery_window_expired",
+          ageMs: elapsedMs(claimed.createdAt),
+        });
+      }
     } catch (checkpointError) {
       if (checkpointError instanceof GenerationJobLeaseLostError) return;
       throw checkpointError;
@@ -263,12 +454,42 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         console.error("Failed to remove unfinished continuation page", cleanupError);
       }
     }
+    if (expired) return;
     try {
-      await sendChannelMessage({
-        channel: (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel,
+      const validityPeriod = resultDeliveryValiditySeconds(claimed);
+      if (validityPeriod === null) {
+        await logGenerationEvent(claimed, "generation.delivery", "delivery:expired", "suppressed", {
+          reason: "delivery_window_expired",
+          ageMs: elapsedMs(claimed.createdAt),
+          purpose: "generation_failure_notice",
+        });
+        return;
+      }
+      const failureBody = failureMessage(error);
+      const channel = (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel;
+      const callbackBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+      const failureSid = await sendChannelMessage({
+        channel,
         to: claimed.recipientAddress,
         from: claimed.senderAddress,
-        body: failureMessage(error),
+        body: failureBody,
+        ...(channel === "sms" ? { validityPeriod } : {}),
+        ...(callbackBaseUrl ? {
+          statusCallback: `${callbackBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}&failure=1#rc=3&rp=5xx,ct,rt`,
+        } : {}),
+      });
+      await recordActivityEvent({
+        eventKey: `message:${failureSid}:outbound`,
+        userId: claimed.userId,
+        channel,
+        kind: "message.outbound",
+        direction: "outbound",
+        address: claimed.recipientAddress,
+        messageSid: failureSid,
+        jobId: claimed.id,
+        content: failureBody,
+        status: "accepted",
+        details: { source: claimed.source, purpose: "generation_failure_notice", attemptCount: claimed.attemptCount },
       });
     } catch (notificationError) {
       console.error("Failed to send generation failure notification", notificationError);

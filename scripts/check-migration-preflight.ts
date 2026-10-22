@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { neon } from "@neondatabase/serverless";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+import { Pool } from "pg";
+import { createPostgresPoolConfig } from "../lib/db";
 
 type ColumnShape = { type: string; notNull: boolean };
 type TableShape = {
@@ -416,93 +417,119 @@ ${values};
 COMMIT;\n`;
 }
 
-async function inspectDatabase(databaseUrl: string): Promise<DatabaseState> {
-  const sql = neon(databaseUrl);
-  const [tableRows, columnRows, constraintRows, indexRows, journalTableRows] = await Promise.all([
-    sql`SELECT c.relname AS table_name
-      FROM pg_catalog.pg_class c
-      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')`,
-    sql`SELECT c.relname AS table_name, a.attname AS column_name,
-        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
-        a.attnotnull AS not_null
-      FROM pg_catalog.pg_class c
-      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
-        AND a.attnum > 0 AND NOT a.attisdropped`,
-    sql`SELECT c.relname AS table_name, co.conname AS constraint_name,
-        co.contype AS constraint_type
-      FROM pg_catalog.pg_constraint co
-      JOIN pg_catalog.pg_class c ON c.oid = co.conrelid
-      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
-        AND co.contype IN ('p', 'u', 'f', 'c')`,
-    sql`SELECT t.relname AS table_name, i.relname AS index_name
-      FROM pg_catalog.pg_index ix
-      JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
-      JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
-      JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-      LEFT JOIN pg_catalog.pg_constraint co ON co.conindid = i.oid
-        AND co.contype IN ('p', 'u', 'x')
-      WHERE n.nspname = 'public' AND t.relkind IN ('r', 'p') AND co.oid IS NULL`,
-    sql`SELECT pg_catalog.to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS journal_exists`,
-  ]);
+export async function inspectDatabase(databaseUrl: string): Promise<DatabaseState> {
+  const pool = new Pool(createPostgresPoolConfig(databaseUrl));
+  try {
+    const client = await pool.connect();
+    try {
+      // Inspect one consistent state; never write from the preflight command.
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      try {
+        const tableRows = (await client.query<{ table_name: string }>(`SELECT c.relname AS table_name
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')`)).rows;
+        const columnRows = (await client.query<{
+          table_name: string; column_name: string; data_type: string; not_null: boolean;
+        }>(`SELECT c.relname AS table_name, a.attname AS column_name,
+            pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+            a.attnotnull AS not_null
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+          WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+            AND a.attnum > 0 AND NOT a.attisdropped`)).rows;
+        const constraintRows = (await client.query<{
+          table_name: string; constraint_name: string; constraint_type: string;
+        }>(`SELECT c.relname AS table_name, co.conname AS constraint_name,
+            co.contype AS constraint_type
+          FROM pg_catalog.pg_constraint co
+          JOIN pg_catalog.pg_class c ON c.oid = co.conrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+            AND co.contype IN ('p', 'u', 'f', 'c')`)).rows;
+        const indexRows = (await client.query<{
+          table_name: string; index_name: string;
+        }>(`SELECT t.relname AS table_name, i.relname AS index_name
+          FROM pg_catalog.pg_index ix
+          JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+          JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+          LEFT JOIN pg_catalog.pg_constraint co ON co.conindid = i.oid
+            AND co.contype IN ('p', 'u', 'x')
+          WHERE n.nspname = 'public' AND t.relkind IN ('r', 'p') AND co.oid IS NULL`)).rows;
+        const journalTableRows = (await client.query<{ journal_exists: boolean }>(
+          "SELECT pg_catalog.to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS journal_exists",
+        )).rows;
 
-  const schema: SchemaShape = {};
-  for (const row of tableRows) {
-    schema[row.table_name as string] = { columns: {}, constraints: {}, indexes: [] };
-  }
-  for (const row of columnRows) {
-    schema[row.table_name as string].columns[row.column_name as string] = {
-      type: row.data_type as string,
-      notNull: row.not_null as boolean,
-    };
-  }
-  for (const row of constraintRows) {
-    schema[row.table_name as string].constraints[row.constraint_name as string] =
-      row.constraint_type as string;
-  }
-  for (const row of indexRows) {
-    schema[row.table_name as string].indexes.push(row.index_name as string);
-  }
-  for (const table of Object.values(schema)) table.indexes.sort();
+        const schema: SchemaShape = {};
+        for (const row of tableRows) {
+          schema[row.table_name] = { columns: {}, constraints: {}, indexes: [] };
+        }
+        for (const row of columnRows) {
+          schema[row.table_name].columns[row.column_name] = {
+            type: row.data_type,
+            notNull: row.not_null,
+          };
+        }
+        for (const row of constraintRows) {
+          schema[row.table_name].constraints[row.constraint_name] = row.constraint_type;
+        }
+        for (const row of indexRows) {
+          schema[row.table_name].indexes.push(row.index_name);
+        }
+        for (const table of Object.values(schema)) table.indexes.sort();
 
-  const duplicatePageGroups: DatabaseState["duplicatePageGroups"] = [];
-  if (schema.pages?.columns.story_id && schema.pages.columns.page_number) {
-    const rows = await sql`SELECT story_id::text AS story_id, page_number,
-        COUNT(*)::integer AS duplicate_count
-      FROM public.pages
-      GROUP BY story_id, page_number
-      HAVING COUNT(*) > 1
-      ORDER BY duplicate_count DESC, story_id, page_number
-      LIMIT 5`;
-    for (const row of rows) {
-      duplicatePageGroups.push({
-        storyId: row.story_id as string,
-        pageNumber: Number(row.page_number),
-        count: Number(row.duplicate_count),
-      });
+        const duplicatePageGroups: DatabaseState["duplicatePageGroups"] = [];
+        if (schema.pages?.columns.story_id && schema.pages.columns.page_number) {
+          const rows = (await client.query<{
+            story_id: string; page_number: number; duplicate_count: number;
+          }>(`SELECT story_id::text AS story_id, page_number,
+              COUNT(*)::integer AS duplicate_count
+            FROM public.pages
+            GROUP BY story_id, page_number
+            HAVING COUNT(*) > 1
+            ORDER BY duplicate_count DESC, story_id, page_number
+            LIMIT 5`)).rows;
+          for (const row of rows) {
+            duplicatePageGroups.push({
+              storyId: row.story_id,
+              pageNumber: Number(row.page_number),
+              count: Number(row.duplicate_count),
+            });
+          }
+        }
+
+        let orphanActiveStoryCount = 0;
+        if (schema.conversations?.columns.active_story_id && schema.stories?.columns.id) {
+          const rows = (await client.query<{ orphan_count: number }>(
+            `SELECT COUNT(*)::integer AS orphan_count
+            FROM public.conversations c
+            LEFT JOIN public.stories s ON s.id = c.active_story_id
+            WHERE c.active_story_id IS NOT NULL AND s.id IS NULL`,
+          )).rows;
+          orphanActiveStoryCount = Number(rows[0]?.orphan_count ?? 0);
+        }
+
+        const journalExists = journalTableRows[0]?.journal_exists === true;
+        const journalRows = journalExists
+          ? (await client.query<{ hash: string; created_at: string | number }>(
+            "SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY created_at, id",
+          )).rows.map((row) => ({ hash: row.hash, createdAt: Number(row.created_at) }))
+          : [];
+
+        await client.query("COMMIT");
+        return { journalExists, journalRows, schema, duplicatePageGroups, orphanActiveStoryCount };
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      client.release();
     }
+  } finally {
+    await pool.end();
   }
-
-  let orphanActiveStoryCount = 0;
-  if (schema.conversations?.columns.active_story_id && schema.stories?.columns.id) {
-    const rows = await sql`SELECT COUNT(*)::integer AS orphan_count
-      FROM public.conversations c
-      LEFT JOIN public.stories s ON s.id = c.active_story_id
-      WHERE c.active_story_id IS NOT NULL AND s.id IS NULL`;
-    orphanActiveStoryCount = Number(rows[0]?.orphan_count ?? 0);
-  }
-
-  const journalExists = journalTableRows[0]?.journal_exists === true;
-  const journalRows = journalExists
-    ? (await sql`SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY created_at, id`).map(
-        (row) => ({ hash: row.hash as string, createdAt: Number(row.created_at) }),
-      )
-    : [];
-
-  return { journalExists, journalRows, schema, duplicatePageGroups, orphanActiveStoryCount };
 }
 
 async function main() {
