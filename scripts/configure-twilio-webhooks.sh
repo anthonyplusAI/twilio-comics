@@ -156,8 +156,8 @@ printf 'Configuring SMS and Voice POST webhooks for %s through Twilio profile %s
 twilio api:core:incoming-phone-numbers:update \
   --sid "$NUMBER_SID" --account-sid "$ACCOUNT_SID" \
   -p "$PROFILE" -o json -l error \
-  --sms-url "$sms_url" --sms-method post \
-  --voice-url "$voice_url" --voice-method post \
+  --sms-url "$sms_url" --sms-method POST \
+  --voice-url "$voice_url" --voice-method POST \
   > "$temp_dir/update.json" \
   || die 'Twilio rejected the webhook update. Review the number without retrying blindly.'
 

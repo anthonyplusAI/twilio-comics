@@ -58,8 +58,8 @@ case "$command_name" in
     [[ "${TWILIO_MOCK_UPDATE_FAIL:-}" != 1 ]] || exit 95
     sms_url="$(value_after --sms-url "$@")"
     voice_url="$(value_after --voice-url "$@")"
-    [[ "$(value_after --sms-method "$@")" == post ]] || exit 96
-    [[ "$(value_after --voice-method "$@")" == post ]] || exit 97
+    [[ "$(value_after --sms-method "$@")" == POST ]] || exit 96
+    [[ "$(value_after --voice-method "$@")" == POST ]] || exit 97
     jq --arg sms "$sms_url" --arg voice "$voice_url" '
       .smsUrl = $sms | .voiceUrl = $voice | .smsMethod = "POST" | .voiceMethod = "POST"
     ' "$TWILIO_MOCK_STATE" > "$TWILIO_MOCK_STATE.next"
