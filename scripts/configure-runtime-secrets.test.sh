@@ -104,6 +104,14 @@ PY
   'containerapp secret set'|'containerapp job secret')
     name="$(argument --name "$@")"
     spec="$(argument --secrets "$@")"
+    if [[ "$1 $2 $3" == 'containerapp secret set' && \
+        "$name" == "${AZ_MOCK_TRANSPORT_ONCE_SECRET_APP:-}" && \
+        "$spec" == auth-secret=* && \
+        ! -e "$AZ_MOCK_STATE/secret-transport-once.done" ]]; then
+      : > "$AZ_MOCK_STATE/secret-transport-once.done"
+      printf '%s\n' 'HTTPSConnectionPool(host=management.azure.com): url: /operationStatuses/secret?sig=mock-signed-url (Caused by SSLEOFError(UNEXPECTED_EOF_WHILE_READING))' >&2
+      exit 97
+    fi
     python3 - "$AZ_MOCK_STATE/$name.json" "$spec" <<'PY'
 from pathlib import Path
 import json
@@ -120,6 +128,18 @@ PY
     ;;
   'containerapp update --name'|'containerapp job update')
     name="$(argument --name "$@")"
+    if [[ "$1 $2 $3" == 'containerapp job update' && \
+        "$name" == "${AZ_MOCK_TRANSPORT_ONCE_JOB:-}" && \
+        ! -e "$AZ_MOCK_STATE/transport-once.done" ]]; then
+      : > "$AZ_MOCK_STATE/transport-once.done"
+      printf '%s\n' 'HTTPSConnectionPool(host=management.azure.com): url: /operationStatuses/test?sig=mock-signed-url (Caused by SSLEOFError(UNEXPECTED_EOF_WHILE_READING))' >&2
+      exit 97
+    fi
+    if [[ "$1 $2 $3" == 'containerapp job update' && \
+        "$name" == "${AZ_MOCK_DENIED_JOB:-}" ]]; then
+      printf '%s\n' 'ERROR: (AuthorizationFailed) See https://management.azure.com/operationStatuses/test?sig=mock-signed-url' >&2
+      exit 98
+    fi
     env_args=()
     capture=false
     for item in "$@"; do
@@ -177,6 +197,7 @@ export TWILIO_ACCOUNT_SID
 export CONFIGURE_RUNTIME_CONFIRM=yes
 export OPERATOR_PUBLIC_IPV4='8.8.8.8'
 export RUNTIME_ROLE_POLL_SECONDS=0
+export RUNTIME_ACA_RETRY_SECONDS=0
 vault_id="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/rg-twilio-comics/providers/Microsoft.KeyVault/vaults/kv-twilio-comics-1a1d98"
 printf 'operator-principal\t%s\tKey Vault Secrets Officer\t/role-assignments/operator-officer\n' "$vault_id" > "$AZ_MOCK_STATE/roles.tsv"
 
@@ -196,8 +217,18 @@ fi
 grep -Fq 'Set TWILIO_ACCOUNT_SID' "$test_root/invalid-sid.out"
 [[ ! -s "$AZ_MOCK_LOG" ]]
 
-bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/first.out" 2>&1
+AZ_MOCK_TRANSPORT_ONCE_SECRET_APP='twilio-comics-v2' \
+AZ_MOCK_TRANSPORT_ONCE_JOB='twilio-comics-generation-v2' \
+  bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/first.out" 2>&1
 grep -Fq 'Channels remain closed; web app remains internal' "$test_root/first.out"
+grep -Fq 'transport error during secret binding for twilio-comics-v2/auth-secret; retrying (1/3)' "$test_root/first.out"
+grep -Fq 'transport error during environment update for twilio-comics-generation-v2; retrying (1/3)' "$test_root/first.out"
+[[ "$(grep -F 'containerapp secret set' "$AZ_MOCK_LOG" | grep -Fc 'auth-secret=keyvaultref')" == 2 ]]
+[[ "$(grep -Fc 'containerapp job update --name twilio-comics-generation-v2' "$AZ_MOCK_LOG")" == 2 ]]
+if grep -Fq 'mock-signed-url' "$test_root/first.out"; then
+  printf 'A signed Azure operation URL leaked into runtime setup output\n' >&2
+  exit 1
+fi
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 4 ]]
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-expiration.tsv" | tr -d ' ')" == 4 ]]
 jq --exit-status '
@@ -234,11 +265,32 @@ fi
 
 password_before="$(cat "$AZ_MOCK_STATE/secrets/admin-initial-password")"
 hash_before="$(cat "$AZ_MOCK_STATE/secrets/admin-password-hash")"
+mutation_count_before="$(grep -Ec '^containerapp (job )?(secret set|update)' "$AZ_MOCK_LOG")"
 bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/repeat.out" 2>&1
+mutation_count_after="$(grep -Ec '^containerapp (job )?(secret set|update)' "$AZ_MOCK_LOG")"
+[[ "$mutation_count_after" == "$mutation_count_before" ]]
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 4 ]]
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-expiration.tsv" | tr -d ' ')" == 4 ]]
 [[ "$(cat "$AZ_MOCK_STATE/secrets/admin-initial-password")" == "$password_before" ]]
 [[ "$(cat "$AZ_MOCK_STATE/secrets/admin-password-hash")" == "$hash_before" ]]
+
+cp "$AZ_MOCK_STATE/twilio-comics-recovery-v2.json" "$test_root/recovery-before-denied.json"
+jq '.properties.template.containers[0].env |= map(select(.name != "MEDIA_SIGNING_SECRET"))' \
+  "$test_root/recovery-before-denied.json" > "$AZ_MOCK_STATE/twilio-comics-recovery-v2.json"
+denied_calls_before="$(grep -Fc 'containerapp job update --name twilio-comics-recovery-v2' "$AZ_MOCK_LOG")"
+if AZ_MOCK_DENIED_JOB='twilio-comics-recovery-v2' \
+    bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/denied.out" 2>&1; then
+  printf 'Runtime setup ignored a non-retryable Azure permission failure\n' >&2
+  exit 1
+fi
+denied_calls_after="$(grep -Fc 'containerapp job update --name twilio-comics-recovery-v2' "$AZ_MOCK_LOG")"
+[[ $((denied_calls_after - denied_calls_before)) == 1 ]]
+grep -Fq 'not a transient transport failure' "$test_root/denied.out"
+if grep -Fq 'mock-signed-url' "$test_root/denied.out"; then
+  printf 'A signed Azure operation URL leaked from a non-retryable failure\n' >&2
+  exit 1
+fi
+cp "$test_root/recovery-before-denied.json" "$AZ_MOCK_STATE/twilio-comics-recovery-v2.json"
 
 printf '%s\n' 'sk-proj-test-openai-key-with-sufficient-length' > "$test_root/openai.key"
 printf '%s\n' '0123456789abcdef0123456789abcdef' > "$test_root/twilio.key"

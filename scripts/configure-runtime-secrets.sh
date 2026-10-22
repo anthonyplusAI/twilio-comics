@@ -104,6 +104,33 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Azure CLI can lose its HTTPS connection while polling an otherwise accepted
+# Container Apps operation. These mutations set stable values, so retry only
+# transport failures. Keep CLI diagnostics in an owner-only temporary file:
+# polling errors can include signed operation URLs.
+retry_aca_mutation() {
+  local label="$1" attempt=1 status
+  shift
+  while true; do
+    if "$@" > "$TEMP_DIR/aca-mutation.stdout" 2> "$TEMP_DIR/aca-mutation.stderr"; then
+      return 0
+    else
+      status=$?
+    fi
+    if ! grep -Eiq 'SSLEOFError|UNEXPECTED_EOF_WHILE_READING|RemoteDisconnected|ConnectionResetError|ReadTimeout|ConnectTimeout|Connection reset by peer|Connection aborted' \
+        "$TEMP_DIR/aca-mutation.stderr"; then
+      die "Azure Container Apps $label failed (exit $status); the error was not a transient transport failure."
+    fi
+    if ((attempt >= 3)); then
+      die "Azure Container Apps $label failed after three transient transport attempts. Rerun this idempotent setup."
+    fi
+    printf 'Azure Container Apps transport error during %s; retrying (%d/3).\n' \
+      "$label" "$attempt" >&2
+    sleep "${RUNTIME_ACA_RETRY_SECONDS:-10}"
+    ((attempt += 1))
+  done
+}
+
 if [[ -n "${PROVISIONER_OBJECT_ID:-}" ]]; then
   PROVISIONER_PRINCIPAL_TYPE="${PROVISIONER_PRINCIPAL_TYPE:-ServicePrincipal}"
 else
@@ -548,36 +575,57 @@ if [[ "$twilio_configured" == true ]]; then
   grant_secret_reader "$WORKER_PRINCIPAL" twilio-auth-token
 fi
 
-wire_secret() {
-  local kind="$1" name="$2" secret_name="$3" identity_id="$4"
+secret_binding_ready() {
+  local current="$1" secret_name="$2" identity_id="$3"
   local uri="https://${VAULT}.vault.azure.net/secrets/${secret_name}"
+  jq --exit-status --arg secret "$secret_name" --arg uri "$uri" --arg id "$identity_id" '
+    [.properties.configuration.secrets[]? | select(.name == $secret)]
+      | length == 1 and .[0].keyVaultUrl == $uri
+        and (.[0].identity | ascii_downcase) == ($id | ascii_downcase)
+  ' >/dev/null <<< "$current"
+}
+
+wire_secret() {
+  local kind="$1" name="$2" secret_name="$3" identity_id="$4" current="$5"
+  local uri="https://${VAULT}.vault.azure.net/secrets/${secret_name}"
+  if secret_binding_ready "$current" "$secret_name" "$identity_id"; then
+    return 0
+  fi
   if [[ "$kind" == app ]]; then
-    az containerapp secret set --name "$name" --resource-group "$RESOURCE_GROUP" \
+    retry_aca_mutation "secret binding for $name/$secret_name" \
+      az containerapp secret set --name "$name" --resource-group "$RESOURCE_GROUP" \
       --secrets "${secret_name}=keyvaultref:${uri},identityref:${identity_id}" \
       --only-show-errors --output none
   else
-    az containerapp job secret set --name "$name" --resource-group "$RESOURCE_GROUP" \
+    retry_aca_mutation "secret binding for $name/$secret_name" \
+      az containerapp job secret set --name "$name" --resource-group "$RESOURCE_GROUP" \
       --secrets "${secret_name}=keyvaultref:${uri},identityref:${identity_id}" \
       --only-show-errors --output none
   fi
 }
 
-wire_secret app "$WEB_APP" auth-secret "$WEB_ID"
-wire_secret app "$WEB_APP" media-signing-secret "$WEB_ID"
-wire_secret app "$WEB_APP" admin-password-hash "$WEB_ID"
+wire_secret app "$WEB_APP" auth-secret "$WEB_ID" "$WEB_JSON"
+wire_secret app "$WEB_APP" media-signing-secret "$WEB_ID" "$WEB_JSON"
+wire_secret app "$WEB_APP" admin-password-hash "$WEB_ID" "$WEB_JSON"
 for job in "$GENERATION_JOB" "$RECOVERY_JOB"; do
-  wire_secret job "$job" media-signing-secret "$WORKER_ID"
+  current="$GENERATION_JSON"
+  [[ "$job" != "$RECOVERY_JOB" ]] || current="$RECOVERY_JSON"
+  wire_secret job "$job" media-signing-secret "$WORKER_ID" "$current"
 done
 if [[ "$openai_configured" == true ]]; then
-  wire_secret app "$WEB_APP" openai-api-key "$WEB_ID"
+  wire_secret app "$WEB_APP" openai-api-key "$WEB_ID" "$WEB_JSON"
   for job in "$GENERATION_JOB" "$RECOVERY_JOB"; do
-    wire_secret job "$job" openai-api-key "$WORKER_ID"
+    current="$GENERATION_JSON"
+    [[ "$job" != "$RECOVERY_JOB" ]] || current="$RECOVERY_JSON"
+    wire_secret job "$job" openai-api-key "$WORKER_ID" "$current"
   done
 fi
 if [[ "$twilio_configured" == true ]]; then
-  wire_secret app "$WEB_APP" twilio-auth-token "$WEB_ID"
+  wire_secret app "$WEB_APP" twilio-auth-token "$WEB_ID" "$WEB_JSON"
   for job in "$GENERATION_JOB" "$RECOVERY_JOB"; do
-    wire_secret job "$job" twilio-auth-token "$WORKER_ID"
+    current="$GENERATION_JSON"
+    [[ "$job" != "$RECOVERY_JOB" ]] || current="$RECOVERY_JSON"
+    wire_secret job "$job" twilio-auth-token "$WORKER_ID" "$current"
   done
 fi
 
@@ -609,11 +657,39 @@ if [[ "$twilio_configured" == true ]]; then
   JOB_ENV+=('TWILIO_AUTH_TOKEN=secretref:twilio-auth-token')
 fi
 
-az containerapp update --name "$WEB_APP" --resource-group "$RESOURCE_GROUP" \
-  --set-env-vars "${WEB_ENV[@]}" --only-show-errors --output none
+env_bindings_ready() {
+  local current="$1" spec name value
+  shift
+  for spec in "$@"; do
+    name="${spec%%=*}"
+    value="${spec#*=}"
+    if [[ "$value" == secretref:* ]]; then
+      jq --exit-status --arg name "$name" --arg secret "${value#secretref:}" '
+        [.properties.template.containers[0].env[]? | select(.name == $name)]
+          | length == 1 and .[0].secretRef == $secret
+      ' >/dev/null <<< "$current" || return 1
+    else
+      jq --exit-status --arg name "$name" --arg value "$value" '
+        [.properties.template.containers[0].env[]? | select(.name == $name)]
+          | length == 1 and .[0].value == $value
+      ' >/dev/null <<< "$current" || return 1
+    fi
+  done
+}
+
+if ! env_bindings_ready "$WEB_JSON" "${WEB_ENV[@]}"; then
+  retry_aca_mutation "environment update for $WEB_APP" \
+    az containerapp update --name "$WEB_APP" --resource-group "$RESOURCE_GROUP" \
+    --set-env-vars "${WEB_ENV[@]}" --only-show-errors --output none
+fi
 for job in "$GENERATION_JOB" "$RECOVERY_JOB"; do
-  az containerapp job update --name "$job" --resource-group "$RESOURCE_GROUP" \
-    --set-env-vars "${JOB_ENV[@]}" --only-show-errors --output none
+  current="$GENERATION_JSON"
+  [[ "$job" != "$RECOVERY_JOB" ]] || current="$RECOVERY_JSON"
+  if ! env_bindings_ready "$current" "${JOB_ENV[@]}"; then
+    retry_aca_mutation "environment update for $job" \
+      az containerapp job update --name "$job" --resource-group "$RESOURCE_GROUP" \
+      --set-env-vars "${JOB_ENV[@]}" --only-show-errors --output none
+  fi
 done
 
 # Re-read every workload to catch an incomplete CLI update. In particular,
