@@ -130,7 +130,7 @@ env = data["properties"]["template"]["containers"][0]["env"]
 for spec in sys.argv[2:]:
     name, value = spec.split("=", 1)
     env[:] = [item for item in env if item["name"] != name]
-    env.append({"name": name, "secretRef": value.removeprefix("secretref:")} if value.startswith("secretref:") else {"name": name, "value": value})
+    env.append({"name": name, "secretRef": value.removeprefix("secretref:"), "value": ""} if value.startswith("secretref:") else {"name": name, "value": value})
 path.write_text(json.dumps(data))
 PY
     ;;

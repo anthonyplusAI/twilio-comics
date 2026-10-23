@@ -6,8 +6,8 @@ command -v jq >/dev/null || {
   exit 1
 }
 
-# Read ACA Job metadata from stdin without printing it. In particular, never
-# expose an accidentally inline DUB_API_KEY value in a deployment log.
+# Read ACA Job metadata from stdin without printing it. Azure may serialize a
+# secretRef with value: "" after a Job update; reject only nonempty inline values.
 status="$(jq -r '
   def nonblank:
     if type == "string" then (gsub("^\\s+|\\s+$"; "") | length > 0)
@@ -29,7 +29,7 @@ status="$(jq -r '
             elif ($key | length) == 1 and ($domain | length) == 1
                  and ($folder | length) == 1
                  and ($key[0].secretRef | nonblank)
-                 and ($key[0].value == null)
+                 and (($key[0].value // "") == "")
                  and ($domain[0].value | nonblank)
                  and ($folder[0].value | nonblank)
                  and ([ $secrets[] | select(.name == $key[0].secretRef) ] | length) == 1

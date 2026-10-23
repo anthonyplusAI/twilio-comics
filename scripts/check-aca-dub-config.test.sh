@@ -29,12 +29,14 @@ assert_fail() {
 
 assert_pass "$base"
 assert_pass "$complete"
+assert_pass "$(jq '.properties.template.containers[0].env[0].value = ""' <<< "$complete")"
 assert_pass "$(jq '.properties.template.containers[0].env += [{"name":"RESULT_MEDIA_PREVIEW_ENABLED","value":"true"}]' <<< "$complete")"
 
 for name in DUB_API_KEY DUB_DOMAIN DUB_FOLDER_ID; do
   assert_fail "$(jq --arg name "$name" '.properties.template.containers[0].env |= map(select(.name != $name))' <<< "$complete")"
 done
 assert_fail "$(jq '.properties.template.containers[0].env[0] = {"name":"DUB_API_KEY","value":"do-not-log-this-api-key"}' <<< "$complete")"
+assert_fail "$(jq '.properties.template.containers[0].env[0].value = "do-not-log-this-api-key"' <<< "$complete")"
 assert_fail "$(jq '.properties.configuration.secrets = []' <<< "$complete")"
 assert_fail "$(jq '.properties.template.containers[0].env[1].value = "   "' <<< "$complete")"
 assert_fail "$(jq '.properties.template.containers[0].env[2].value = ""' <<< "$complete")"
