@@ -8,6 +8,8 @@ import {
   getMarketingContact,
   type MarketingChannel,
 } from "@/lib/marketing-contact";
+import { getCameraDestination } from "@/lib/browser-photo-access";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import marketingStyles from "../marketing.module.css";
 import styles from "./start.module.css";
@@ -19,7 +21,6 @@ type ChannelChoice = {
   destination: string;
   href: string;
   action: string;
-  expectation: string;
   qrTitle: string;
   qrCaption: string;
 };
@@ -32,7 +33,7 @@ export const metadata: Metadata = {
     "Choose an available Twilio text or phone channel, shape a comic idea with the agent, and get the result on your phone.",
 };
 
-export default function StartPage() {
+export default async function StartPage() {
   const contact = getMarketingContact(
     process.env.TWILIO_PHONE_NUMBER,
     process.env.TWILIO_WHATSAPP_NUMBER,
@@ -51,8 +52,7 @@ export default function StartPage() {
       destination: phoneNumber,
       href: contact.smsHref ?? "",
       action: "Open SMS draft",
-      expectation: "Share your idea, then send CREATE. Your comic link arrives by SMS.",
-      qrTitle: `Scan to text ${COMIC_START_MESSAGE} to ${phoneNumber}`,
+      qrTitle: `Scan to open a text to ${phoneNumber} with ${COMIC_START_MESSAGE}`,
       qrCaption: "Scan to open a text.",
     },
     whatsapp: {
@@ -62,8 +62,7 @@ export default function StartPage() {
       destination: whatsappNumber,
       href: contact.whatsappHref ?? "",
       action: "Open WhatsApp",
-      expectation: "Share your idea, then send CREATE. Your comic link arrives in WhatsApp.",
-      qrTitle: `Scan to start a WhatsApp chat with ${COMIC_START_MESSAGE}`,
+      qrTitle: `Scan to open WhatsApp with ${COMIC_START_MESSAGE}`,
       qrCaption: "Scan to open WhatsApp.",
     },
     voice: {
@@ -73,8 +72,6 @@ export default function StartPage() {
       destination: phoneNumber,
       href: contact.callHref ?? "",
       action: "Call the agent",
-      expectation:
-        "Call from a phone that receives texts. Enter the code on your keypad, share your idea, then say “create it.” Your comic link arrives by SMS.",
       qrTitle: `Scan to call ${phoneNumber}`,
       qrCaption: "Scan to call.",
     },
@@ -82,6 +79,16 @@ export default function StartPage() {
   const activeChoices = selectedChannels
     .map((channel) => choices[channel])
     .filter((choice) => Boolean(choice.href));
+  const hasSms = activeChoices.some((choice) => choice.id === "sms");
+  const hasVoice = activeChoices.some((choice) => choice.id === "voice");
+  const hasTextDelivery = hasSms || hasVoice;
+  const settings = hasTextDelivery ? await getExperienceSettings() : null;
+  const voicePhotoMode = hasVoice ? settings?.voicePhotoMode : null;
+  const voiceUsesPhotos = hasVoice && voicePhotoMode !== "none";
+  const cameraDestination = settings?.cameraEnabled
+    ? await getCameraDestination(settings)
+    : null;
+  const showCamera = Boolean(cameraDestination);
 
   return (
     <div className={`${marketingStyles.page} ${styles.startPage}`}>
@@ -109,7 +116,7 @@ export default function StartPage() {
             </h1>
             <p className={styles.introCopy}>
               {activeChoices.length
-                ? "Tell our AI agent your idea. Get the comic link on your phone."
+                ? "Your comic arrives on your phone."
                 : "Come back to start your comic when a channel is ready."}
             </p>
           </div>
@@ -117,6 +124,15 @@ export default function StartPage() {
 
         {activeChoices.length > 0 && (
           <section className={styles.choicesSection} aria-label="Available channels">
+            <p className={styles.programDisclosure}>
+              {hasTextDelivery
+                ? "Twilio Comics sends automated replies and comic links by text. "
+                : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
+              Message frequency varies; message and data rates may apply.{" "}
+              {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
+              <Link href="/privacy">Privacy Policy</Link> ·{" "}
+              <Link href="/terms">Terms of Service</Link>
+            </p>
             <div className={styles.cards}>
               {activeChoices.map((choice) => (
                 <article
@@ -152,43 +168,62 @@ export default function StartPage() {
                       <p><ScanLine size={16} aria-hidden="true" /> {choice.qrCaption}</p>
                     </div>
                   </div>
-                  <div className={styles.cardInfo}>
-                    {choice.id !== "voice" && (
-                      <p className={styles.sendInstruction}>
-                        <strong>{COMIC_START_MESSAGE} is in the draft. Tap Send to start.</strong>{" "}
-                        Blank draft? Type {COMIC_START_MESSAGE}.
-                      </p>
-                    )}
-                    <p className={styles.expectation}>{choice.expectation}</p>
-                    {(choice.id === "sms" || choice.id === "voice") && (
-                      <p className={styles.programDisclosure}>
-                        {choice.id === "voice"
-                          ? "An AI agent handles your call; verification and the comic link arrive by SMS. "
-                          : "Automated replies and comic updates. Message frequency varies. "}
-                        Message and data rates may apply.{" "}
-                        {choice.id === "sms" && "Reply HELP for help or STOP to opt out. "}
-                        <Link href="/privacy">Privacy Policy</Link> ·{" "}
-                        <Link href="/terms">Terms of Service</Link>.
-                      </p>
-                    )}
-                  </div>
                 </article>
               ))}
             </div>
+            {(hasSms || showCamera) && (
+              <div className={showCamera
+                ? `${styles.photoPath} ${styles.cameraPath}`
+                : styles.photoPath}
+              >
+                <p>
+                  <strong>Want to appear in the comic?</strong>{" "}
+                  {hasSms
+                    ? voiceUsesPhotos
+                      ? "Text up to two photos, then keep texting or call from the same number."
+                      : "Text up to two photos, then share your idea."
+                    : "Take photos here, then call from the same number."}
+                  {hasVoice && " Or call without photos."}
+                </p>
+                {showCamera && (
+                  <Link className={styles.cameraLink} href="/start/camera">
+                    Take photos <ArrowUpRight size={18} aria-hidden="true" />
+                  </Link>
+                )}
+              </div>
+            )}
+            <details className={styles.howItWorks}>
+              <summary>How it works</summary>
+              <ul>
+                {hasSms && (
+                  <li>
+                    <strong>Text:</strong> Send a photo or an idea. The agent guides you and texts
+                    the comic link.
+                  </li>
+                )}
+                {hasVoice && (
+                  <li>
+                    <strong>Call:</strong> Confirm the SMS code, then tell the agent your idea.
+                    Your comic link arrives by text.
+                  </li>
+                )}
+                {activeChoices.some((choice) => choice.id === "whatsapp") && (
+                  <li>
+                    <strong>WhatsApp:</strong> Share your idea in chat. The agent sends your
+                    comic link there.
+                  </li>
+                )}
+              </ul>
+            </details>
           </section>
         )}
       </main>
 
-      <footer className={marketingStyles.footer}>
-        <div className={marketingStyles.footerIdentity}>
-          <span>Twilio Comics</span>
-          <p>Your story starts on your phone.</p>
-        </div>
-        <p className={marketingStyles.footerCredit}>
-          Forked from <a href="https://github.com/Nutlope/make-comics">Make Comics</a>.{" "}
-          Thanks to its original creators and contributors.
+      <footer className={`${marketingStyles.footer} ${styles.startFooter}`}>
+        <p className={styles.forkCredit}>
+          Forked from <a href="https://github.com/Nutlope/make-comics">Make Comics</a>.
         </p>
-        <nav className={marketingStyles.footerLinks} aria-label="Policies">
+        <nav className={styles.footerLinks} aria-label="Policies">
           <Link href="/privacy">Twilio Comics Privacy Policy</Link>
           <Link href="/terms">Twilio Comics Terms of Service</Link>
           <a href="https://www.twilio.com/en-us/legal/privacy">Twilio provider privacy notice</a>

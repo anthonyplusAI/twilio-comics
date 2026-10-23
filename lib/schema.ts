@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -11,7 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import type { AdapterAccountType } from "next-auth/adapters";
 
 export const users = pgTable("users", {
@@ -159,6 +160,8 @@ export const conversations = pgTable(
         prompt?: string;
         style?: string;
         characterImageUrls?: string[];
+        photoHandoffFingerprint?: string;
+        suppressPhotoHandoff?: boolean;
         targetStoryId?: string;
         generationRequestKey?: string;
         messages?: Array<{ role: "user" | "assistant"; content: string }>;
@@ -352,6 +355,29 @@ export const adminLoginAttempts = pgTable("admin_login_attempts", {
   blockedUntil: timestamp("blocked_until"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+export type VoicePhotoMode = "sms" | "camera" | "none";
+
+/** A single PostgreSQL row keeps the public Voice photo path stable across deploys. */
+export const experienceSettings = pgTable(
+  "experience_settings",
+  {
+    id: integer("id").primaryKey().default(1),
+    voicePhotoMode: text("voice_photo_mode")
+      .$type<VoicePhotoMode>()
+      .default("sms")
+      .notNull(),
+    cameraEnabled: boolean("camera_enabled").default(false).notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (settings) => [
+    check("experience_settings_singleton_check", sql`${settings.id} = 1`),
+    check(
+      "experience_settings_voice_photo_mode_check",
+      sql`${settings.voicePhotoMode} IN ('sms', 'camera', 'none')`,
+    ),
+  ],
+);
 
 export const feedback = pgTable("feedback", {
   id: serial("id").primaryKey(),

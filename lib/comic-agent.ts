@@ -1,5 +1,6 @@
 import { COMIC_STYLES } from "@/lib/constants";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
+import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
 import { proposeComicTurn } from "@/lib/comic-agent-model";
 
@@ -13,6 +14,8 @@ export interface AgentCollected {
   prompt?: string;
   style?: string;
   characterImageUrls?: string[];
+  photoHandoffFingerprint?: string;
+  suppressPhotoHandoff?: boolean;
   targetStoryId?: string;
   generationRequestKey?: string;
   messages?: AgentMessage[];
@@ -157,7 +160,7 @@ export async function advanceComicAgent(
 ): Promise<ComicAgentResult> {
   const state = normalizeState(current.state);
   const activeStoryId = current.activeStoryId ?? null;
-  const existing = current.collected || emptyAgentCollected();
+  let existing = current.collected || emptyAgentCollected();
   const text = (turn.text || "").trim();
   const command = normalizedCommand(text);
 
@@ -180,6 +183,50 @@ export async function advanceComicAgent(
           ? `Your comic idea is ready. ${approvalInstruction(turn.channel)}`
           : `I'm ready for your comic idea. ${ideaInvitation(turn.channel)}`;
     return result(state, existing, activeStoryId, reply);
+  }
+
+  // A photo-only SMS draft remains available after its photos are handed to
+  // Voice. The next distinct MMS starts a new set instead of silently hitting
+  // the two-photo limit; a text idea can still finish the original SMS draft.
+  if (turn.channel === "sms" && state === "collecting" &&
+      existing.photoHandoffFingerprint && !existing.prompt?.trim() &&
+      (!Array.isArray(existing.messages) || existing.messages.length === 0) &&
+      turn.imageUrls?.some((url) => !existing.characterImageUrls?.includes(url))) {
+    existing = { ...existing, characterImageUrls: [], photoHandoffFingerprint: undefined };
+  }
+
+  // The public text link suggests a friendly opening message. It is an
+  // invitation, not a reset command: tapping the link again must not erase
+  // photos or an idea already collected from this phone.
+  if (turn.channel !== "voice" && command === normalizedCommand(COMIC_START_MESSAGE)) {
+    const startingFresh = state === "done";
+    const draft = startingFresh ? emptyAgentCollected() : { ...existing };
+    const previousReferences = Array.isArray(draft.characterImageUrls) ? draft.characterImageUrls : [];
+    const references = mergeReferences(draft.characterImageUrls, turn.imageUrls);
+    if (references.length) draft.characterImageUrls = references;
+    const newPhotoRetained = turn.imageUrls?.some((url) =>
+      references.includes(url) && !previousReferences.includes(url)) ?? false;
+    const reply = draft.prompt?.trim()
+      ? state === "confirming"
+        ? `Your idea is ready. ${approvalInstruction(turn.channel)}`
+        : "I have your idea. Tell me what to add, or send a photo."
+      : references.length
+        ? turn.imageUrls?.length && !newPhotoRetained
+          ? "I can use up to two photos. Tell me your comic idea, or send NEW for a fresh set."
+          : `${newPhotoRetained ? "Photo saved." : "I have your photos."} Tell me what should happen in your comic.`
+        : "Send one or two photos of yourself, then tell me your comic idea. Photos are optional.";
+    return result(startingFresh ? "collecting" : state, draft, startingFresh ? null : activeStoryId, reply);
+  }
+
+  if (turn.channel === "voice" && ["SKIP PHOTOS", "WITHOUT PHOTOS", "NO PHOTOS"].includes(command)) {
+    return result(
+      state,
+      { ...existing, characterImageUrls: [], suppressPhotoHandoff: true },
+      activeStoryId,
+      existing.prompt?.trim() && state === "confirming"
+        ? `Okay, I won't use the photos. ${approvalInstruction(turn.channel)}`
+        : "Okay, I won't use photos. Tell me your comic idea.",
+    );
   }
 
   if (["NEW", "RESET", "RESTART"].includes(command)) {
@@ -252,15 +299,20 @@ export async function advanceComicAgent(
   // explicit path that retains the prior story ID for page generation.
   const draft: AgentCollected = state === "done" ? emptyAgentCollected() : { ...existing };
   const draftStoryId = state === "done" ? null : activeStoryId;
+  const previousReferences = Array.isArray(draft.characterImageUrls) ? draft.characterImageUrls : [];
   const references = mergeReferences(draft.characterImageUrls, turn.imageUrls);
   if (references.length) draft.characterImageUrls = references;
 
   if (!text) {
     if (turn.imageUrls?.length) {
+      const newPhotoRetained = turn.imageUrls.some((url) =>
+        references.includes(url) && !previousReferences.includes(url));
       const reply =
         state === "confirming" && draft.prompt
-          ? `Photo added to your draft. ${approvalInstruction(turn.channel)}`
-          : "Photo received. What's your comic idea?";
+          ? `${newPhotoRetained ? "Photo added to your draft." : "I can use up to two photos."} ${approvalInstruction(turn.channel)}`
+          : newPhotoRetained
+            ? "Photo saved. What's your comic idea?"
+            : "I can use up to two photos. Tell me your idea, or send NEW for a fresh set.";
       return result(state === "done" ? "collecting" : state, draft, draftStoryId, reply);
     }
     return result(

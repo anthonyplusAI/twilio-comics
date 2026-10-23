@@ -78,6 +78,13 @@
       "when": 1792616508851,
       "tag": "0010_special_susan_delgado",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792714908519,
+      "tag": "0011_strong_vengeance",
+      "breakpoints": true
     }
   ]
 }

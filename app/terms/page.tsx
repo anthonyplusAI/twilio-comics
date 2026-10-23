@@ -50,6 +50,8 @@ export default function TermsPage() {
           Calls are handled by an AI voice agent. If you ask it to create a comic, the result
           link is sent by SMS to the number you called from. Use a phone that can receive SMS.
           Your speech is transcribed so the agent can respond and shape the comic with you.
+          Where offered, you may text photos or verify your number to upload photos in your
+          browser before texting or calling. You can also make a comic without photos.
         </p>
       </section>
 

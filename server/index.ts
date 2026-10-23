@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import next from "next";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
@@ -10,7 +10,8 @@ import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { db } from "@/lib/db";
 import { getGenerationJobByIdempotencyKey, submitGenerationJob } from "@/lib/generation-jobs";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
-import { conversations, type Conversation } from "@/lib/schema";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
+import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
 import {
   createVoiceRelaySession,
   type VoiceConversationSnapshot,
@@ -19,6 +20,13 @@ import {
 } from "@/lib/voice-conversation";
 import { verifyVoiceCallAuthorization } from "@/lib/voice-call-authorization";
 import { getConversationRelayUrl } from "@/lib/voice-twiml";
+import {
+  isPhotoOnlySmsStage,
+  photoHandoffSourceChannels,
+  planVoicePhotoHandoff,
+  VOICE_PHOTO_HANDOFF_WINDOW_MS,
+  withoutVoicePhotoReferences,
+} from "@/lib/voice-photo-handoff";
 
 function snapshot(row: Conversation): VoiceConversationSnapshot {
   return {
@@ -68,7 +76,97 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
     })
     .returning();
   if (!row) throw new Error("Failed to load voice conversation");
-  return snapshot(row);
+
+  // Relay setup is reached only after Twilio Verify confirms that this caller
+  // receives SMS at the same number. A recent, unfinished photo draft can
+  // therefore be handed to Voice without trusting caller ID alone.
+  const { voicePhotoMode, cameraEnabled } = await getExperienceSettings();
+  const sourceChannels = photoHandoffSourceChannels(voicePhotoMode, cameraEnabled);
+
+  const cutoff = new Date(Date.now() - VOICE_PHOTO_HANDOFF_WINDOW_MS);
+  return db.transaction(async (tx) => {
+    // Read the latest Voice revision, not the row returned by the earlier
+    // upsert: another call could have progressed between those statements.
+    const [voice] = await tx.select().from(conversations)
+      .where(eq(conversations.id, row.id)).for("update").limit(1);
+    if (!voice) throw new Error("Voice conversation disappeared during photo handoff");
+    if (voice.state === "generating") return snapshot(voice);
+    if (voice.collected.suppressPhotoHandoff && sourceChannels.length > 0) return snapshot(voice);
+
+    if (sourceChannels.length === 0) {
+      const cleared = withoutVoicePhotoReferences(snapshot(voice));
+      if (!cleared) return snapshot(voice);
+      const [updated] = await tx.update(conversations)
+        .set({ collected: cleared.collected, updatedAt: nextRevision })
+        .where(and(eq(conversations.id, voice.id), eq(conversations.updatedAt, voice.updatedAt)))
+        .returning();
+      if (!updated) throw new Error("Voice photo preference lost its conversation revision");
+      return snapshot(updated);
+    }
+
+    for (const sourceChannel of sourceChannels) {
+      const [source] = await tx.select().from(conversations)
+        .where(and(
+          eq(conversations.channel, sourceChannel),
+          eq(conversations.phoneNumber, from),
+          gte(conversations.updatedAt, cutoff),
+        ))
+        .for("update")
+        .limit(1);
+      if (!source) continue;
+
+      const recentSmsMediaUrls = sourceChannel === "sms"
+        ? (await tx
+          .select({ mediaUrls: twilioInboundMessages.mediaUrls })
+          .from(twilioInboundMessages)
+          .where(and(
+            eq(twilioInboundMessages.channel, "sms"),
+            eq(twilioInboundMessages.fromAddress, from),
+            gte(twilioInboundMessages.createdAt, cutoff),
+            sql`jsonb_array_length(${twilioInboundMessages.mediaUrls}) > 0`,
+          ))
+          .orderBy(desc(twilioInboundMessages.createdAt))
+          .limit(20))
+          .flatMap((message) => message.mediaUrls)
+        : [];
+      const handoff = planVoicePhotoHandoff({
+        mode: voicePhotoMode,
+        sourceChannel,
+        voice: snapshot(voice),
+        source,
+        recentSmsMediaUrls,
+      });
+      if (!handoff) continue;
+      if (handoff === "unchanged") return snapshot(voice);
+
+      const [updated] = await tx.update(conversations)
+        .set({
+          state: handoff.state,
+          collected: handoff.collected,
+          activeStoryId: handoff.activeStoryId,
+          updatedAt: nextRevision,
+        })
+        .where(and(eq(conversations.id, voice.id), eq(conversations.updatedAt, voice.updatedAt)))
+        .returning();
+      if (!updated) throw new Error("Voice photo handoff lost its conversation revision");
+
+      // Keep the SMS draft usable if a caller hangs up. A marker lets the next
+      // MMS begin a fresh photo set while the existing set remains available
+      // for someone who finishes their idea by text instead.
+      const fingerprint = handoff.collected.photoHandoffFingerprint;
+      if (sourceChannel === "sms" && fingerprint && isPhotoOnlySmsStage(source) &&
+          source.collected.photoHandoffFingerprint !== fingerprint) {
+        await tx.update(conversations)
+          .set({
+            collected: { ...source.collected, photoHandoffFingerprint: fingerprint },
+            updatedAt: nextRevision,
+          })
+          .where(eq(conversations.id, source.id));
+      }
+      return snapshot(updated);
+    }
+    return snapshot(voice);
+  });
 }
 
 async function saveVoiceConversation(

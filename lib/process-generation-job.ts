@@ -209,12 +209,33 @@ function extensionFor(contentType: string): string {
   return contentType.includes("png") ? "png" : "jpg";
 }
 
-async function ingestReferences(jobId: string, urls: string[]): Promise<string[]> {
+const SAFE_CAMERA_OWNER = /^[A-Za-z0-9_-]{1,128}$/;
+const CAMERA_JPEG_NAME = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.jpg$/;
+
+function ownedCameraBlobKey(reference: string, userId: string): string | null {
+  if (!SAFE_CAMERA_OWNER.test(userId)) return null;
+  const prefix = `blob:uploads/${userId}/camera/`;
+  if (!reference.startsWith(prefix)) return null;
+  const filename = reference.slice(prefix.length);
+  return CAMERA_JPEG_NAME.test(filename) ? reference.slice("blob:".length) : null;
+}
+
+async function ingestReferences(
+  job: Pick<GenerationJob, "id" | "userId">,
+  urls: string[],
+): Promise<string[]> {
   return Promise.all(
     urls.slice(0, 2).map(async (url, index) => {
+      if (typeof url !== "string") throw new Error("Untrusted image reference");
+      if (url.startsWith("blob:")) {
+        const key = ownedCameraBlobKey(url, job.userId);
+        if (!key) throw new Error("Untrusted camera reference");
+        if (!(await blobExists(key))) throw new Error("Camera photo is no longer available");
+        return getBlobPublicUrl(key);
+      }
       if (!isTwilioMediaUrl(url)) throw new Error("Untrusted Twilio media URL");
 
-      const keyBase = `references/twilio/${jobId}/${index}`;
+      const keyBase = `references/twilio/${job.id}/${index}`;
       for (const extension of ["png", "jpg"]) {
         const key = `${keyBase}.${extension}`;
         if (await blobExists(key)) return getBlobPublicUrl(key);
@@ -329,10 +350,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
 
     const publicBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!publicBaseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
-    const characterImageUrls = await ingestReferences(
-      claimed.id,
-      claimed.characterImageUrls,
-    );
+    const characterImageUrls = await ingestReferences(claimed, claimed.characterImageUrls);
     if (resultDeliveryExpired(claimed)) {
       await suppressExpiredResult(claimed, workerId);
       return;

@@ -3,7 +3,6 @@ import Link from "next/link";
 import { ArrowUpRight, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
-  COMIC_START_MESSAGE,
   getMarketingContact,
   type MarketingChannel,
 } from "@/lib/marketing-contact";
@@ -45,30 +44,30 @@ export default function Home() {
       id: "sms",
       label: "Twilio SMS",
       href: contact.smsHref ?? "",
-      action: "Open SMS draft",
+      action: "Text the agent",
       heading: "Make a comic by text.",
-      heroCopy: `Start with Twilio SMS: send ${COMIC_START_MESSAGE}, share your comic idea with the agent, and get your comic link by SMS.`,
-      contactCopy: `Text ${phoneNumber}. Send ${COMIC_START_MESSAGE} to start; your comic link comes back by SMS.`,
-      start: `Open the SMS draft to ${phoneNumber} and send ${COMIC_START_MESSAGE}. If the draft is blank, type ${COMIC_START_MESSAGE} first. Then tell the agent your idea.`,
+      heroCopy: "Start with Twilio SMS: text your comic idea, or send up to two photos of yourself first. Your comic link comes back by SMS.",
+      contactCopy: `Text ${phoneNumber} an idea or photos of yourself. Your comic link comes back by SMS.`,
+      start: `The draft suggests “Turn me into a comic!”; send it for guidance or replace it with your idea. To appear in the comic, send up to two photos before or with your idea at ${phoneNumber}.`,
       shape: "Reply to the agent's questions, then send CREATE when the story sounds right.",
       delivery: "Your comic link and a preview when available arrive by SMS. Text CONTINUE for another page.",
-      qrTitle: `Scan to text ${COMIC_START_MESSAGE} to ${phoneNumber}`,
-      qrCaption: `Scan, then send ${COMIC_START_MESSAGE}`,
+      qrTitle: `Scan to text ${phoneNumber}`,
+      qrCaption: "Scan to text an idea or photos",
       toneClass: styles.smsAction,
     },
     whatsapp: {
       id: "whatsapp",
       label: "Twilio WhatsApp",
       href: contact.whatsappHref ?? "",
-      action: "Open WhatsApp draft",
+      action: "Open WhatsApp chat",
       heading: "Make a comic in WhatsApp.",
-      heroCopy: `Start on Twilio WhatsApp: send ${COMIC_START_MESSAGE}, share a comic idea, and get your comic link in the same chat.`,
-      contactCopy: `Message ${whatsappNumber} on WhatsApp. Send ${COMIC_START_MESSAGE} to start; your comic link arrives here.`,
-      start: `Open the WhatsApp draft to ${whatsappNumber} and send ${COMIC_START_MESSAGE}. If the draft is blank, type ${COMIC_START_MESSAGE} first. Then tell the agent your idea.`,
+      heroCopy: "Start on Twilio WhatsApp: message your comic idea, or send up to two photos of yourself first. Your comic link arrives in the same chat.",
+      contactCopy: `Message ${whatsappNumber} an idea or photos of yourself on WhatsApp. Your comic link arrives there.`,
+      start: `The chat suggests “Turn me into a comic!”; send it for guidance or replace it with your idea. To appear in the comic, send up to two photos before or with your idea at ${whatsappNumber}.`,
       shape: "Reply to the agent's questions, then send CREATE when the story sounds right.",
       delivery: "Your comic link and a preview when available arrive in the same WhatsApp chat. Send CONTINUE for another page.",
-      qrTitle: `Scan to start a WhatsApp chat with ${COMIC_START_MESSAGE}`,
-      qrCaption: `Scan for WhatsApp; send ${COMIC_START_MESSAGE}`,
+      qrTitle: `Scan to start a WhatsApp chat with ${whatsappNumber}`,
+      qrCaption: "Scan to message an idea or photos",
       toneClass: styles.whatsappAction,
     },
     voice: {
@@ -169,15 +168,6 @@ export default function Home() {
                       ? primaryChannel.contactCopy
                       : "Pick a channel to begin. Follow its steps below to create your comic and see how the result arrives."}
                   </p>
-                  {hasTextChannel && (
-                    <p className={styles.sendHint}>
-                      <strong>
-                        For {hasSms && hasWhatsApp ? "SMS or WhatsApp" : hasSms ? "SMS" : "WhatsApp"},
-                        send {COMIC_START_MESSAGE} to start.
-                      </strong> Opening the chat only
-                      creates a draft. Tap Send; if the draft is blank, type {COMIC_START_MESSAGE} first.
-                    </p>
-                  )}
                   {(hasSms || hasVoice) && (
                     <p className={styles.programDisclosure}>
                       {hasSms && hasVoice

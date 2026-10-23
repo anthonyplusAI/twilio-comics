@@ -1,6 +1,7 @@
 const E164 = /^\+[1-9]\d{7,14}$/;
 const EXAMPLE_NUMBER = "+15551234567";
-export const COMIC_START_MESSAGE = "NEW";
+// Suggested opening text, not a required command. An idea or photo-only message can also begin.
+export const COMIC_START_MESSAGE = "Turn me into a comic!";
 
 export interface MarketingContact {
   phoneNumber: string | null;

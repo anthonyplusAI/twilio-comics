@@ -23,14 +23,15 @@ export default function PrivacyPage() {
       <p>
         {operatorName ?? "The operator of Twilio Comics"} operates this AI comic service.
         This policy describes the information the app uses when you text, call, view a comic,
-        or use its browser testing studio.
+        prepare photos for a text or call in your browser, or use its browser testing studio.
       </p>
 
       <section className={styles.legalSection}>
         <h2>Information we handle</h2>
         <ul>
           <li>Your phone number, channel, text messages, and voice conversation transcripts.</li>
-          <li>Comic ideas, prompts, reference photos, generated pages, and story links.</li>
+          <li>Comic ideas, prompts, reference photos sent by message or uploaded for a text or call, generated pages, and story links.</li>
+          <li>Phone verification status and a short-lived browser session when you prepare photos in the browser.</li>
           <li>Message and call identifiers, delivery status, dates, errors, and usage history.</li>
           <li>Google account details and session data if you sign in to the browser studio.</li>
         </ul>
@@ -44,7 +45,9 @@ export default function PrivacyPage() {
           and prevent misuse. The voice channel converts speech to text for the agent; the app
           stores finalized transcript text rather than raw call audio. Twilio handles calling
           and messaging, OpenAI processes comic ideas and images, Azure hosts
-          the app, stores images and jobs, and provides the PostgreSQL database. Google is
+          the app, stores images and jobs, and provides the PostgreSQL database. A browser
+          photo upload is tied to your number only after an SMS verification code succeeds.
+          Google is
           used only when you choose to sign in to the browser studio. Authorized app
           administrators can review identifiable conversation, call, comic, and delivery
           history through a password-protected dashboard.
@@ -66,8 +69,8 @@ export default function PrivacyPage() {
         <h2>Retention and requests</h2>
         <p>
           We retain messages, voice transcripts, prompts, reference images, comic records,
-          and operational history until we explicitly delete them, including when you make a
-          verified deletion request. There is no automatic expiration schedule. These records
+          and operational history until we explicitly delete them. We process verified deletion
+          requests manually. There is no automatic expiration schedule. These records
           remain in the database and storage across app deployments. We handle access and
           deletion requests manually and may need to confirm that you control the phone
           number or account. Service providers

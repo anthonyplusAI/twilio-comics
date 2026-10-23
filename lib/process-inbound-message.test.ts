@@ -20,6 +20,10 @@ const h = vi.hoisted(() => ({
   sendChannelMessage: vi.fn(),
   recordActivityEvent: vi.fn(),
   reserveMessageAgentTurn: vi.fn(),
+  channelUserId: vi.fn(),
+  getStagedCameraPhotoReferences: vi.fn(),
+  getExperienceSettings: vi.fn(),
+  getPublicEnabledChannels: vi.fn(),
 }));
 
 vi.mock("@/lib/twilio-events", () => ({
@@ -37,7 +41,17 @@ vi.mock("@/lib/twilio-events", () => ({
 }));
 vi.mock("@/lib/comic-agent", () => ({ advanceComicAgent: h.advanceComicAgent }));
 vi.mock("@/lib/channel-identities", () => ({
+  channelUserId: h.channelUserId,
   getOrCreateChannelIdentity: h.getOrCreateChannelIdentity,
+}));
+vi.mock("@/lib/browser-photo-staging", () => ({
+  getStagedCameraPhotoReferences: h.getStagedCameraPhotoReferences,
+}));
+vi.mock("@/lib/photo-experience-settings", () => ({
+  getExperienceSettings: h.getExperienceSettings,
+}));
+vi.mock("@/lib/public-channel-readiness", () => ({
+  getPublicEnabledChannels: h.getPublicEnabledChannels,
 }));
 vi.mock("@/lib/channel-story-link", () => ({
   channelStoryLink: h.channelStoryLink,
@@ -183,6 +197,10 @@ beforeEach(() => {
   });
   h.recordActivityEvent.mockResolvedValue(undefined);
   h.reserveMessageAgentTurn.mockResolvedValue({ allowed: true, duplicate: false });
+  h.channelUserId.mockReturnValue("channel-user");
+  h.getStagedCameraPhotoReferences.mockResolvedValue([]);
+  h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
+  h.getPublicEnabledChannels.mockReturnValue([]);
 });
 
 describe("ordered inbound messaging processor", () => {
@@ -559,6 +577,70 @@ describe("ordered inbound messaging processor", () => {
       },
     );
     expect(sends[0].channel).toBe("whatsapp");
+  });
+
+  it("offers a same-number call after acknowledging a saved SMS photo", async () => {
+    receipts.SM1.body = "";
+    receipts.SM1.mediaUrls = ["https://api.twilio.com/photo-1"];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    h.getPublicEnabledChannels.mockReturnValue(["sms", "voice"]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: { characterImageUrls: ["https://api.twilio.com/photo-1"] },
+      activeStoryId: null,
+      reply: "Photo saved. What's your comic idea?",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toMatch(/Photo saved.*Text your idea.*call us from this phone after this reply/i);
+    expect(h.getPublicEnabledChannels).toHaveBeenCalledOnce();
+  });
+
+  it("adds recent verified kiosk photos to an SMS idea", async () => {
+    const cameraPhoto = "blob:uploads/twilio_owner/camera/photo.jpg";
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", characterImageUrls: [cameraPhoto] },
+      activeStoryId: null,
+      reply: "A robot detective. Reply CREATE to approve.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.getStagedCameraPhotoReferences).toHaveBeenCalledWith(FROM, "channel-user");
+    expect(h.advanceComicAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ collected: {} }),
+      { text: "A robot detective", channel: "sms", imageUrls: [cameraPhoto] },
+    );
+  });
+
+  it("uses a direct MMS photo instead of older kiosk photos in an SMS draft", async () => {
+    const cameraPhoto = "blob:uploads/twilio_owner/camera/photo.jpg";
+    const mmsPhoto = "https://api.twilio.com/new-photo";
+    conversation.collected = { characterImageUrls: [cameraPhoto] };
+    receipts.SM1.mediaUrls = [mmsPhoto];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", characterImageUrls: [mmsPhoto] },
+      activeStoryId: null,
+      reply: "A robot detective. Reply CREATE to approve.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(h.advanceComicAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ collected: { characterImageUrls: [] } }),
+      { text: "A robot detective", channel: "sms", imageUrls: [mmsPhoto] },
+    );
   });
 
   it("checkpoints a confirmed draft before publishing its idempotent generation job", async () => {
