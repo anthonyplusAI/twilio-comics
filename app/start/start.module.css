@@ -18,7 +18,7 @@
 .intro {
   border-bottom: 3px solid var(--ink);
   background: var(--pale-blue);
-  padding: 38px clamp(24px, 6vw, 104px) 42px;
+  padding: 28px clamp(24px, 6vw, 104px) 31px;
 }
 
 .introInner {
@@ -29,7 +29,7 @@
 .intro h1 {
   margin: 0;
   font-family: var(--font-bangers), Impact, sans-serif;
-  font-size: clamp(48px, 6vw, 76px);
+  font-size: clamp(45px, 5.5vw, 68px);
   font-weight: 400;
   line-height: 0.95;
   text-wrap: balance;
@@ -37,21 +37,38 @@
 
 .introCopy {
   max-width: 650px;
-  margin: 13px 0 0;
-  font-size: clamp(16px, 1.5vw, 19px);
-  font-weight: 600;
+  margin: 9px 0 0;
+  font-size: clamp(15px, 1.4vw, 18px);
+  font-weight: 700;
   line-height: 1.4;
 }
 
 .choicesSection {
-  padding: 42px clamp(24px, 6vw, 104px) 76px;
+  padding: 24px clamp(24px, 6vw, 104px) 44px;
+}
+
+.programDisclosure {
+  max-width: 1100px;
+  margin: 0 auto 20px;
+  border-left: 4px solid var(--red-action);
+  background: var(--surface);
+  padding: 10px 14px;
+  color: #38425e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.programDisclosure a {
+  color: var(--ink);
+  font-weight: 800;
+  text-underline-offset: 3px;
 }
 
 .cards {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 26px;
+  gap: 22px;
   max-width: 1100px;
   margin: 0 auto;
 }
@@ -64,16 +81,16 @@
   min-width: 0;
   border: 3px solid var(--ink);
   background: var(--paper);
-  box-shadow: 8px 8px 0 var(--ink);
+  box-shadow: 7px 7px 0 var(--ink);
 }
 
 .cardBand {
   display: flex;
   align-items: center;
   gap: 11px;
-  min-height: 58px;
+  min-height: 50px;
   border-bottom: 3px solid var(--ink);
-  padding: 9px 18px;
+  padding: 7px 16px;
   color: var(--paper);
 }
 
@@ -103,8 +120,8 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border: 2px solid currentColor;
   border-radius: 50%;
 }
@@ -118,7 +135,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) 110px;
   gap: 18px;
-  padding: 22px 20px 20px;
+  padding: 18px 20px 20px;
 }
 
 .cardAction {
@@ -130,14 +147,14 @@
 .cardAction h2 {
   margin: 0;
   font-family: var(--font-bangers), Impact, sans-serif;
-  font-size: clamp(36px, 3.5vw, 46px);
+  font-size: clamp(34px, 3.3vw, 43px);
   font-weight: 400;
   line-height: 1;
 }
 
 .destination {
   overflow-wrap: anywhere;
-  margin: 8px 0 19px;
+  margin: 6px 0 14px;
   font-size: 18px;
   font-weight: 800;
 }
@@ -147,7 +164,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 56px;
+  min-height: 52px;
   margin-top: auto;
   border: 3px solid var(--ink);
   padding: 10px 12px;
@@ -204,45 +221,111 @@
   flex: none;
 }
 
-.cardInfo {
-  flex: 1;
-  border-top: 2px solid var(--ink);
-  padding: 16px 20px 20px;
-}
-
-.sendInstruction {
-  margin: 0 0 14px;
-  border-left: 4px solid var(--blue);
+.photoPath {
+  max-width: 1100px;
+  margin: 25px auto 0;
+  border: 2px solid var(--ink);
   background: var(--pale-blue);
-  padding: 10px 12px;
+  padding: 12px 15px;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
-.sendInstruction strong {
+.photoPath strong {
   font-weight: 800;
 }
 
-.expectation {
+.photoPath p {
   margin: 0;
-  color: #38425e;
-  font-size: 15px;
-  line-height: 1.45;
 }
 
-.programDisclosure {
-  margin: 16px 0 0;
-  border-top: 1px solid #c9ceda;
-  padding-top: 12px;
-  color: #38425e;
-  font-size: 12px;
-  line-height: 1.45;
+.cameraPath {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.programDisclosure a {
+.cameraLink {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  padding: 8px 12px;
   color: var(--ink);
   font-weight: 800;
+  text-decoration: none;
+}
+
+.howItWorks {
+  max-width: 1100px;
+  margin: 10px auto 0;
+  color: #38425e;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.howItWorks summary {
+  width: fit-content;
+  min-height: 44px;
+  padding: 10px 3px;
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.howItWorks summary:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.howItWorks ul {
+  margin: 0 0 0 14px;
+  padding: 0 0 0 18px;
+}
+
+.howItWorks li + li {
+  margin-top: 6px;
+}
+
+.howItWorks strong {
+  color: var(--ink);
+}
+
+.startFooter {
+  gap: 12px 20px;
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+
+.startFooter .forkCredit {
+  flex: 0 1 auto;
+  max-width: none;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+}
+
+.forkCredit a,
+.footerLinks a {
+  color: var(--ink);
   text-underline-offset: 3px;
+}
+
+.forkCredit a {
+  font-weight: 700;
+}
+
+.footerLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 15px;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 @media (max-width: 700px) {
@@ -251,21 +334,21 @@
   }
 
   .intro {
-    padding-top: 31px;
-    padding-bottom: 34px;
+    padding-top: 24px;
+    padding-bottom: 27px;
   }
 
   .intro h1 {
-    font-size: clamp(47px, 11vw, 68px);
+    font-size: clamp(43px, 10.5vw, 60px);
   }
 
   .choicesSection {
-    padding-top: 28px;
-    padding-bottom: 64px;
+    padding-top: 20px;
+    padding-bottom: 36px;
   }
 
   .cards {
-    gap: 20px;
+    gap: 17px;
   }
 
   .card {
@@ -275,6 +358,12 @@
 
   .cardTop {
     display: block;
+    padding: 16px 17px 18px;
+  }
+
+  .cameraPath {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .qrPanel {

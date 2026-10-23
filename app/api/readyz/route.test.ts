@@ -28,7 +28,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("production readiness", () => {
-  it("checks database connectivity and returns the deployed release without caching", async () => {
+  it("checks channel, admin, and photo settings tables before reporting ready", async () => {
     const response = await GET();
 
     expect(response.status).toBe(200);
@@ -39,6 +39,7 @@ describe("production readiness", () => {
     expect(query).toContain("public.activity_events");
     expect(query).toContain("public.voice_calls");
     expect(query).toContain("public.admin_login_attempts");
+    expect(query).toContain("public.experience_settings");
   });
 
   it("fails closed before touching the database when a runtime secret is missing", async () => {

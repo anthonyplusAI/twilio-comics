@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { channelIdentities, users, type ChannelIdentity } from "@/lib/schema";
 
 export type MessagingChannel = "sms" | "whatsapp" | "voice";
+export type IdentityChannel = MessagingChannel | "camera";
 
 export function normalizeTwilioAddress(address: string): string {
   const normalized = address.replace(/^whatsapp:/i, "").trim();
@@ -17,13 +18,15 @@ export function channelFromAddress(address: string): "sms" | "whatsapp" {
   return address.toLowerCase().startsWith("whatsapp:") ? "whatsapp" : "sms";
 }
 
-function channelUserId(normalizedAddress: string): string {
+/** SMS, Voice, and verified kiosk photos share the same owner for one phone. */
+export function channelUserId(address: string): string {
+  const normalizedAddress = normalizeTwilioAddress(address);
   const hash = createHash("sha256").update(normalizedAddress).digest("hex");
   return `twilio_${hash.slice(0, 32)}`;
 }
 
 export async function getOrCreateChannelIdentity(
-  channel: MessagingChannel,
+  channel: IdentityChannel,
   address: string,
 ): Promise<ChannelIdentity> {
   const normalizedAddress = normalizeTwilioAddress(address);

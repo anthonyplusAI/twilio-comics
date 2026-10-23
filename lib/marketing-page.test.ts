@@ -5,6 +5,8 @@ import Home from "@/app/page";
 
 const PHONE = "+14155552671";
 const WHATSAPP = "whatsapp:+447700900123";
+const SMS_HREF = `sms:${PHONE}?body=Turn%20me%20into%20a%20comic!`;
+const WHATSAPP_HREF = "https://wa.me/447700900123?text=Turn%20me%20into%20a%20comic!";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -24,7 +26,7 @@ describe("Twilio channel invitation", () => {
   it("discloses the SMS program and Voice result delivery beside the launch actions", () => {
     const html = renderPage("sms,voice");
 
-    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
+    expect(html).toContain(`href="${SMS_HREF}"`);
     expect(html).toContain(`href="tel:${PHONE}"`);
     expect(html).not.toContain("https://wa.me/");
     expect(html).toMatch(/Message frequency varies/i);
@@ -46,8 +48,10 @@ describe("Twilio channel invitation", () => {
   it("shows only SMS entry and SMS flow when SMS is selected", () => {
     const html = renderPage("sms");
 
-    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
-    expect(html).toMatch(/send NEW.+(?:tap|press) Send/i);
+    expect(html).toContain(`href="${SMS_HREF}"`);
+    expect(html).not.toContain("?body=NEW");
+    expect(html).toMatch(/send up to two photos before or with your idea/i);
+    expect(html).not.toMatch(/send NEW to start/i);
     expect(html).not.toContain('href="tel:');
     expect(html).not.toContain("https://wa.me/");
     expect(html).toMatch(/Twilio SMS/);
@@ -74,30 +78,31 @@ describe("Twilio channel invitation", () => {
   it("does not advertise a Voice action before verification is configured", () => {
     const html = renderPage("sms,voice", false);
 
-    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
+    expect(html).toContain(`href="${SMS_HREF}"`);
     expect(html).not.toContain(`href="tel:${PHONE}"`);
   });
 
   it("shows only WhatsApp entry and chat delivery when WhatsApp is selected", () => {
     const html = renderPage("whatsapp");
 
-    expect(html).toContain('href="https://wa.me/447700900123?text=NEW"');
+    expect(html).toContain(`href="${WHATSAPP_HREF}"`);
     expect(html).not.toContain('href="sms:');
     expect(html).not.toContain('href="tel:');
     expect(html).toMatch(/Twilio WhatsApp/);
-    expect(html).toMatch(/For WhatsApp,\s*send NEW to start/);
-    expect(html).not.toMatch(/For SMS,\s*send NEW to start/);
+    expect(html).not.toContain("?text=NEW");
+    expect(html).toMatch(/send up to two photos before or with your idea/i);
+    expect(html).not.toMatch(/send NEW to start/i);
     expect(html).toMatch(/send CREATE/);
     expect(html).toMatch(/comic link[^<]*same WhatsApp chat/);
-    expect(html).toContain("Scan for WhatsApp");
+    expect(html).toContain("Scan to message an idea or photos");
   });
 
   it("shows instructions for every selected channel and uses the first for QR", () => {
     const html = renderPage("voice,whatsapp,sms");
 
     expect(html).toContain(`href="tel:${PHONE}"`);
-    expect(html).toContain(`href="sms:${PHONE}?body=NEW"`);
-    expect(html).toContain('href="https://wa.me/447700900123?text=NEW"');
+    expect(html).toContain(`href="${SMS_HREF}"`);
+    expect(html).toContain(`href="${WHATSAPP_HREF}"`);
     expect(html).toMatch(/Twilio Voice/);
     expect(html).toMatch(/Twilio WhatsApp/);
     expect(html).toMatch(/Twilio SMS/);

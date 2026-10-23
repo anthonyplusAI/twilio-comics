@@ -83,7 +83,8 @@ export async function GET(): Promise<Response> {
            public.generation_jobs,
            public.activity_events,
            public.voice_calls,
-           public.admin_login_attempts
+           public.admin_login_attempts,
+           public.experience_settings
       LIMIT 0
     `);
     return response(true, null, 200);

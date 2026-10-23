@@ -2,11 +2,15 @@ import { randomUUID } from "node:crypto";
 import { recordActivityEvent } from "@/lib/activity-events";
 import { advanceComicAgent, type AgentCollected } from "@/lib/comic-agent";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
-import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
+import { channelUserId, getOrCreateChannelIdentity } from "@/lib/channel-identities";
+import { getStagedCameraPhotoReferences } from "@/lib/browser-photo-staging";
 import { channelStoryLink, latestStoryLinkForSms } from "@/lib/channel-story-link";
 import { submitGenerationJob } from "@/lib/generation-jobs";
 import { isDailyGenerationCapacityRejection } from "@/lib/generation-policy";
 import { reserveMessageAgentTurn } from "@/lib/message-agent-budget";
+import { getMarketingContact } from "@/lib/marketing-contact";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
+import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import {
   checkpointInboundTurn,
   claimConversationLease,
@@ -118,19 +122,49 @@ async function processOneMessage(
         const statusRequested = isStatusCommand(message.body);
         let advancedSuccessfully = false;
         try {
+          const attachedPhotos = imageUrls(message);
+          const smsSettings = message.channel === "sms" ? await getExperienceSettings() : null;
+          let agentCollected = conversation.collected || {};
+          // An MMS takes priority over kiosk photos already added to this SMS
+          // draft. The user is choosing a new photo source by sending it.
+          if (message.channel === "sms" && attachedPhotos.length &&
+              agentCollected.characterImageUrls?.some((ref) => ref.startsWith("blob:uploads/"))) {
+            agentCollected = { ...agentCollected, characterImageUrls: [] };
+          }
+          let turnPhotos = attachedPhotos;
+          if (smsSettings?.cameraEnabled && !attachedPhotos.length &&
+              (conversation.state === "done" || !agentCollected.characterImageUrls?.length)) {
+            turnPhotos = await getStagedCameraPhotoReferences(
+              message.fromAddress,
+              channelUserId(message.fromAddress),
+            );
+          }
           const advance = await advanceComicAgent(
             {
               state: conversation.state,
-              collected: conversation.collected || {},
+              collected: agentCollected,
               activeStoryId: conversation.activeStoryId,
             },
             {
               text: message.body,
               channel: message.channel,
-              imageUrls: imageUrls(message),
+              imageUrls: turnPhotos,
             },
           );
           replyBody = advance.reply;
+          if (message.channel === "sms" && !message.body.trim() &&
+              attachedPhotos.some((photo) =>
+                advance.collected.characterImageUrls?.includes(photo) &&
+                !conversation.collected?.characterImageUrls?.includes(photo)) &&
+              advance.nextState === "collecting" && smsSettings?.voicePhotoMode !== "none") {
+            const contact = getMarketingContact(
+              process.env.TWILIO_PHONE_NUMBER,
+              process.env.TWILIO_WHATSAPP_NUMBER,
+            );
+            if (getPublicEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes("voice")) {
+              replyBody = "Photo saved. Text your idea, or call us from this phone after this reply to tell it by voice.";
+            }
+          }
           submission = advance.action === "submit" ? advance.submission || null : null;
           collectedAfterCheckpoint = submission
             ? { ...advance.collected, generationRequestKey: `twilio-message:${message.messageSid}` }

@@ -4,6 +4,7 @@ import {
   emptyAgentCollected,
   type ComicAgentModel,
 } from "@/lib/comic-agent";
+import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
 
 const IDEA = "A shy astronaut meets a dragon on the moon";
 
@@ -102,6 +103,115 @@ describe("advanceComicAgent", () => {
       "https://example.com/2",
     ]);
     expect(result.reply).toMatch(/idea/i);
+  });
+
+  it("says when a third SMS photo is not retained", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { characterImageUrls: ["photo-1", "photo-2"] } },
+      { text: "", channel: "sms", imageUrls: ["photo-3"] },
+      modelReply(),
+    );
+
+    expect(result.collected.characterImageUrls).toEqual(["photo-1", "photo-2"]);
+    expect(result.reply).toMatch(/up to two photos/i);
+    expect(result.reply).not.toMatch(/photo saved|photo received/i);
+  });
+
+  it("keeps handed-off SMS photos for an idea but starts a fresh set on the next MMS", async () => {
+    const current = {
+      state: "collecting",
+      collected: {
+        characterImageUrls: ["photo-1", "photo-2"],
+        photoHandoffFingerprint: "transferred",
+      },
+    };
+    const idea = await advanceComicAgent(current, { text: IDEA, channel: "sms" }, modelReply());
+    expect(idea.collected.characterImageUrls).toEqual(["photo-1", "photo-2"]);
+
+    const nextSet = await advanceComicAgent(
+      current,
+      { text: "", channel: "sms", imageUrls: ["photo-3"] },
+      modelReply(),
+    );
+    expect(nextSet.collected.characterImageUrls).toEqual(["photo-3"]);
+    expect(nextSet.collected.photoHandoffFingerprint).toBeUndefined();
+    expect(nextSet.reply).toMatch(/photo saved/i);
+  });
+
+  it.each(["sms", "whatsapp"] as const)(
+    "treats the suggested %s opening text as an invitation to send photos and an idea",
+    async (channel) => {
+      const model = modelReply();
+      const result = await advanceComicAgent(
+        { state: "collecting", collected: emptyAgentCollected() },
+        { text: COMIC_START_MESSAGE, channel },
+        model,
+      );
+
+      expect(model).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ nextState: "collecting", action: "none", collected: {} });
+      expect(result.reply).toMatch(/photos of yourself/i);
+      expect(result.reply).toMatch(/comic idea/i);
+    },
+  );
+
+  it("keeps an existing draft and adds attached photos when the text link is tapped again", async () => {
+    const model = modelReply();
+    const result = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: {
+          prompt: IDEA,
+          style: "manga",
+          characterImageUrls: ["https://example.com/first"],
+        },
+      },
+      {
+        text: COMIC_START_MESSAGE,
+        channel: "sms",
+        imageUrls: ["https://example.com/second"],
+      },
+      model,
+    );
+
+    expect(model).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      nextState: "confirming",
+      action: "none",
+      collected: {
+        prompt: IDEA,
+        style: "manga",
+        characterImageUrls: ["https://example.com/first", "https://example.com/second"],
+      },
+    });
+    expect(result.reply).toContain("CREATE");
+  });
+
+  it("lets a verified caller skip staged photos without losing the idea", async () => {
+    const model = modelReply();
+    const result = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: {
+          prompt: IDEA,
+          style: "manga",
+          characterImageUrls: ["https://example.com/first"],
+          photoHandoffFingerprint: "same-source",
+        },
+      },
+      { text: "Skip photos.", channel: "voice" },
+      model,
+    );
+
+    expect(model).not.toHaveBeenCalled();
+    expect(result.collected).toMatchObject({
+      prompt: IDEA,
+      style: "manga",
+      characterImageUrls: [],
+      photoHandoffFingerprint: "same-source",
+      suppressPhotoHandoff: true,
+    });
+    expect(result.reply).toContain("create it");
   });
 
   it("allows a reference to be added to a pending draft before approval", async () => {

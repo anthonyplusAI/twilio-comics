@@ -102,6 +102,12 @@ const job = {
   updatedAt: new Date(Date.now() - 50_000),
 };
 
+const cameraOwner = "twilio_0123456789abcdef0123456789abcdef";
+const cameraImageId = "11111111-2222-4333-8444-555555555555";
+const secondCameraImageId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const cameraKey = `uploads/${cameraOwner}/camera/${cameraImageId}.jpg`;
+const secondCameraKey = `uploads/${cameraOwner}/camera/${secondCameraImageId}.jpg`;
+
 beforeEach(() => {
   Object.values(h).forEach((mock) => mock.mockReset());
   process.env.PUBLIC_BASE_URL = "https://comics.example.com";
@@ -469,6 +475,103 @@ describe("processGenerationJob", () => {
     );
     expect(h.completeConversationForGeneration).toHaveBeenCalledWith(job, "story-1");
     expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("uses up to two existing camera photos staged for the job's user", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      userId: cameraOwner,
+      characterImageUrls: [
+        `blob:${cameraKey}`,
+        `blob:${secondCameraKey}`,
+        "https://untrusted.example.com/ignored-third-photo.jpg",
+      ],
+    });
+    h.blobExists.mockResolvedValue(true);
+    h.getBlobPublicUrl.mockImplementation(
+      (key: string) => `https://comics.example.com/api/media?key=${encodeURIComponent(key)}`,
+    );
+
+    await processGenerationJob(job.id);
+
+    expect(h.blobExists).toHaveBeenCalledTimes(2);
+    expect(h.blobExists).toHaveBeenCalledWith(cameraKey);
+    expect(h.blobExists).toHaveBeenCalledWith(secondCameraKey);
+    expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
+      userId: cameraOwner,
+      characterImageUrls: [
+        `https://comics.example.com/api/media?key=${encodeURIComponent(cameraKey)}`,
+        `https://comics.example.com/api/media?key=${encodeURIComponent(secondCameraKey)}`,
+      ],
+    }));
+    expect(h.isTwilioMediaUrl).not.toHaveBeenCalled();
+    expect(h.downloadTwilioMedia).not.toHaveBeenCalled();
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["another user's photo", "blob:uploads/twilio_ffffffffffffffffffffffffffffffff/camera/11111111-2222-4333-8444-555555555555.jpg"],
+    ["a path traversal", `blob:uploads/${cameraOwner}/camera/../${cameraImageId}.jpg`],
+    ["a malformed camera filename", `blob:uploads/${cameraOwner}/camera/${cameraImageId}.jpg?other=1`],
+    ["an arbitrary external URL", "https://untrusted.example.com/photo.jpg"],
+  ])("rejects %s before image generation", async (_label, reference) => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      userId: cameraOwner,
+      attemptCount: 3,
+      characterImageUrls: [reference],
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.blobExists).not.toHaveBeenCalled();
+    expect(h.getBlobPublicUrl).not.toHaveBeenCalled();
+    expect(h.downloadTwilioMedia).not.toHaveBeenCalled();
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), expect.stringMatching(/^Untrusted /),
+    );
+  });
+
+  it("rejects a camera photo that is no longer in Blob Storage", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      userId: cameraOwner,
+      attemptCount: 3,
+      characterImageUrls: [`blob:${cameraKey}`],
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.blobExists).toHaveBeenCalledExactlyOnceWith(cameraKey);
+    expect(h.getBlobPublicUrl).not.toHaveBeenCalled();
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Camera photo is no longer available",
+    );
+  });
+
+  it("continues to ingest Twilio MMS photos through the existing media path", async () => {
+    const mediaUrl = "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages/SM123/Media/ME123";
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      characterImageUrls: [mediaUrl],
+    });
+    h.isTwilioMediaUrl.mockReturnValue(true);
+    const image = Buffer.from("sample PNG bytes");
+    h.downloadTwilioMedia.mockResolvedValue({ buffer: image, contentType: "image/png" });
+    h.uploadBufferToBlob.mockResolvedValue("https://comics.example.com/api/media?key=twilio-ref");
+
+    await processGenerationJob(job.id);
+
+    expect(h.isTwilioMediaUrl).toHaveBeenCalledExactlyOnceWith(mediaUrl);
+    expect(h.downloadTwilioMedia).toHaveBeenCalledExactlyOnceWith(mediaUrl);
+    expect(h.uploadBufferToBlob).toHaveBeenCalledWith(
+      image, `references/twilio/${job.id}/0.png`, "image/png",
+    );
+    expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
+      characterImageUrls: ["https://comics.example.com/api/media?key=twilio-ref"],
+    }));
   });
 
   it("continues the owned story and announces the new page number", async () => {

@@ -32,6 +32,7 @@ export default async function ProtectedAdminLayout({
             <Link href="/admin">Overview</Link>
             <Link href="/admin/activity">Activity</Link>
             <Link href="/admin/users">People</Link>
+            <Link href="/admin/settings">Settings</Link>
             <Link href="/start" target="_blank" rel="noopener noreferrer">
               Public site <ArrowUpRight size={14} aria-hidden="true" />
             </Link>
