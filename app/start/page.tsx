@@ -148,7 +148,7 @@ export default async function StartPage() {
                       <div className={styles.qrFrame}>
                         <QRCodeSVG
                           value={choice.href}
-                          size={118}
+                          size={146}
                           level="M"
                           includeMargin
                           bgColor="#ffffff"

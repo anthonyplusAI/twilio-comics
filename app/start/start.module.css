@@ -139,7 +139,7 @@
 .cardTop {
   display: grid;
   flex: 1;
-  grid-template-columns: minmax(0, 1fr) 124px;
+  grid-template-columns: minmax(0, 1fr) 154px;
   gap: 22px;
   padding: 29px 27px 31px;
 }
@@ -170,6 +170,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  width: min(100%, 240px);
   min-height: 58px;
   margin-top: auto;
   border: 3px solid var(--ink);
@@ -196,7 +197,7 @@
   align-items: center;
   justify-content: center;
   gap: 10px;
-  width: 124px;
+  width: 154px;
 }
 
 .qrFrame {
@@ -347,6 +348,18 @@
   }
 }
 
+@media (min-width: 901px) and (max-width: 1100px) {
+  .cards,
+  .photoPath,
+  .howItWorks {
+    max-width: 680px;
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .cards {
     grid-template-columns: 1fr;
@@ -358,6 +371,10 @@
 
   .cardTop {
     display: block;
+  }
+
+  .channelButton {
+    width: min(100%, 340px);
   }
 
   .qrPanel {
@@ -438,6 +455,12 @@
   .programDisclosure {
     margin-top: 35px;
     text-align: left;
+  }
+}
+
+@media (max-width: 480px) {
+  .channelButton {
+    width: 100%;
   }
 }
 
