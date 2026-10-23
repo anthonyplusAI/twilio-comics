@@ -106,6 +106,7 @@ jobs:
       - uses: actions/checkout@v7
       - run: python3 scripts/check-postgres-url-literals.test.py
       - run: python3 scripts/check-postgres-url-literals.py
+      - run: python3 scripts/check-outgoing-postgres-urls.test.py
 
   validate:
     name: Validate
