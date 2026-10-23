@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ config: null as Record<string, unknown> | null }));
+const h = vi.hoisted(() => ({
+  config: null as Record<string, unknown> | null,
+  execute: vi.fn(),
+}));
 
 vi.mock("next-auth", () => ({
   default: (config: Record<string, unknown>) => {
@@ -9,7 +12,7 @@ vi.mock("next-auth", () => ({
   },
 }));
 vi.mock("@auth/drizzle-adapter", () => ({ DrizzleAdapter: () => ({}) }));
-vi.mock("@/lib/db", () => ({ db: {} }));
+vi.mock("@/lib/db", () => ({ db: { execute: h.execute } }));
 
 import "@/auth";
 import { configuredGoogleProviders } from "@/auth.config";
@@ -28,6 +31,13 @@ function callbacks(): AuthCallbacks {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.useRealTimers();
+  h.execute.mockReset();
+});
+
+// No database rotation yet: the existing Azure secret remains the initial login.
+beforeEach(() => {
+  vi.stubEnv("ADMIN_USERNAME", "operator");
+  h.execute.mockResolvedValue({ rows: [] });
 });
 
 describe("administrator Auth.js role", () => {
@@ -42,7 +52,12 @@ describe("administrator Auth.js role", () => {
     const cb = callbacks();
     const token = await cb.jwt({
       token: { sub: "admin:operator" },
-      user: { id: "admin:operator", name: "operator", role: "admin" },
+      user: {
+        id: "admin:operator",
+        name: "operator",
+        role: "admin",
+        adminCredentialVersion: adminCredentialVersion("scrypt$test-version"),
+      },
       account: { provider: "admin" },
     });
 
@@ -83,6 +98,54 @@ describe("administrator Auth.js role", () => {
       adminIssuedAt: now.getTime() - 10_000,
       adminCredentialVersion: adminCredentialVersion("old-password-hash"),
     } })).toBeNull();
+  });
+
+  it("invalidates every replica's existing admin session after a dashboard rotation", async () => {
+    const firstHash = "scrypt$initial-version";
+    const rotatedHash = "scrypt$database-version";
+    vi.stubEnv("ADMIN_PASSWORD_HASH", firstHash);
+    h.execute.mockResolvedValue({ rows: [] });
+
+    const cb = callbacks();
+    const issued = await cb.jwt({
+      token: { sub: "admin:operator" },
+      user: {
+        id: "admin:operator",
+        name: "operator",
+        role: "admin",
+        adminCredentialVersion: adminCredentialVersion(firstHash),
+      },
+      account: { provider: "admin" },
+    });
+    expect(issued).toMatchObject({ role: "admin" });
+
+    h.execute.mockResolvedValue({ rows: [{
+      username: "new-admin", password_hash: rotatedHash,
+    }] });
+    expect(await cb.jwt({ token: issued })).toBeNull();
+
+    const newToken = await cb.jwt({
+      token: { sub: "admin:new-admin" },
+      user: {
+        id: "admin:new-admin",
+        name: "new-admin",
+        role: "admin",
+        adminCredentialVersion: adminCredentialVersion(rotatedHash),
+      },
+      account: { provider: "admin" },
+    });
+    expect(newToken).toMatchObject({ role: "admin" });
+  });
+
+  it("fails closed when PostgreSQL cannot verify the active admin credentials", async () => {
+    vi.stubEnv("ADMIN_PASSWORD_HASH", "scrypt$initial-version");
+    h.execute.mockRejectedValue(new Error("database unavailable"));
+    const token = await callbacks().jwt({ token: {
+      role: "admin",
+      adminIssuedAt: Date.now() - 1_000,
+      adminCredentialVersion: adminCredentialVersion("scrypt$initial-version"),
+    } });
+    expect(token).toBeNull();
   });
 
   it("accepts Google only with a verified email, and admin only through Credentials", async () => {

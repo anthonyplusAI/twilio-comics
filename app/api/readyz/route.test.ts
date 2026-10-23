@@ -9,7 +9,12 @@ import { GET } from "@/app/api/readyz/route";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  execute.mockResolvedValue({ rows: [{ ready: 1 }] });
+  execute.mockImplementation(async (query: SQL) => {
+    const statement = new PgDialect().sqlToQuery(query).sql;
+    return statement.includes("has_table_privilege")
+      ? { rows: [{ can_insert: true, can_update: true }] }
+      : { rows: [] };
+  });
   for (const key of [
     "DATABASE_URL", "AUTH_SECRET", "ADMIN_USERNAME", "ADMIN_PASSWORD_HASH",
     "AZURE_STORAGE_BLOB_ENDPOINT", "AZURE_STORAGE_QUEUE_ENDPOINT",
@@ -34,12 +39,49 @@ describe("production readiness", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ ready: true, release: "test-sha" });
-    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(3);
     const query = new PgDialect().sqlToQuery(execute.mock.calls[0][0] as SQL).sql;
     expect(query).toContain("public.activity_events");
     expect(query).toContain("public.voice_calls");
     expect(query).toContain("public.admin_login_attempts");
+    expect(query).toContain("public.admin_credentials");
     expect(query).toContain("public.experience_settings");
+  });
+
+  it("accepts the database admin login after bootstrap credentials are removed", async () => {
+    vi.stubEnv("ADMIN_USERNAME", "");
+    vi.stubEnv("ADMIN_PASSWORD_HASH", "");
+    execute.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({
+      rows: [{ username: "new-admin", password_hash: "scrypt:hash" }],
+    });
+
+    expect((await GET()).status).toBe(200);
+  });
+
+  it("requires bootstrap credentials before the first dashboard rotation", async () => {
+    vi.stubEnv("ADMIN_PASSWORD_HASH", "");
+
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ready: false, dependency: "configuration" });
+  });
+
+  it("rejects an incomplete database admin credential", async () => {
+    execute.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({
+      rows: [{ username: "", password_hash: "scrypt:hash" }],
+    });
+
+    expect((await GET()).status).toBe(503);
+  });
+
+  it("fails readiness if the runtime database role cannot rotate the admin login", async () => {
+    execute.mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ can_insert: true, can_update: false }] });
+
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ready: false, dependency: "database" });
   });
 
   it("fails closed before touching the database when a runtime secret is missing", async () => {

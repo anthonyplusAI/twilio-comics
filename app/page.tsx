@@ -41,6 +41,23 @@ export default function Home() {
               <Link className={styles.startAction} href="/start">
                 Choose how to start <ArrowUpRight size={22} aria-hidden="true" />
               </Link>
+              <div className={styles.qrCard}>
+                <div className={styles.qrFrame}>
+                  <QRCodeSVG
+                    value={startUrl}
+                    size={132}
+                    level="M"
+                    includeMargin
+                    bgColor="#ffffff"
+                    fgColor="#000d25"
+                    title="Scan to choose how to start"
+                  />
+                </div>
+                <div className={styles.qrCopy}>
+                  <ScanLine size={19} aria-hidden="true" />
+                  <span>Scan to choose how to start</span>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -61,23 +78,6 @@ export default function Home() {
               <figcaption>Imagine what yours could be</figcaption>
             </figure>
             <div className={styles.resultBubble}>Your comic is ready!</div>
-            <div className={styles.qrCard}>
-              <div className={styles.qrFrame}>
-                <QRCodeSVG
-                  value={startUrl}
-                  size={132}
-                  level="M"
-                  includeMargin
-                  bgColor="#ffffff"
-                  fgColor="#000d25"
-                  title="Scan to choose how to start"
-                />
-              </div>
-              <div className={styles.qrCopy}>
-                <ScanLine size={19} aria-hidden="true" />
-                <span>Scan to choose how to start</span>
-              </div>
-            </div>
           </div>
         </section>
 

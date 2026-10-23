@@ -237,8 +237,6 @@ async function main(): Promise<void> {
     const required = [
       "DATABASE_URL",
       "AUTH_SECRET",
-      "ADMIN_USERNAME",
-      "ADMIN_PASSWORD_HASH",
       "AZURE_STORAGE_BLOB_ENDPOINT",
       "AZURE_STORAGE_QUEUE_ENDPOINT",
       "AZURE_STORAGE_CONTAINER_NAME",

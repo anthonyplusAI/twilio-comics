@@ -10,8 +10,6 @@ export const dynamic = "force-dynamic";
 const REQUIRED = [
   "DATABASE_URL",
   "AUTH_SECRET",
-  "ADMIN_USERNAME",
-  "ADMIN_PASSWORD_HASH",
   "AZURE_STORAGE_BLOB_ENDPOINT",
   "AZURE_STORAGE_QUEUE_ENDPOINT",
   "AZURE_STORAGE_CONTAINER_NAME",
@@ -84,9 +82,41 @@ export async function GET(): Promise<Response> {
            public.activity_events,
            public.voice_calls,
            public.admin_login_attempts,
+           public.admin_credentials,
            public.experience_settings
       LIMIT 0
     `);
+
+    const credentials = await db.execute(sql`
+      SELECT username, password_hash
+      FROM public.admin_credentials
+      LIMIT 1
+    `);
+    const active = credentials.rows[0] as
+      | { username?: string; password_hash?: string }
+      | undefined;
+    if (active) {
+      if (!active.username?.trim() || !active.password_hash?.trim()) {
+        return response(false, "configuration", 503);
+      }
+    } else if (!process.env.ADMIN_USERNAME?.trim() ||
+               !process.env.ADMIN_PASSWORD_HASH?.trim()) {
+      return response(false, "configuration", 503);
+    }
+
+    // Admin rotation needs writes on a table created by the migration role.
+    // Catch a missing default grant before publishing the new app revision.
+    const privileges = await db.execute(sql`
+      SELECT
+        has_table_privilege(current_user, 'public.admin_credentials', 'INSERT') AS can_insert,
+        has_table_privilege(current_user, 'public.admin_credentials', 'UPDATE') AS can_update
+    `);
+    const grants = privileges.rows[0] as
+      | { can_insert?: boolean; can_update?: boolean }
+      | undefined;
+    if (!grants?.can_insert || !grants?.can_update) {
+      return response(false, "database", 503);
+    }
     return response(true, null, 200);
   } catch (error) {
     console.error("Readiness database check failed", error instanceof Error ? error.name : "unknown");

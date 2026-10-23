@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
-const h = vi.hoisted(() => ({ execute: vi.fn() }));
+const h = vi.hoisted(() => ({
+  execute: vi.fn(),
+  attempts: new Map<string, number>(),
+}));
 
 vi.mock("@/lib/db", () => ({ db: { execute: h.execute } }));
 
@@ -26,7 +29,21 @@ beforeEach(async () => {
   vi.stubEnv("ADMIN_PASSWORD_HASH", encodedHash);
   vi.stubEnv("AUTH_SECRET", "stable-admin-test-secret");
   vi.stubEnv("CONTAINER_APP_NAME", "twilio-comics-web");
-  h.execute.mockResolvedValue({ rows: [] });
+  h.attempts.clear();
+  h.execute.mockImplementation(async (query: SQL) => {
+    const statement = dialect.sqlToQuery(query);
+    if (statement.sql.includes("INSERT INTO admin_login_attempts")) {
+      const key = String(statement.params[0]);
+      const limit = Number(statement.params[3]);
+      const count = Math.min((h.attempts.get(key) ?? 0) + 1, limit + 1);
+      h.attempts.set(key, count);
+      return { rows: [{ failed_count: count }] };
+    }
+    if (statement.sql.includes("DELETE FROM admin_login_attempts")) {
+      h.attempts.delete(String(statement.params[0]));
+    }
+    return { rows: [] };
+  });
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -69,12 +86,14 @@ describe("administrator sign in", () => {
     }, requestFrom())).resolves.toMatchObject({ name: "operator", role: "admin" });
 
     const sql = statements();
-    expect(sql).toHaveLength(2);
-    expect(sql[0].sql).toContain("admin_login_attempts");
-    expect(sql[1].sql).toContain("DELETE FROM admin_login_attempts");
+    expect(sql).toHaveLength(3);
+    expect(sql[0].sql).toContain("admin_credentials");
+    expect(sql[1].sql).toContain("INSERT INTO admin_login_attempts");
+    expect(sql[1].sql).toContain("ON CONFLICT");
+    expect(sql[2].sql).toContain("DELETE FROM admin_login_attempts");
   });
 
-  it("records failed passwords with an atomic database upsert", async () => {
+  it("reserves failed password attempts with an atomic database upsert", async () => {
     await expect(authenticateAdminCredentials({
       username: "operator",
       password: "wrong password",
@@ -109,13 +128,7 @@ describe("administrator sign in", () => {
   it("lets the operator sign in when unknown usernames are blocked at the same IP", async () => {
     await authenticateAdminCredentials({ username: "stranger", password: "wrong password" }, requestFrom());
     const [unknownSourceKey] = failedAttemptKeys();
-    h.execute.mockImplementation(async (query: SQL) => {
-      const statement = dialect.sqlToQuery(query);
-      return { rows: statement.sql.includes("SELECT blocked_until") &&
-        statement.params.includes(unknownSourceKey)
-        ? [{ blocked_until: new Date(Date.now() + 900_000) }]
-        : [] };
-    });
+    h.attempts.set(unknownSourceKey, 50);
 
     await expect(authenticateAdminCredentials({
       username: "operator",
@@ -126,13 +139,7 @@ describe("administrator sign in", () => {
   it("isolates known-account lockouts by source IP", async () => {
     await authenticateAdminCredentials({ username: "operator", password: "wrong password" }, requestFrom());
     const [blockedAccountKey] = failedAttemptKeys();
-    h.execute.mockImplementation(async (query: SQL) => {
-      const statement = dialect.sqlToQuery(query);
-      return { rows: statement.sql.includes("SELECT blocked_until") &&
-        statement.params.includes(blockedAccountKey)
-        ? [{ blocked_until: new Date(Date.now() + 900_000) }]
-        : [] };
-    });
+    h.attempts.set(blockedAccountKey, 5);
 
     await expect(authenticateAdminCredentials({ username: "operator", password }, requestFrom()))
       .resolves.toBeNull();
@@ -154,7 +161,9 @@ describe("administrator sign in", () => {
       username: "operator",
       password,
     }, requestFrom())).resolves.toBeNull();
-    expect(h.execute).not.toHaveBeenCalled();
+    expect(statements().map((statement) => statement.sql)).toEqual([
+      expect.stringContaining("FROM admin_credentials"),
+    ]);
   });
 });
 

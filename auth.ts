@@ -6,8 +6,8 @@ import authConfig, {
   verifiedGoogleEmail,
 } from "@/auth.config";
 import {
-  adminCredentialVersion,
   authenticateAdminCredentials,
+  getActiveAdminPasswordHash,
   isAdminJwtFresh,
 } from "@/lib/admin-auth";
 import { db } from "@/lib/db";
@@ -41,16 +41,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
   callbacks: {
     ...authConfig.callbacks,
-    jwt({ token, user, account, profile }) {
+    async jwt({ token, user, account, profile }) {
       if (user) {
         token.id = user.id;
         if (account?.provider === "admin" && user.role === "admin") {
           token.role = "admin";
           delete token.studioEmail;
           token.adminIssuedAt = Date.now();
-          token.adminCredentialVersion = adminCredentialVersion(
-            process.env.ADMIN_PASSWORD_HASH ?? "",
-          );
+          token.adminCredentialVersion = user.adminCredentialVersion;
         } else {
           token.role = "user";
           token.studioEmail = account?.provider === "google"
@@ -60,14 +58,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           delete token.adminCredentialVersion;
         }
       }
-      if (token.role === "admin" && !isAdminJwtFresh(
-        typeof token.adminIssuedAt === "number" ? token.adminIssuedAt : undefined,
-        typeof token.adminCredentialVersion === "string"
-          ? token.adminCredentialVersion
-          : undefined,
-        process.env.ADMIN_PASSWORD_HASH,
-      )) {
-        return null;
+      if (token.role === "admin") {
+        try {
+          if (!isAdminJwtFresh(
+            typeof token.adminIssuedAt === "number" ? token.adminIssuedAt : undefined,
+            typeof token.adminCredentialVersion === "string"
+              ? token.adminCredentialVersion
+              : undefined,
+            await getActiveAdminPasswordHash() ?? undefined,
+          )) return null;
+        } catch {
+          // Session verification must fail closed when PostgreSQL is unavailable.
+          return null;
+        }
       }
       if (process.env.NODE_ENV === "production" && token.role !== "admin" &&
         !isStudioTesterEmailAllowed(

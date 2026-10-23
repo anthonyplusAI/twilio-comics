@@ -2,8 +2,9 @@
 set -euo pipefail
 set +x # Never trace credential files or Key Vault operations.
 
-# Rotate the V2 admin username and password from a trusted operator terminal.
-# The password is entered through an attached terminal and never appears in CLI arguments.
+# Legacy bootstrap credential update. After the first dashboard change, the
+# active admin login lives in PostgreSQL, and changing these values has no
+# effect on it. The password is entered through a terminal, never CLI args.
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "Install '$1' before running this script."; }
@@ -21,6 +22,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 [[ "${SUBSCRIPTION_ID:-}" == "$EXPECTED_SUBSCRIPTION_ID" ]] \
   || die "Set SUBSCRIPTION_ID=$EXPECTED_SUBSCRIPTION_ID for this production rotation."
+[[ "${ROTATE_ADMIN_BOOTSTRAP_ONLY:-}" == yes ]] \
+  || die 'Change the active admin login at /admin/settings. This legacy script updates only bootstrap credentials; set ROTATE_ADMIN_BOOTSTRAP_ONLY=yes only for an authorized bootstrap maintenance task.'
 [[ "${ROTATE_ADMIN_CONFIRM:-}" == yes ]] \
   || die 'Set ROTATE_ADMIN_CONFIRM=yes after reviewing docs/ADMIN_CREDENTIALS.md.'
 [[ -t 0 && -t 1 ]] \

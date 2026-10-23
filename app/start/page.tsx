@@ -124,15 +124,6 @@ export default async function StartPage() {
 
         {activeChoices.length > 0 && (
           <section className={styles.choicesSection} aria-label="Available channels">
-            <p className={styles.programDisclosure}>
-              {hasTextDelivery
-                ? "Twilio Comics sends automated replies and comic links by text. "
-                : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
-              Message frequency varies; message and data rates may apply.{" "}
-              {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
-              <Link href="/privacy">Privacy Policy</Link> ·{" "}
-              <Link href="/terms">Terms of Service</Link>
-            </p>
             <div className={styles.cards}>
               {activeChoices.map((choice) => (
                 <article
@@ -157,7 +148,7 @@ export default async function StartPage() {
                       <div className={styles.qrFrame}>
                         <QRCodeSVG
                           value={choice.href}
-                          size={100}
+                          size={118}
                           level="M"
                           includeMargin
                           bgColor="#ffffff"
@@ -215,6 +206,15 @@ export default async function StartPage() {
                 )}
               </ul>
             </details>
+            <p className={styles.programDisclosure}>
+              {hasTextDelivery
+                ? "Twilio Comics sends automated replies and comic links by text. "
+                : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
+              Message frequency varies; message and data rates may apply.{" "}
+              {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
+              <Link href="/privacy">Privacy Policy</Link> ·{" "}
+              <Link href="/terms">Terms of Service</Link>
+            </p>
           </section>
         )}
       </main>

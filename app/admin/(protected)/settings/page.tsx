@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, Camera, MessageCircle, PhoneCall } from "lucide-react";
-import { updatePhotoExperienceSettings } from "@/app/admin/actions";
+import { updateAdminCredentials, updatePhotoExperienceSettings } from "@/app/admin/actions";
 import { requireAdmin } from "@/lib/admin-access";
 import { getExperienceSettings, type VoicePhotoMode } from "@/lib/photo-experience-settings";
 import styles from "../../admin.module.css";
@@ -39,24 +39,44 @@ const voicePhotoOptions = [
   icon: typeof PhoneCall;
 }>;
 
+function credentialErrorMessage(error: string | undefined): string | null {
+  switch (error) {
+    case "invalid-current":
+      return "The current password is incorrect. Try again.";
+    case "password-reused":
+      return "Choose a new password that differs from your current password.";
+    case "rate-limited":
+      return "Too many attempts. Wait 15 minutes, then try again.";
+    case "conflict":
+      return "The admin login changed in another session. Sign in again before retrying.";
+    case "invalid-input":
+      return "Use a 3–64 character username with letters, numbers, dots, underscores, or hyphens, and a password of at least 16 characters.";
+    case "mismatch":
+      return "The new passwords do not match.";
+    default:
+      return null;
+  }
+}
+
 export default async function AdminSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string; error?: string }>;
+  searchParams: Promise<{ saved?: string; error?: string; credentialError?: string }>;
 }) {
-  await requireAdmin();
+  const session = await requireAdmin();
   const [{ voicePhotoMode, cameraEnabled }, params] = await Promise.all([
     getExperienceSettings(),
     searchParams,
   ]);
+  const credentialError = credentialErrorMessage(params.credentialError);
 
   return (
     <div className={styles.settingsPage}>
       <div className={styles.pageHeading}>
         <div>
-          <p className={styles.sectionKicker}>Experience settings</p>
-          <h1>Photo experiences.</h1>
-          <p>Choose where people can add photos and how phone calls use them.</p>
+          <p className={styles.sectionKicker}>Operations settings</p>
+          <h1>Settings.</h1>
+          <p>Manage your admin login and the photo experience.</p>
         </div>
         <Link className={styles.backAction} href="/admin">
           <ArrowLeft size={17} aria-hidden="true" /> Overview
@@ -72,6 +92,79 @@ export default async function AdminSettingsPage({
       {params.error === "camera-required" && (
         <p className={styles.settingsError} role="alert">Turn on the browser camera to make it the first photo source for calls.</p>
       )}
+
+      <section className={`${styles.settingsPanel} ${styles.credentialsPanel}`} id="change-login" aria-labelledby="change-login-heading">
+        <div className={styles.settingsPanelHeading}>
+          <div>
+            <h2 id="change-login-heading">Change admin login</h2>
+            <p>Choose a new username and password. You will sign in again after saving.</p>
+          </div>
+        </div>
+        <form action={updateAdminCredentials} className={styles.settingsForm}>
+          {credentialError && (
+            <p className={styles.settingsError} role="alert">{credentialError}</p>
+          )}
+          <div className={styles.credentialFields}>
+            <label className={styles.credentialField} htmlFor="current-admin-password">
+              <span>Current password</span>
+              <input
+                id="current-admin-password"
+                name="currentPassword"
+                type="password"
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            <label className={styles.credentialField} htmlFor="new-admin-username">
+              <span>New username</span>
+              <input
+                id="new-admin-username"
+                name="newUsername"
+                type="text"
+                defaultValue={session.user?.name ?? ""}
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                aria-describedby="new-admin-username-hint"
+                minLength={3}
+                maxLength={64}
+                pattern="[A-Za-z0-9._\\-]{3,64}"
+                required
+              />
+              <small id="new-admin-username-hint">3–64 letters, numbers, dots, underscores, or hyphens.</small>
+            </label>
+            <label className={styles.credentialField} htmlFor="new-admin-password">
+              <span>New password</span>
+              <input
+                id="new-admin-password"
+                name="newPassword"
+                type="password"
+                autoComplete="new-password"
+                aria-describedby="new-admin-password-hint"
+                minLength={16}
+                maxLength={1024}
+                required
+              />
+              <small id="new-admin-password-hint">At least 16 characters.</small>
+            </label>
+            <label className={styles.credentialField} htmlFor="confirm-admin-password">
+              <span>Confirm new password</span>
+              <input
+                id="confirm-admin-password"
+                name="confirmNewPassword"
+                type="password"
+                autoComplete="new-password"
+                minLength={16}
+                maxLength={1024}
+                required
+              />
+            </label>
+          </div>
+          <div className={styles.settingsActions}>
+            <button type="submit">Update login</button>
+          </div>
+        </form>
+      </section>
 
       <section className={styles.settingsPanel} aria-labelledby="voice-photo-heading">
         <div className={styles.settingsPanelHeading}>

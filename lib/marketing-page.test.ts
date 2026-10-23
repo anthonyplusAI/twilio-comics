@@ -70,4 +70,13 @@ describe("marketing homepage entry point", () => {
     expect(html).toContain('href="https://www.twilio.com/en-us/legal/privacy"');
     expect(html).toContain('href="https://www.twilio.com/en-us/legal/tos"');
   });
+
+  it("places the start QR beside the main action before the comic preview", () => {
+    const html = renderPage("sms,voice");
+
+    expect(html.indexOf("Scan to choose how to start"))
+      .toBeGreaterThan(html.indexOf("Choose how to start"));
+    expect(html.indexOf("Scan to choose how to start"))
+      .toBeLessThan(html.indexOf("Imagine what yours could be"));
+  });
 });

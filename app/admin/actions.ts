@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { signIn, signOut } from "@/auth";
 import { requireAdmin } from "@/lib/admin-access";
+import { rotateAdminCredentials } from "@/lib/admin-auth";
 import { isVoicePhotoMode, setExperienceSettings } from "@/lib/photo-experience-settings";
 
 export async function adminSignIn(formData: FormData): Promise<void> {
@@ -48,4 +49,37 @@ export async function updatePhotoExperienceSettings(formData: FormData): Promise
   revalidatePath("/start/camera");
   revalidatePath("/admin/settings");
   redirect("/admin/settings?saved=1");
+}
+
+export async function updateAdminCredentials(formData: FormData): Promise<void> {
+  await requireAdmin();
+
+  const currentPassword = formData.get("currentPassword");
+  const newUsername = formData.get("newUsername");
+  const newPassword = formData.get("newPassword");
+  const confirmNewPassword = formData.get("confirmNewPassword");
+  const normalizedNewUsername = typeof newUsername === "string" ? newUsername.trim() : "";
+
+  if (
+    typeof currentPassword !== "string" || currentPassword.length < 1 || currentPassword.length > 1024 ||
+    !/^[A-Za-z0-9._-]{3,64}$/.test(normalizedNewUsername) ||
+    typeof newPassword !== "string" || newPassword.length < 16 || newPassword.length > 1024 ||
+    typeof confirmNewPassword !== "string"
+  ) {
+    redirect("/admin/settings?credentialError=invalid-input#change-login");
+  }
+  if (newPassword !== confirmNewPassword) {
+    redirect("/admin/settings?credentialError=mismatch#change-login");
+  }
+
+  const result = await rotateAdminCredentials({
+    currentPassword,
+    newUsername: normalizedNewUsername,
+    newPassword,
+  });
+  if (!result.ok) {
+    redirect(`/admin/settings?credentialError=${result.reason}#change-login`);
+  }
+
+  await signOut({ redirectTo: "/admin/login?changed=1" });
 }

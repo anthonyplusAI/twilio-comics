@@ -358,6 +358,21 @@ export const adminLoginAttempts = pgTable("admin_login_attempts", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+/** Dashboard rotations live in PostgreSQL; an absent row uses the initial Azure secret. */
+export const adminCredentials = pgTable(
+  "admin_credentials",
+  {
+    id: integer("id").primaryKey().default(1),
+    username: text("username").notNull(),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (credentials) => [
+    check("admin_credentials_singleton_check", sql`${credentials.id} = 1`),
+  ],
+);
+
 export type VoicePhotoMode = "sms" | "camera" | "none";
 
 /** A single PostgreSQL row keeps the public Voice photo path stable across deploys. */
