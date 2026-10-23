@@ -18,6 +18,36 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("channel story link", () => {
+  it("returns the saved Dub link for an owned SMS comic", async () => {
+    h.execute.mockResolvedValue({ rows: [{
+      slug: "robot-detective",
+      dub_short_url: "https://twil.io/comic-31",
+    }] });
+
+    await expect(channelStoryLink({
+      storyId,
+      channel: "sms",
+      address: "+15551112222",
+    })).resolves.toBe("https://twil.io/comic-31");
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toContain("story.dub_short_url");
+    expect(query.sql).toContain("identity.address = $3");
+  });
+
+  it("ignores an unsafe saved short link and returns the owned comic page", async () => {
+    h.execute.mockResolvedValue({ rows: [{
+      slug: "robot-detective",
+      dub_short_url: "http://twil.io/comic-31",
+    }] });
+
+    await expect(channelStoryLink({
+      storyId,
+      channel: "sms",
+      address: "+15551112222",
+    })).resolves.toBe("https://comics.example.com/story/robot-detective");
+  });
+
   it("looks up the story through the exact SMS sender identity", async () => {
     h.execute.mockResolvedValue({ rows: [{ slug: "robot-detective" }] });
 
@@ -131,6 +161,28 @@ describe("channel story link", () => {
       "+15551112222", "+15551112222", "+15551112222",
       "+15551112222", "+15551112222", "+15553334444", 14,
     ]);
+  });
+
+  it("uses the saved Dub link when recovering the latest SMS comic", async () => {
+    h.execute.mockResolvedValue({ rows: [{
+      story_id: storyId,
+      slug: "phone-call-hero",
+      dub_short_url: "https://twil.io/comic-32",
+      source: "voice",
+    }] });
+
+    await expect(latestStoryLinkForSms({
+      address: "+15551112222",
+      senderAddress: "+15553334444",
+    })).resolves.toEqual({
+      storyId,
+      source: "voice",
+      link: "https://twil.io/comic-32",
+    });
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toContain("story.dub_short_url");
+    expect(query.sql).toContain("source_conversation.active_story_id = story.id");
   });
 
   it("returns no old Voice link after the source conversation is reset", async () => {

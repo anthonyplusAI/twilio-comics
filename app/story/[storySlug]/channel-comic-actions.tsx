@@ -1,43 +1,49 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Check, Copy, Download, Share2 } from "lucide-react";
+import { ArrowUpRight, Camera, Check, Copy, Download, Share2 } from "lucide-react";
+import { linkedInShareIntent, resolveComicShareUrl, xShareIntent } from "./comic-share-links";
 import styles from "./channel-comic-viewer.module.css";
 
 export function ChannelComicActions({
   title,
   imageUrls,
+  shareUrl,
 }: {
   title: string;
   imageUrls: string[];
+  shareUrl?: string | null;
 }) {
   const [notice, setNotice] = useState("");
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isShareOpen, setIsShareOpen] = useState(false);
   const downloadInProgress = useRef(false);
 
-  const comicUrl = () => new URL(window.location.pathname, window.location.origin).toString();
+  const comicUrl = () => resolveComicShareUrl(shareUrl, window.location.origin, window.location.pathname);
 
-  const copyLink = async () => {
+  const copyLink = async (forInstagram = false) => {
     try {
       await navigator.clipboard.writeText(comicUrl());
-      setNotice("Link copied");
+      setNotice(forInstagram ? "Link copied. Add a Story link sticker and #Twilio." : "Link copied");
     } catch {
-      setNotice("Copy this page's address from your browser.");
+      setNotice(forInstagram
+        ? "Copy this page's address for a Story link sticker and add #Twilio."
+        : "Copy this page's address from your browser.");
     }
   };
 
-  const shareComic = async () => {
+  const shareViaDevice = async () => {
     if (!navigator.share) {
-      await copyLink();
+      await copyLink(false);
       return;
     }
 
     try {
-      await navigator.share({ title, url: comicUrl() });
+      await navigator.share({ title, text: "Made with Twilio Comics #Twilio", url: comicUrl() });
       setNotice("");
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
-      await copyLink();
+      await copyLink(false);
     }
   };
 
@@ -79,10 +85,16 @@ export function ChannelComicActions({
   return (
     <div className={styles.actions}>
       <div className={styles.actionButtons}>
-        <button className={`${styles.actionButton} ${styles.shareButton}`} onClick={shareComic} type="button">
+        <button
+          className={`${styles.actionButton} ${styles.shareButton}`}
+          onClick={() => setIsShareOpen((open) => !open)}
+          type="button"
+          aria-expanded={isShareOpen}
+          aria-controls={isShareOpen ? "comic-share-options" : undefined}
+        >
           <Share2 size={19} aria-hidden="true" /> Share comic
         </button>
-        <button className={styles.actionButton} onClick={copyLink} type="button">
+        <button className={styles.actionButton} onClick={() => void copyLink(false)} type="button">
           {notice === "Link copied" ? <Check size={19} aria-hidden="true" /> : <Copy size={19} aria-hidden="true" />}
           Copy link
         </button>
@@ -96,6 +108,46 @@ export function ChannelComicActions({
           {isDownloading ? "Preparing PDF" : "Download PDF"}
         </button>
       </div>
+      {isShareOpen && (
+        <div className={styles.sharePanel} id="comic-share-options">
+          <div className={styles.sharePanelHeading}>
+            <strong>Share your comic</strong>
+            <span>Choose where to send it.</span>
+          </div>
+          <div className={styles.shareChoices}>
+            <a
+              className={styles.shareChoice}
+              href={xShareIntent(comicUrl())}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span className={styles.shareChoiceMark}>X</span>
+              <span className={styles.shareChoiceText}>X<small>Post with @twilio and #Twilio</small></span>
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </a>
+            <a
+              className={styles.shareChoice}
+              href={linkedInShareIntent(comicUrl())}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span className={styles.shareChoiceMark}>in</span>
+              <span className={styles.shareChoiceText}>LinkedIn<small>Share the comic link</small></span>
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </a>
+            <button className={styles.shareChoice} onClick={() => void copyLink(true)} type="button">
+              <Camera size={22} aria-hidden="true" />
+              <span className={styles.shareChoiceText}>Instagram<small>Copy link; add #Twilio</small></span>
+              <Copy size={18} aria-hidden="true" />
+            </button>
+            <button className={styles.shareChoice} onClick={() => void shareViaDevice()} type="button">
+              <Share2 size={22} aria-hidden="true" />
+              <span className={styles.shareChoiceText}>More apps<small>Share sheet or copy link</small></span>
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      )}
       <p className={styles.actionNotice} role="status" aria-live="polite">{notice}</p>
     </div>
   );

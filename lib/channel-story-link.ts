@@ -29,6 +29,18 @@ function publicBaseUrl(): URL | null {
   return null;
 }
 
+/** A persisted short link must remain a safe HTTPS URL before it is sent. */
+export function savedHttpsShortLink(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 /** Only the existing exact sender/channel identity may receive its story link. */
 export async function channelStoryLink(input: {
   storyId: string;
@@ -43,7 +55,7 @@ export async function channelStoryLink(input: {
       !E164.test(normalizedAddress)) return null;
 
   const result = await db.execute(sql`
-    SELECT story.slug
+    SELECT story.slug, story.dub_short_url
     FROM stories AS story
     JOIN channel_identities AS identity ON identity.user_id = story.user_id
     WHERE story.id = ${input.storyId}::uuid
@@ -56,9 +68,11 @@ export async function channelStoryLink(input: {
   const rows = Array.isArray(result)
     ? result : "rows" in result && Array.isArray(result.rows) ? result.rows : null;
   if (!rows) throw new Error("Unexpected story access query result");
-  const slug = (rows[0] as { slug?: unknown } | undefined)?.slug;
+  const row = rows[0] as { slug?: unknown; dub_short_url?: unknown } | undefined;
+  const slug = row?.slug;
   if (typeof slug !== "string" || !SLUG.test(slug)) return null;
-  return new URL(`/story/${encodeURIComponent(slug)}`, base).toString();
+  return savedHttpsShortLink(row?.dub_short_url) ??
+    new URL(`/story/${encodeURIComponent(slug)}`, base).toString();
 }
 
 /**
@@ -79,7 +93,7 @@ export async function latestStoryLinkForSms(input: {
   if (!base || !E164.test(input.address) || !E164.test(input.senderAddress)) return null;
 
   const result = await db.execute(sql`
-    SELECT story.id AS story_id, story.slug, job.source
+    SELECT story.id AS story_id, story.slug, story.dub_short_url, job.source
     FROM generation_jobs AS job
     JOIN stories AS story
       ON story.id = job.story_id AND story.user_id = job.user_id
@@ -125,13 +139,19 @@ export async function latestStoryLinkForSms(input: {
   const rows = Array.isArray(result)
     ? result : "rows" in result && Array.isArray(result.rows) ? result.rows : null;
   if (!rows) throw new Error("Unexpected latest story access query result");
-  const row = rows[0] as { story_id?: unknown; slug?: unknown; source?: unknown } | undefined;
+  const row = rows[0] as {
+    story_id?: unknown;
+    slug?: unknown;
+    dub_short_url?: unknown;
+    source?: unknown;
+  } | undefined;
   if (!row || typeof row.story_id !== "string" || !UUID.test(row.story_id) ||
       typeof row.slug !== "string" || !SLUG.test(row.slug) ||
       (row.source !== "sms" && row.source !== "voice")) return null;
   return {
     storyId: row.story_id,
     source: row.source,
-    link: new URL(`/story/${encodeURIComponent(row.slug)}`, base).toString(),
+    link: savedHttpsShortLink(row.dub_short_url) ??
+      new URL(`/story/${encodeURIComponent(row.slug)}`, base).toString(),
   };
 }

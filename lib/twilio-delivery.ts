@@ -1,5 +1,6 @@
 import { and, eq, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import { recordActivityEvent } from "@/lib/activity-events";
+import { savedHttpsShortLink } from "@/lib/channel-story-link";
 import { db } from "@/lib/db";
 import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { getStoryById } from "@/lib/db-actions";
@@ -392,7 +393,8 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
     if (!story) throw new Error("Generated comic story was not found for delivery fallback");
     const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!baseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
-    const body = `Your comic "${story.title.slice(0, 100)}" is ready. View it here: ${baseUrl}/story/${story.slug}`;
+    const comicUrl = savedHttpsShortLink(story.dubShortUrl) ?? `${baseUrl}/story/${story.slug}`;
+    const body = `Your comic "${story.title.slice(0, 100)}" is ready. View it here: ${comicUrl}`;
     const validityPeriod = resultDeliveryValiditySeconds(job);
     if (validityPeriod === null) {
       await suppressExpiredTextFallback(jobId);

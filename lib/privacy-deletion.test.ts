@@ -9,6 +9,7 @@ const sender = "+15551234567";
 const userId = "twilio_8a59780bb8cd2ba022bfa5ba2ea3b6e0";
 const firstJob = "11111111-1111-4111-8111-111111111111";
 const firstStory = "22222222-2222-4222-8222-222222222222";
+const firstDubLinkId = "cm1ownedstorylink";
 
 function snapshot(overrides: Partial<SubjectDatabaseSnapshot> = {}): SubjectDatabaseSnapshot {
   return {
@@ -28,7 +29,7 @@ function snapshot(overrides: Partial<SubjectDatabaseSnapshot> = {}): SubjectData
       deliverySid: "SM11111111111111111111111111111111",
       deliveryFallbackSid: null,
     }],
-    stories: [{ id: firstStory, userId }],
+    stories: [{ id: firstStory, userId, dubLinkId: firstDubLinkId }],
     messages: [{
       messageSid: "SM22222222222222222222222222222222",
       outboundSid: "SM33333333333333333333333333333333",
@@ -93,8 +94,33 @@ describe("subject deletion inventory", () => {
       "SM44444444444444444444444444444444",
     ]);
     expect(plan.providerCallSids).toEqual(["CA11111111111111111111111111111111"]);
+    expect(plan.dubLinkIds).toEqual([firstDubLinkId]);
+    expect(plan.dubExternalIds).toEqual([`twilio-comics-${firstStory}`]);
     expect(plan.blockers).toEqual([]);
     expect(plan.readOnly).toBe(true);
+  });
+
+  it("lists unique Dub links only for this sender's stories", () => {
+    const base = snapshot();
+    const plan = buildDeletionPlan(sender, snapshot({
+      stories: [
+        ...base.stories,
+        { id: "33333333-3333-4333-8333-333333333333", userId, dubLinkId: null },
+        { id: "44444444-4444-4444-8444-444444444444", userId, dubLinkId: firstDubLinkId },
+        { id: "55555555-5555-4555-8555-555555555555", userId: "other_user", dubLinkId: "cm1foreignstorylink" },
+      ],
+      counts: { ...base.counts, stories: 4 },
+    }));
+
+    expect(plan.dubLinkIds).toEqual([firstDubLinkId]);
+    expect(plan.dubLinkIds).not.toContain("cm1foreignstorylink");
+    expect(plan.dubExternalIds).toEqual([
+      `twilio-comics-${firstStory}`,
+      "twilio-comics-33333333-3333-4333-8333-333333333333",
+      "twilio-comics-44444444-4444-4444-8444-444444444444",
+    ]);
+    expect(plan.readyForManualDeletion).toBe(false);
+    expect(plan.blockers.join(" ")).toMatch(/listed story belongs to another user/i);
   });
 
   it("refuses to mark active work as ready for manual erasure", () => {

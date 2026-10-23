@@ -71,7 +71,7 @@ export interface SubjectDatabaseSnapshot {
     deliverySid: string | null;
     deliveryFallbackSid: string | null;
   }>;
-  stories: Array<{ id: string; userId: string }>;
+  stories: Array<{ id: string; userId: string; dubLinkId: string | null }>;
   messages: Array<{ messageSid: string; outboundSid: string | null }>;
   calls: Array<{ callSid: string }>;
   eventSids: Array<{ messageSid: string | null; callSid: string | null }>;
@@ -85,6 +85,8 @@ export interface DeletionPlan extends DeletionSubject {
   jobIds: string[];
   providerMessageSids: string[];
   providerCallSids: string[];
+  dubLinkIds: string[];
+  dubExternalIds: string[];
   blobPrefixes: string[];
   blockers: string[];
   readyForManualDeletion: boolean;
@@ -97,6 +99,9 @@ export function buildDeletionPlan(sender: string, snapshot: SubjectDatabaseSnaps
   const addressSet = new Set<string>(subject.addresses);
   const ownedStories = snapshot.stories.filter((story) => story.userId === subject.userId);
   const ownedStoryIds = new Set(ownedStories.map((story) => story.id));
+  const dubLinkIds = new Set(ownedStories
+    .map((story) => story.dubLinkId)
+    .filter((id): id is string => Boolean(id)));
   const ownedJobs = snapshot.jobs.filter((job) =>
     job.userId === subject.userId && addressSet.has(job.recipientAddress));
 
@@ -189,6 +194,8 @@ export function buildDeletionPlan(sender: string, snapshot: SubjectDatabaseSnaps
     jobIds: ownedJobs.map((job) => job.id).sort(),
     providerMessageSids: [...providerMessageSids].sort(),
     providerCallSids: [...providerCallSids].sort(),
+    dubLinkIds: [...dubLinkIds].sort(),
+    dubExternalIds: [...ownedStoryIds].map((id) => `twilio-comics-${id}`).sort(),
     blobPrefixes: [...blobPrefixes].sort(),
     blockers: [...new Set(blockers)],
     readyForManualDeletion: blockers.length === 0,
@@ -287,7 +294,7 @@ export async function loadSubjectDatabaseSnapshot(sender: string): Promise<Subje
       eq(generationJobs.recipientAddress, sender),
       eq(generationJobs.recipientAddress, whatsappAddress),
     )),
-    db.select({ id: stories.id, userId: stories.userId })
+    db.select({ id: stories.id, userId: stories.userId, dubLinkId: stories.dubLinkId })
       .from(stories).where(eq(stories.userId, userId)),
     db.select({
       messageSid: twilioInboundMessages.messageSid,

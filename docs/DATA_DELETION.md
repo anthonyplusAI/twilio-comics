@@ -1,10 +1,10 @@
 # Verified participant data deletion
 
-Twilio Comics keeps SMS, Voice, comic, and usage history in PostgreSQL and images in Azure Blob Storage until an operator handles a verified deletion request. **`scripts/delete-subject-data.ts` is an inventory command only. It never deletes data.** This runbook covers one caller identified by an exact E.164 number, across SMS, Voice, and a possible future WhatsApp channel.
+Twilio Comics keeps SMS, Voice, comic, and usage history in PostgreSQL, images in Azure Blob Storage, and optional comic redirects in Dub until an operator handles a verified deletion request. **`scripts/delete-subject-data.ts` is an inventory command only. It never deletes data.** This runbook covers one caller identified by an exact E.164 number, across SMS, Voice, and a possible future WhatsApp channel.
 
 ## Scope and prerequisites
 
-The inventory counts channel identities, conversation drafts, inbound message receipts, calls, jobs, stories, pages, activity events, feedback, quotas, linked accounts and sessions, and matching verification tokens. It lists active Blob objects under this app's current owner paths: `uploads/<channel-user-id>/`, `references/twilio/<job-id>/`, `stories/<job-or-story-id>/`, and `<story-id>/`. It also preserves Twilio Message and Call SIDs for separate provider review. It does **not** inspect old or custom blob key layouts, Blob versions or soft-deleted objects, provider records, backups, logs, browser caches, or copies that a recipient saved.
+The inventory counts channel identities, conversation drafts, inbound message receipts, calls, jobs, stories, pages, activity events, feedback, quotas, linked accounts and sessions, and matching verification tokens. It lists active Blob objects under this app's current owner paths: `uploads/<channel-user-id>/`, `references/twilio/<job-id>/`, `stories/<job-or-story-id>/`, and `<story-id>/`. It also preserves Twilio Message and Call SIDs, stored Dub link IDs, and a stable Dub external ID for every owned story for separate provider review. It does **not** inspect old or custom blob key layouts, Blob versions or soft-deleted objects, orphan links in Dub, other provider records, backups, logs, browser caches, or copies that a recipient saved.
 
 1. Verify the requester's control of the **sender's** phone number or linked browser account through an approved support process. Record a private request ID and the verification method. Do not treat a number merely written in an email as proof of ownership. Phone numbers can change hands, so review whether the requester is entitled to the historical records before deleting every row tied to that number. If an identity is linked to another user or address, stop and review that relationship; the inventory flags it. This procedure does not cover deletion of a separate Google browser-studio account.
 2. Schedule a maintenance window. Disable intake for SMS and Voice on the Twilio number, let active calls finish, pause the ACA queue and recovery Jobs, and confirm no execution is running. Keep them paused until the final checks finish. Twilio webhook retries and Azure Queue messages can otherwise race a deletion. Check the queue and poison queue for this subject's SIDs/job IDs; messages for deleted rows will no longer find those rows, but review any old payloads that contain personal data.
@@ -21,7 +21,7 @@ DELETION_MANIFEST="$(mktemp /private/tmp/twilio-comics-deletion.XXXXXX)"
 node --import tsx scripts/delete-subject-data.ts --sender "$DELETION_SENDER" --json > "$DELETION_MANIFEST"
 ```
 
-Exit code `0` means no active-work or ownership blocker was seen in this snapshot; it is **not** authorization to delete. Exit code `2` writes the manifest but reports blockers. Exit code `1` means the inventory itself failed, including a database or storage listing failure. Resolve every blocker and rerun after intake and workers are paused. Review the counts, exact Blob keys, `providerMessageSids`, `providerCallSids`, user ID, and story/job IDs. The manifest contains identifiers and belongs in restricted storage, never in Git or a shared ticket.
+Exit code `0` means no active-work or ownership blocker was seen in this snapshot; it is **not** authorization to delete. Exit code `2` writes the manifest but reports blockers. Exit code `1` means the inventory itself failed, including a database or storage listing failure. Resolve every blocker and rerun after intake and workers are paused. Review the counts, exact Blob keys, `providerMessageSids`, `providerCallSids`, `dubLinkIds`, `dubExternalIds`, user ID, and story/job IDs. The manifest contains identifiers and belongs in restricted storage, never in Git or a shared ticket.
 
 Search for legacy media URLs outside the listed prefixes in the subject's page, job, and draft records before proceeding. The current app writes media only to the owner paths above, but older deployments or manual uploads may have used other paths. If a matching Blob is outside them, add its **exact key** to the private deletion checklist after verifying ownership. Never delete a shared prefix or another user's Blob by pattern.
 
@@ -55,7 +55,18 @@ done < "$DELETION_KEYS"
 
 Stop on any Azure error. Keep the original manifest and retry only its remaining keys after resolving the error. Deleting Blobs first leaves the database rows available to retry the inventory and PostgreSQL deletion; the affected comic links can be broken during this maintenance window. If Blob soft delete or versioning is enabled, deleting active objects can leave recoverable copies for the configured period. Review the account's [soft delete and version behavior](https://learn.microsoft.com/en-us/azure/storage/blobs/soft-delete-blob-overview) and any backups separately before describing the data as fully erased.
 
-## 3. Delete the app's PostgreSQL rows in one reviewed transaction
+## 3. Remove the subject's Dub redirects
+
+While intake and workers remain paused, list both the Dub link IDs stored on the subject's stories and the external IDs used when links were created:
+
+```sh
+jq -r '.dubLinkIds[]' "$DELETION_MANIFEST"
+jq -r '.dubExternalIds[]' "$DELETION_MANIFEST"
+```
+
+For **every** external ID, look up the Dub link in the verified workspace with [Dub's retrieve-link API](https://dub.co/docs/api-reference/links/retrieve): `GET /links/info?externalId=<exact dubExternalIds value>`. Do this even when no link ID was stored. It catches a link whose API creation succeeded before PostgreSQL saved its ID. Inspect the returned destination, folder, and external ID before removal. Delete **only** matching links through the Dub dashboard or [Dub's delete-link API](https://dub.co/docs/api-reference/links/delete), then verify they no longer redirect. A 404 for a given external ID is expected if no short link was ever created. The inventory still cannot discover provider-only links created outside this app's external-ID convention; search the workspace for the branded `/story/{slug}` destinations if needed. Stop and resolve any ownership mismatch or deletion failure before deleting database rows. Do not reassign a deleted short key to another comic, because an old text or shared copy may still contain it.
+
+## 4. Delete the app's PostgreSQL rows in one reviewed transaction
 
 Save the SQL below as a **local, restricted file outside this repository**, review it against the deployed schema, then run it with `psql` using the sender, `userId`, and exact confirmation from the same manifest. The transaction locks the affected tables, checks ownership and active work again, deletes linked rows in dependency order, and rolls back on error. Keep the Twilio intake and ACA Jobs paused. If a lock times out, do not force it; find the active writer and restart the process from a new manifest.
 
@@ -202,7 +213,7 @@ WHERE id = current_setting('twilio_comics.delete_user_id') AND kind = 'channel';
 COMMIT;
 ```
 
-## 4. Verify and resume
+## 5. Verify and resume
 
 With intake still paused, rerun the inventory and expect zero database counts and zero active Blobs. Also check **every exact Blob key and prefix in the original manifest**: after deleting jobs and stories, a fresh inventory cannot reconstruct those old IDs or discover a leftover orphan image. This command lists any remaining active objects under the original prefixes; an empty output is expected:
 
@@ -214,7 +225,7 @@ jq -r '.blobPrefixes[]' "$DELETION_MANIFEST" | while IFS= read -r prefix; do
 done
 ```
 
-Check the provider SIDs in the original manifest before discarding it. Record only the request ID, verification method, aggregate deleted counts, completion time, and outstanding provider or backup actions in the private support record. Restrict and eventually remove the local manifest, key list, and SQL file.
+Check the provider SIDs and original `dubLinkIds` and `dubExternalIds` in the manifest before discarding it. Confirm the matching Dub redirects are gone as well as the database rows and Blob objects. Record only the request ID, verification method, aggregate deleted counts, completion time, and outstanding provider or backup actions in the private support record. Restrict and eventually remove the local manifest, key list, and SQL file.
 
 Twilio account records are a separate operation. The [Twilio Message resource](https://www.twilio.com/docs/messaging/api/message-resource) supports deleting Message records and associated media; the [Twilio Call resource](https://www.twilio.com/docs/voice/api/call-resource) supports deleting Call records but explicitly does not delete associated recordings or transcription records. Review those resources and any account retention policy using the saved SIDs. Likewise, provider backups and copies held by OpenAI or Azure need their own retention or deletion handling. The app now sends private, no-store headers for media; copies fetched under older deployments' one-year public cache header or saved by a recipient may still remain outside the app.
 

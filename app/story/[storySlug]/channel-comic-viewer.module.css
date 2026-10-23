@@ -160,6 +160,86 @@
   color: var(--paper);
 }
 
+.sharePanel {
+  margin-top: 18px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  padding: clamp(14px, 2vw, 20px);
+  box-shadow: 6px 6px 0 var(--ink);
+}
+
+.sharePanelHeading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 14px;
+}
+
+.sharePanelHeading strong {
+  font-family: var(--font-bangers), Impact, sans-serif;
+  font-size: 27px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.sharePanelHeading span {
+  color: #414d6b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.shareChoices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.shareChoice {
+  min-width: 0;
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 11px;
+  border: 2px solid var(--ink);
+  background: #f8faff;
+  padding: 10px 12px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.shareChoice:hover {
+  background: var(--pale-blue);
+}
+
+.shareChoiceMark {
+  font-size: 20px;
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+}
+
+.shareChoiceText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.shareChoiceText small {
+  color: #414d6b;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
 .actionNotice {
   min-height: 20px;
   margin: 9px 0 0;
@@ -328,6 +408,10 @@
 
   .actionButton {
     flex: 1 1 160px;
+  }
+
+  .shareChoices {
+    grid-template-columns: 1fr;
   }
 
   .reader {

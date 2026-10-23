@@ -30,7 +30,7 @@ export default function PrivacyPage() {
         <h2>Information we handle</h2>
         <ul>
           <li>Your phone number, channel, text messages, and voice conversation transcripts.</li>
-          <li>Comic ideas, prompts, reference photos sent by message or uploaded for a text or call, generated pages, and story links.</li>
+          <li>Comic ideas, prompts, reference photos sent by message or uploaded for a text or call, generated pages, and story links, including short links when enabled.</li>
           <li>Phone verification status and a short-lived browser session when you prepare photos in the browser.</li>
           <li>Message and call identifiers, delivery status, dates, errors, and usage history.</li>
           <li>Google account details and session data if you sign in to the browser studio.</li>
@@ -45,7 +45,9 @@ export default function PrivacyPage() {
           and prevent misuse. The voice channel converts speech to text for the agent; the app
           stores finalized transcript text rather than raw call audio. Twilio handles calling
           and messaging, OpenAI processes comic ideas and images, Azure hosts
-          the app, stores images and jobs, and provides the PostgreSQL database. A browser
+          the app, stores images and jobs, and provides the PostgreSQL database. When short
+          links are enabled, Dub stores redirects to our comic pages and processes visits to
+          those links. A browser
           photo upload is tied to your number only after an SMS verification code succeeds.
           Google is
           used only when you choose to sign in to the browser studio. Authorized app
@@ -61,7 +63,11 @@ export default function PrivacyPage() {
           We do not sell your mobile information or messaging consent, and we do not share
           mobile information or opt-in consent with third parties or affiliates for marketing
           or promotional purposes. Anyone with a story link you share may view that comic.
-          Please avoid sending confidential information or images you do not want in a comic.
+          A short link opens through Dub before reaching the comic page. Choosing a social
+          share option opens the selected platform, which handles your post under its own
+          terms. See <a href="https://dub.co/legal/privacy">Dub&apos;s privacy policy</a> for its
+          handling of link visits. Please avoid sending confidential information or images
+          you do not want in a comic.
         </p>
       </section>
 
@@ -69,7 +75,7 @@ export default function PrivacyPage() {
         <h2>Retention and requests</h2>
         <p>
           We retain messages, voice transcripts, prompts, reference images, comic records,
-          and operational history until we explicitly delete them. We process verified deletion
+          story redirects, and operational history until we explicitly delete them. We process verified deletion
           requests manually. There is no automatic expiration schedule. These records
           remain in the database and storage across app deployments. We handle access and
           deletion requests manually and may need to confirm that you control the phone

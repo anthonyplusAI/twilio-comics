@@ -33,7 +33,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("production readiness", () => {
-  it("checks channel, admin, and photo settings tables before reporting ready", async () => {
+  it("checks channel, admin, photo, and Dub link columns before reporting ready", async () => {
     const response = await GET();
 
     expect(response.status).toBe(200);
@@ -46,6 +46,10 @@ describe("production readiness", () => {
     expect(query).toContain("public.admin_login_attempts");
     expect(query).toContain("public.admin_credentials");
     expect(query).toContain("public.experience_settings");
+    expect(query).toContain("public.stories");
+    expect(query).toContain("dub_key");
+    expect(query).toContain("dub_short_url");
+    expect(query).toContain("dub_link_id");
   });
 
   it("accepts the database admin login after bootstrap credentials are removed", async () => {

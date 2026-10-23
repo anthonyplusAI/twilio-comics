@@ -21,6 +21,7 @@ function storyResult(source: string) {
       title: "The Clockwork Hero",
       description: "A hero finds a strange clock.",
       source,
+      dubShortUrl: "https://twil.io/comic-private-link",
     },
     pages: [
       {
@@ -46,6 +47,7 @@ describe("story page", () => {
         title: string;
         description: string;
         pages: unknown[];
+        shareUrl: string;
       }>;
 
       expect(element.type).toBe(ChannelComicViewer);
@@ -53,6 +55,7 @@ describe("story page", () => {
         title: "The Clockwork Hero",
         description: "A hero finds a strange clock.",
         pages: [{ pageNumber: 1, imageUrl: "https://example.com/page-1.png" }],
+        shareUrl: "https://twil.io/comic-private-link",
       });
       expect(JSON.stringify(element.props)).not.toContain("private user prompt");
       expect(JSON.stringify(element.props)).not.toContain("private-reference");
