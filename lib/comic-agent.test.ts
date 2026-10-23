@@ -35,6 +35,7 @@ describe("advanceComicAgent", () => {
       collected: { prompt: IDEA, style: "manga" },
     });
     expect(result.reply).toContain("CREATE");
+    expect(result.reply).toMatch(/sound right\?\n\nReply CREATE/);
     expect(result.submission).toBeUndefined();
   });
 

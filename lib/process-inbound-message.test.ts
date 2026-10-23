@@ -227,7 +227,9 @@ describe("ordered inbound messaging processor", () => {
     expect(h.channelStoryLink).toHaveBeenCalledExactlyOnceWith({
       storyId, channel: "sms", address: FROM,
     });
-    expect(sends[0].body).toBe(`Your comic is ready. Send CONTINUE or NEW. View it here: ${link}`);
+    expect(sends[0].body).toBe(
+      `Your comic is ready:\n${link}\n\nReply CONTINUE within 14 days for another page, or NEW for a new comic.`,
+    );
     expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
     expect(receipts.SM1.status).toBe("completed");
   });
@@ -253,7 +255,7 @@ describe("ordered inbound messaging processor", () => {
     });
     expect(h.channelStoryLink).not.toHaveBeenCalled();
     expect(sends[0].body).toBe(
-      `Your latest comic from your call is ready. View it here: ${link} Send a new idea to start another by text.`,
+      `Your latest comic from your call is ready:\n${link}\n\nSend a new idea to start another by text.`,
     );
     expect(conversation).toMatchObject({ state: "collecting", activeStoryId: null });
     expect(receipts.SM1.status).toBe("completed");
@@ -372,7 +374,7 @@ describe("ordered inbound messaging processor", () => {
     await processInboundMessage("SM1");
 
     expect(h.channelStoryLink).toHaveBeenCalledOnce();
-    expect(sends[0].body).toMatch(/can't show that comic link.*status.*new/i);
+    expect(sends[0].body).toMatch(/can't show that comic link[\s\S]*\n\nReply STATUS[\s\S]*NEW/i);
     expect(sends[0].body).not.toMatch(/comic is ready/i);
     expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
   });
@@ -406,8 +408,8 @@ describe("ordered inbound messaging processor", () => {
 
     await processInboundMessage("SM2");
 
-    expect(sends[0].body).toMatch(/^Twilio Comics: Draft: A robot detective/);
-    expect(sends[0].body).toMatch(/HELP.*STOP.*Msg & data rates may apply/i);
+    expect(sends[0].body).toMatch(/^Twilio Comics\n\nDraft: A robot detective/);
+    expect(sends[0].body).toMatch(/\n\nReply HELP.*STOP.*Msg & data rates may apply/i);
     expect(sends[1].body).toBe("Draft: Make it manga");
   });
 
@@ -1008,7 +1010,7 @@ describe("ordered inbound messaging processor", () => {
     expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
     expect(conversation.state).toBe("confirming");
     expect(conversation.collected).toEqual({ prompt: "Robot detective", style: "noir" });
-    expect(sends[0].body).toMatch(/couldn't use that attachment.*idea is saved.*send a photo.*reply CREATE/i);
+    expect(sends[0].body).toMatch(/couldn't use that attachment.*idea is saved\.\n\nSend a photo, or reply CREATE/i);
   });
 
   it("does not invite a new idea while generation is running after an unsupported attachment", async () => {
@@ -1022,7 +1024,7 @@ describe("ordered inbound messaging processor", () => {
 
     expect(h.advanceComicAgent).not.toHaveBeenCalled();
     expect(conversation.state).toBe("generating");
-    expect(sends[0].body).toMatch(/couldn't use that attachment.*still creating.*STATUS/i);
+    expect(sends[0].body).toMatch(/couldn't use that attachment.*still creating[\s\S]*\n\nReply STATUS/i);
     expect(sends[0].body).not.toMatch(/send a photo or text your comic idea/i);
   });
 
@@ -1043,7 +1045,7 @@ describe("ordered inbound messaging processor", () => {
     expect(h.advanceComicAgent).toHaveBeenCalledWith(expect.anything(), {
       text: "A robot detective", channel: "sms", imageUrls: [photo],
     });
-    expect(sends[0].body).toMatch(/reply CREATE to approve.*skipped the non-photo attachment/i);
+    expect(sends[0].body).toMatch(/reply CREATE to approve\.\n\nI skipped the non-photo attachment/i);
     expect(conversation.collected).toMatchObject({
       characterImageUrls: [photo],
     });

@@ -62,7 +62,9 @@ export default function PrivacyPage() {
           We share data with the service providers named above to provide the comic service.
           We do not sell your mobile information or messaging consent, and we do not share
           mobile information or opt-in consent with third parties or affiliates for marketing
-          or promotional purposes. Anyone with a story link you share may view that comic.
+          or promotional purposes. Anyone who knows or guesses a five-digit short link can
+          view its comic, including likenesses generated from reference photos. Please treat
+          these comics as public.
           A short link opens through Dub before reaching the comic page. Choosing a social
           share option opens the selected platform, which handles your post under its own
           terms. See <a href="https://dub.co/legal/privacy">Dub&apos;s privacy policy</a> for its

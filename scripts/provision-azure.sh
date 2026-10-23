@@ -19,6 +19,7 @@ ACA_ENVIRONMENT="${ACA_ENVIRONMENT:-cae-twilio-comics}"
 ACA_NAME="${ACA_NAME:-twilio-comics}"
 ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation}"
 ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery}"
+GENERATION_JOB_POLLING_INTERVAL=5
 # The migration Job is created later by provision-postgres-roles.sh. A second
 # foundation run gives the deployment principal access once that Job exists.
 ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-}"
@@ -353,7 +354,7 @@ if ! az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE
   az containerapp job create --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
     --environment "$ACA_ENVIRONMENT" --trigger-type Event \
     --replica-timeout 900 --replica-retry-limit 0 \
-    --replica-completion-count 1 --parallelism 1 --polling-interval 15 \
+    --replica-completion-count 1 --parallelism 1 --polling-interval "$GENERATION_JOB_POLLING_INTERVAL" \
     --min-executions 0 --max-executions 1 \
     --scale-rule-name generation-queue --scale-rule-type azure-queue \
     --scale-rule-metadata "accountName=${STORAGE_ACCOUNT}" 'cloud=AzurePublicCloud' \
@@ -363,6 +364,21 @@ if ! az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE
     --command pnpm --args start:worker \
     --mi-user-assigned "$WORKER_ID" "$PULL_ID" --env-vars "${WORKER_ENV[@]}" \
     --tags "${TAGS[@]}" --output none
+else
+  existing_generation_job="$(az containerapp job show --name "$ACA_JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" --output json)"
+  jq -e '.properties.configuration.triggerType == "Event"' \
+    <<< "$existing_generation_job" >/dev/null \
+    || die "Existing generation Job '$ACA_JOB_NAME' is not event-triggered. Inspect its configuration before rerunning."
+  current_polling_interval="$(jq -r \
+    '.properties.configuration.eventTriggerConfig.scale.pollingInterval // empty' \
+    <<< "$existing_generation_job")"
+  if [[ "$current_polling_interval" != "$GENERATION_JOB_POLLING_INTERVAL" ]]; then
+    # This flag changes only the event poll cadence; preserve the image, queue
+    # rule, scaling limits, secrets, and all other settings on the live Job.
+    az containerapp job update --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+      --polling-interval "$GENERATION_JOB_POLLING_INTERVAL" --output none
+  fi
 fi
 ensure_workload_identity job "$ACA_JOB_NAME" "$WORKER_ID"
 ensure_workload_identity job "$ACA_JOB_NAME" "$PULL_ID"

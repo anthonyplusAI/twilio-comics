@@ -319,7 +319,7 @@ describe("sendFailedMmsTextFallback", () => {
       channel: "sms",
       to: "+15551112222",
       from: "+15550000000",
-      body: 'Your comic "Dragon Story" is ready. View it here: https://comics.example.com/story/dragon',
+      body: 'Your comic "Dragon Story" is ready:\nhttps://comics.example.com/story/dragon',
       validityPeriod: 36000,
       statusCallback: `https://comics.example.com/api/twilio/status?jobId=${jobId}&fallback=1#rc=3&rp=5xx,ct,rt`,
     });
@@ -352,7 +352,7 @@ describe("sendFailedMmsTextFallback", () => {
 
     await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
     expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
-      body: 'Your comic "Dragon Story" is ready. View it here: https://twil.io/comic-33',
+      body: 'Your comic "Dragon Story" is ready:\nhttps://twil.io/comic-33',
     }));
   });
 

@@ -60,7 +60,8 @@ export default function TermsPage() {
         <p>
           Send only ideas and reference images you have the right to use. AI-generated comics
           can contain mistakes or unexpected details; review a result before sharing it.
-          Anyone you give a story link to may view that comic.
+          Anyone who knows or guesses a five-digit short link may view that comic, including
+          likenesses generated from reference photos.
         </p>
       </section>
 

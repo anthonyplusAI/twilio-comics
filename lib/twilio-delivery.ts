@@ -394,7 +394,7 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
     const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!baseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
     const comicUrl = savedHttpsShortLink(story.dubShortUrl) ?? `${baseUrl}/story/${story.slug}`;
-    const body = `Your comic "${story.title.slice(0, 100)}" is ready. View it here: ${comicUrl}`;
+    const body = `Your comic "${story.title.slice(0, 100)}" is ready:\n${comicUrl}`;
     const validityPeriod = resultDeliveryValiditySeconds(job);
     if (validityPeriod === null) {
       await suppressExpiredTextFallback(jobId);

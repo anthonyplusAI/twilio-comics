@@ -2,14 +2,23 @@ import { type NextRequest } from "next/server";
 import { recordActivityEvent } from "@/lib/activity-events";
 import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { sendInboundMessage } from "@/lib/generation-queue";
-import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
-import { recordInboundMessage } from "@/lib/twilio-events";
+import { COMIC_START_MESSAGE, getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
+import {
+  ConversationLeaseBusyError,
+  processInboundMessage,
+} from "@/lib/process-inbound-message";
+import { getOldestOpenInboundMessage, recordInboundMessage } from "@/lib/twilio-events";
 import { parseInboundMessage, validateTwilioSignature } from "@/lib/twilio";
 import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
 
 export const runtime = "nodejs";
 
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+// Leave time for a durable queue publish before Twilio's 15-second webhook
+// read timeout. An inline turn that runs longer keeps its sender lease, while
+// the queued copy waits and then observes the completed receipt.
+const INLINE_WEBHOOK_BUDGET_MS = 8_000;
+const FAST_SMS_COMMANDS = new Set(["NEW", "RESET", "RESTART", "DISCARD", "CONTINUE", "STATUS"]);
 
 // Twilio owns these control keywords and may already have sent its own reply.
 // CANCEL in particular opts an SMS recipient out, so the comic command is DISCARD.
@@ -24,7 +33,45 @@ function emptyTwiml(): Response {
   });
 }
 
+function normalizedCommand(text: string): string {
+  return text.trim().replace(/[.!?,;:…。！？]+$/u, "").trim().toUpperCase();
+}
+
+function canProcessInline(body: string, channel: string, mediaCount: number): boolean {
+  if (channel !== "sms" || mediaCount !== 0) return false;
+  const command = normalizedCommand(body);
+  return command === normalizedCommand(COMIC_START_MESSAGE) || FAST_SMS_COMMANDS.has(command);
+}
+
+async function processWithDeadline(messageSid: string, remainingMs: number): Promise<boolean> {
+  if (remainingMs <= 0) return false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  // A timed-out turn is intentionally not cancelled: cancelling between the
+  // Twilio API accepting an SMS and its receipt checkpoint could resend it.
+  // The promise handles late failures after the webhook returns.
+  const processing = processInboundMessage(messageSid).then(
+    () => true,
+    (error: unknown) => {
+      if (!(error instanceof ConversationLeaseBusyError)) {
+        console.error("Inline SMS processing failed; queueing its receipt", error);
+      }
+      return false;
+    },
+  );
+  try {
+    return await Promise.race([
+      processing,
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export async function POST(request: NextRequest): Promise<Response> {
+  const startedAt = Date.now();
   const form = await readTwilioWebhookForm(request);
   if (!form.ok) return form.response;
   const { params } = form;
@@ -126,7 +173,23 @@ export async function POST(request: NextRequest): Promise<Response> {
     }).catch((error) => console.error("Inbound activity history failed", error));
 
     if (receipt.shouldEnqueue) {
-      await sendInboundMessage(inbound.messageSid);
+      let completedInline = false;
+      if (canProcessInline(inbound.body, inbound.channel, inbound.mediaUrls.length)) {
+        try {
+          // Do not pull an earlier arbitrary idea into the public webhook.
+          // The worker can process that sender's receipts in order instead.
+          const oldest = await getOldestOpenInboundMessage(inbound.channel, inbound.from);
+          if (oldest?.messageSid === inbound.messageSid) {
+            completedInline = await processWithDeadline(
+              inbound.messageSid,
+              INLINE_WEBHOOK_BUDGET_MS - (Date.now() - startedAt),
+            );
+          }
+        } catch (error) {
+          console.error("Inline SMS readiness check failed; queueing its receipt", error);
+        }
+      }
+      if (!completedInline) await sendInboundMessage(inbound.messageSid);
     }
     return emptyTwiml();
   } catch (error) {

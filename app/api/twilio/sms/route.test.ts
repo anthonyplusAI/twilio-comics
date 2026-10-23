@@ -5,6 +5,8 @@ const h = vi.hoisted(() => ({
   validateTwilioSignature: vi.fn(),
   recordInboundMessage: vi.fn(),
   sendInboundMessage: vi.fn(),
+  getOldestOpenInboundMessage: vi.fn(),
+  processInboundMessage: vi.fn(),
   recordActivityEvent: vi.fn(),
   getOrCreateChannelIdentity: vi.fn(),
 }));
@@ -18,12 +20,17 @@ vi.mock("@/lib/twilio", async (importOriginal) => {
 });
 vi.mock("@/lib/twilio-events", () => ({
   recordInboundMessage: h.recordInboundMessage,
+  getOldestOpenInboundMessage: h.getOldestOpenInboundMessage,
   claimInboundMessage: vi.fn().mockResolvedValue({ claimed: true }),
   completeInboundMessage: vi.fn().mockResolvedValue(undefined),
   releaseInboundMessage: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/generation-queue", () => ({
   sendInboundMessage: h.sendInboundMessage,
+}));
+vi.mock("@/lib/process-inbound-message", () => ({
+  processInboundMessage: h.processInboundMessage,
+  ConversationLeaseBusyError: class ConversationLeaseBusyError extends Error {},
 }));
 vi.mock("@/lib/activity-events", () => ({
   recordActivityEvent: h.recordActivityEvent,
@@ -53,11 +60,16 @@ beforeEach(() => {
   h.validateTwilioSignature.mockReturnValue(true);
   h.recordInboundMessage.mockResolvedValue({ shouldEnqueue: true });
   h.sendInboundMessage.mockResolvedValue(undefined);
+  h.getOldestOpenInboundMessage.mockResolvedValue(null);
+  h.processInboundMessage.mockResolvedValue(undefined);
   h.recordActivityEvent.mockResolvedValue(undefined);
   h.getOrCreateChannelIdentity.mockResolvedValue({ userId: "twilio-user" });
 });
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
 
 function request(pathname: string, form = "MessageSid=SM123&From=%2B15551112222&To=%2B15553334444&Body=A+robot+detective") {
   return new NextRequest(`https://internal.example.com${pathname}`, {
@@ -120,6 +132,120 @@ describe("Twilio messaging webhook", () => {
       content: "A robot detective",
       userId: "twilio-user",
     }));
+  });
+
+  it("processes the prefilled SMS opener on the warm web app without starting a queue job", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-start" });
+
+    const response = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-start&From=%2B15551112222&To=%2B15553334444&Body=Turn+me+into+a+comic%21",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(h.getOldestOpenInboundMessage).toHaveBeenCalledWith("sms", "+15551112222");
+    expect(h.processInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-start");
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(["NEW", "STATUS", "CONTINUE"])(
+    "processes the deterministic %s command without waiting for a queue job",
+    async (command) => {
+      h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-command" });
+
+      const response = await POST(request(
+        "/api/twilio/sms",
+        `MessageSid=SM-command&From=%2B15551112222&To=%2B15553334444&Body=${command}`,
+      ));
+
+      expect(response.status).toBe(200);
+      expect(h.processInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-command");
+      expect(h.sendInboundMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a later command queued behind an earlier unprocessed idea", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-earlier" });
+
+    const response = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-later&From=%2B15551112222&To=%2B15553334444&Body=NEW",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(h.processInboundMessage).not.toHaveBeenCalled();
+    expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-later");
+  });
+
+  it("keeps CREATE and photo messages out of the inline fast path", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-command" });
+
+    const createResponse = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-command&From=%2B15551112222&To=%2B15553334444&Body=CREATE",
+    ));
+    const photoResponse = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-photo&From=%2B15551112222&To=%2B15553334444&Body=Turn+me+into+a+comic%21&NumMedia=1&MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Fphoto&MediaContentType0=image%2Fjpeg",
+    ));
+
+    expect(createResponse.status).toBe(200);
+    expect(photoResponse.status).toBe(200);
+    expect(h.processInboundMessage).not.toHaveBeenCalled();
+    expect(h.getOldestOpenInboundMessage).not.toHaveBeenCalled();
+    expect(h.sendInboundMessage.mock.calls).toEqual([["SM-command"], ["SM-photo"]]);
+  });
+
+  it("queues a saved opener if inline processing fails", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-start" });
+    h.processInboundMessage.mockRejectedValue(new Error("Twilio temporarily unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const response = await POST(request(
+        "/api/twilio/sms",
+        "MessageSid=SM-start&From=%2B15551112222&To=%2B15553334444&Body=Turn+me+into+a+comic%21",
+      ));
+
+      expect(response.status).toBe(200);
+      expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-start");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("queues a slow inline opener before Twilio's webhook timeout", async () => {
+    vi.useFakeTimers();
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-start" });
+    let finishProcessing: (() => void) | undefined;
+    h.processInboundMessage.mockReturnValue(new Promise<void>((resolve) => {
+      finishProcessing = resolve;
+    }));
+
+    const pendingResponse = POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-start&From=%2B15551112222&To=%2B15553334444&Body=Turn+me+into+a+comic%21",
+    ));
+    await vi.advanceTimersByTimeAsync(8_001);
+    const response = await pendingResponse;
+
+    expect(response.status).toBe(200);
+    expect(h.processInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-start");
+    expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-start");
+    finishProcessing?.();
+  });
+
+  it("does not resend or queue a completed duplicate opener", async () => {
+    h.recordInboundMessage.mockResolvedValue({ shouldEnqueue: false });
+
+    const response = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-start&From=%2B15551112222&To=%2B15553334444&Body=Turn+me+into+a+comic%21",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(h.processInboundMessage).not.toHaveBeenCalled();
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
   });
 
   it("keeps WhatsApp image metadata with the durable receipt", async () => {

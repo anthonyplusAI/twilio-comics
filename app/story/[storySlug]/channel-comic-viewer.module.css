@@ -116,7 +116,7 @@
 }
 
 .actions {
-  margin-top: 26px;
+  margin: 0;
 }
 
 .actionButtons {
@@ -249,14 +249,14 @@
 }
 
 .linkNotice {
-  margin: 2px 0 0;
+  margin: 14px 0 0;
   color: #414d6b;
   font-size: 13px;
 }
 
 .reader {
   background: #f3f4f7;
-  padding: clamp(28px, 5vw, 64px) 20px clamp(44px, 7vw, 96px);
+  padding: clamp(28px, 5vw, 64px) 20px clamp(28px, 4vw, 48px);
 }
 
 .pageStack {
@@ -307,6 +307,16 @@
 
 .emptyState p {
   margin: 9px 0 0;
+}
+
+.actionSection {
+  border-top: 3px solid var(--ink);
+  padding: clamp(28px, 5vw, 48px) 20px;
+}
+
+.actionInner {
+  max-width: 780px;
+  margin: 0 auto;
 }
 
 .makeAnother {

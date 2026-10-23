@@ -34,8 +34,8 @@ const CONVERSATION_LEASE_SECONDS = 5 * 60;
 const MAX_TURNS_PER_RUN = 12;
 const MAX_AGENT_ATTEMPTS = 3;
 const MAX_DAILY_MESSAGE_TURNS = 100;
-const INITIAL_SMS_PREFIX = "Twilio Comics: ";
-const INITIAL_SMS_SUFFIX = " Reply HELP for help, STOP to opt out. Msg & data rates may apply.";
+const INITIAL_SMS_PREFIX = "Twilio Comics\n\n";
+const INITIAL_SMS_SUFFIX = "\n\nReply HELP for help; STOP to opt out. Msg & data rates may apply.";
 const DAILY_LIMIT_REPLY =
   `You've reached the daily message limit of 100. Your comic draft is saved for ${CONVERSATION_RESUME_DAYS} days; try again tomorrow.`;
 const AGENT_TURN_LIMIT_REPLY =
@@ -45,11 +45,11 @@ const QUOTA_REPLY =
 const CAPACITY_REPLY =
   `Today's comic studio is full. Your draft is saved for ${CONVERSATION_RESUME_DAYS} days; please try again tomorrow.`;
 const GENERATION_CHECKING_REPLY =
-  "I'm checking your comic request. If it starts, I'll text the result here. You can send STATUS to check later.";
+  "I'm checking your comic request. If it starts, I'll text the result here.\n\nReply STATUS to check later.";
 const GENERATION_FAILURE_REPLY =
-  "I couldn't start your comic yet. Your draft is saved; reply CREATE to try again.";
+  "I couldn't start your comic yet. Your draft is saved.\n\nReply CREATE to try again.";
 const AGENT_FAILURE_REPLY =
-  "Sorry, I couldn't process that message. Your saved draft is unchanged. Please send it again or send NEW to start over.";
+  "Sorry, I couldn't process that message. Your saved draft is unchanged.\n\nSend it again, or reply NEW to start over.";
 const UNSUPPORTED_ATTACHMENT_REPLY =
   "I couldn't use that attachment. Please send a photo or text your comic idea.";
 const SKIPPED_ATTACHMENT_NOTICE =
@@ -79,10 +79,10 @@ function hasNonImageAttachment(message: StoredInboundMessage): boolean {
 
 function unsupportedAttachmentReply(state: string): string {
   if (state === "generating") {
-    return "I couldn't use that attachment. I'm still creating your comic; send STATUS for an update.";
+    return "I couldn't use that attachment. I'm still creating your comic.\n\nReply STATUS for an update.";
   }
   if (state === "confirming") {
-    return "I couldn't use that attachment. Your idea is saved; send a photo or reply CREATE.";
+    return "I couldn't use that attachment. Your idea is saved.\n\nSend a photo, or reply CREATE.";
   }
   if (state === "done") {
     return "I couldn't use that attachment. Send a photo or text a new comic idea.";
@@ -221,7 +221,7 @@ async function processOneMessage(
               }
             }
             if (unsupportedAttachment) {
-              replyBody = `${replyBody.trim()} ${SKIPPED_ATTACHMENT_NOTICE}`.trim();
+              replyBody = `${replyBody.trim()}\n\n${SKIPPED_ATTACHMENT_NOTICE}`.trim();
             }
             submission = advance.action === "submit" ? advance.submission || null : null;
             collectedAfterCheckpoint = submission
@@ -270,12 +270,12 @@ async function processOneMessage(
           ) ? latest : null;
           if (eligibleLatest) {
             if (nextState === "done" && activeStoryIdAfterCheckpoint === eligibleLatest.storyId) {
-              replyBody = `${replyBody} View it here: ${eligibleLatest.link}`;
+              replyBody = `Your comic is ready:\n${eligibleLatest.link}\n\nReply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`;
             } else if (nextState === "confirming") {
-              replyBody = `${replyBody} Your latest completed comic: ${eligibleLatest.link}`;
+              replyBody = `${replyBody}\n\nYour latest completed comic:\n${eligibleLatest.link}`;
             } else {
               const fromCall = eligibleLatest.source === "voice" ? " from your call" : "";
-              replyBody = `Your latest comic${fromCall} is ready. View it here: ${eligibleLatest.link} Send a new idea to start another by text.`;
+              replyBody = `Your latest comic${fromCall} is ready:\n${eligibleLatest.link}\n\nSend a new idea to start another by text.`;
             }
           } else if (completedStoryStatusId) {
             const link = await channelStoryLink({
@@ -284,8 +284,8 @@ async function processOneMessage(
               address: message.fromAddress,
             });
             replyBody = link
-              ? `${replyBody} View it here: ${link}`
-              : "I can't show that comic link right now. Send STATUS to try again later, or NEW to start another story.";
+              ? `Your comic is ready:\n${link}\n\nReply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`
+              : "I can't show that comic link right now.\n\nReply STATUS to try again later, or NEW to start another story.";
           }
         }
       }
