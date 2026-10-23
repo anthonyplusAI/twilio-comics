@@ -420,12 +420,17 @@
 .settingsSuccess { border-left: 4px solid #147958; color: #0d6047; background: #e8f8f1; }
 .settingsError { border-left: 4px solid #be243a; color: #842237; background: #ffe9ed; }
 .settingsPanel { border: 1px solid var(--line); border-top: 5px solid var(--twilio-red); border-radius: 7px; background: white; box-shadow: 0 12px 35px rgba(6, 27, 63, .06); }
+.credentialsPanel { margin-bottom: 24px; }
 .settingsPanelHeading { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding: 28px 30px 24px; border-bottom: 1px solid var(--line); }
 .settingsPanelHeading h2 { margin: 0; font-family: var(--font-space-grotesk), Arial, sans-serif; font-size: 1.45rem; letter-spacing: -.035em; }
 .settingsPanelHeading p { max-width: 650px; margin: 7px 0 0; color: var(--muted); font-size: .88rem; line-height: 1.5; }
 .settingsPanelHeading a { display: inline-flex; align-items: center; gap: 5px; padding-top: 5px; color: var(--twilio-blue); font-size: .82rem; font-weight: 750; text-decoration: none; white-space: nowrap; }
 .settingsPanelHeading a:hover { text-decoration: underline; text-underline-offset: 4px; }
 .settingsForm { padding: 25px 30px 30px; }
+.credentialFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 22px; }
+.credentialField { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--navy); font-size: .83rem; font-weight: 750; }
+.credentialField input { width: 100%; min-height: 46px; padding: 0 12px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font: inherit; font-weight: 500; }
+.credentialField small { color: var(--muted); font-size: .73rem; font-weight: 500; }
 .settingsForm fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .settingsLegend { margin: 0 0 14px; color: var(--navy); font-size: .81rem; font-weight: 800; }
 .settingsToggleCard { display: grid; grid-template-columns: 22px 36px minmax(0, 1fr); align-items: start; gap: 12px; padding: 20px; border: 1px solid #bfcce0; border-radius: 6px; background: #f9fbff; cursor: pointer; }
@@ -458,6 +463,7 @@
 .loginCard h1 { margin: 16px 0 0; font-family: var(--font-space-grotesk), Arial, sans-serif; font-size: 2rem; letter-spacing: -.055em; }
 .loginIntro { margin: 9px 0 25px; color: var(--muted); font-size: .88rem; line-height: 1.55; }
 .loginError { padding: 11px 13px; border-left: 4px solid #be243a; border-radius: 4px; color: #842237; background: #ffe9ed; font-size: .8rem; line-height: 1.4; }
+.loginSuccess { padding: 11px 13px; border-left: 4px solid #147958; border-radius: 4px; color: #0d6047; background: #e8f8f1; font-size: .8rem; line-height: 1.4; }
 .loginForm { display: flex; flex-direction: column; }
 .loginForm label { margin: 0 0 7px; color: var(--navy); font-size: .78rem; font-weight: 800; }
 .loginForm input { height: 46px; margin-bottom: 19px; padding: 0 12px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font-size: .9rem; }
@@ -504,6 +510,7 @@
   .profileIdentityList { min-width: 0; }
   .settingsPanelHeading { flex-direction: column; gap: 8px; padding: 23px 19px; }
   .settingsForm { padding: 22px 19px 25px; }
+  .credentialFields { grid-template-columns: 1fr; }
   .settingsActions { align-items: start; flex-direction: column; }
 }
 

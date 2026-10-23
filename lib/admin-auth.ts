@@ -12,6 +12,7 @@ const HASH_LENGTH = 64;
 const SALT_LENGTH = 32;
 const MAX_FAILED_LOGINS = 5;
 const MAX_UNKNOWN_FAILED_LOGINS = 50;
+const ROTATION_ATTEMPT_KEY = "admin:credential-rotation";
 export const ADMIN_SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 const credentialSchema = z.object({
@@ -19,7 +20,22 @@ const credentialSchema = z.object({
   password: z.string().min(1).max(1024),
 });
 
-type AdminUser = { id: string; name: string; role: "admin" };
+const rotationSchema = z.object({
+  currentPassword: z.string().min(1).max(1024),
+  newUsername: z.string().regex(/^[A-Za-z0-9._-]{3,64}$/),
+  newPassword: z.string().min(16).max(1024)
+    .refine((password) => password.trim().length > 0 &&
+      !/[\p{C}\p{Zl}\p{Zp}]/u.test(password)),
+});
+
+type AdminUser = {
+  id: string;
+  name: string;
+  role: "admin";
+  adminCredentialVersion: string;
+};
+
+type ActiveAdminCredentials = { username: string; passwordHash: string; fromDatabase: boolean };
 
 function rowsOf<T>(result: unknown): T[] {
   return (result as { rows?: T[] }).rows ?? (result as T[]);
@@ -39,7 +55,7 @@ function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
   });
 }
 
-/** Create a salt per password. Store the encoded value as ADMIN_PASSWORD_HASH. */
+/** Create a salt per password. Persist only the encoded hash. */
 export async function hashAdminPassword(password: string): Promise<string> {
   if (password.length < 16 || password.length > 1024) {
     throw new Error("Administrator password must be 16 to 1024 characters");
@@ -114,32 +130,27 @@ function accountAttemptKey(configuredUsername: string, sourceId: string): string
   return `admin:account:${accountId}:${sourceId}`;
 }
 
-async function loginIsBlocked(key: string): Promise<boolean> {
+async function reserveCredentialAttempt(key: string, limit: number): Promise<boolean> {
+  // Reserve before password verification. PostgreSQL serializes upserts for this
+  // key, so simultaneous requests cannot all pass an earlier blocked check.
   const result = await db.execute(sql`
-    SELECT blocked_until
-    FROM admin_login_attempts
-    WHERE key = ${key} AND blocked_until > NOW()
-    LIMIT 1
-  `);
-  return rowsOf(result).length > 0;
-}
-
-async function recordFailedLogin(key: string, limit: number): Promise<void> {
-  // The conflict update serializes failed attempts across every ACA replica.
-  await db.execute(sql`
     INSERT INTO admin_login_attempts
       (key, window_started_at, failed_count, blocked_until, updated_at)
     VALUES (${key}, NOW(), 1, NULL, NOW())
     ON CONFLICT (key) DO UPDATE SET
       window_started_at = CASE
+        WHEN admin_login_attempts.blocked_until > NOW()
+          THEN admin_login_attempts.window_started_at
         WHEN admin_login_attempts.window_started_at <= NOW() - INTERVAL '15 minutes'
           THEN NOW()
         ELSE admin_login_attempts.window_started_at
       END,
       failed_count = CASE
+        WHEN admin_login_attempts.blocked_until > NOW()
+          THEN ${limit + 1}
         WHEN admin_login_attempts.window_started_at <= NOW() - INTERVAL '15 minutes'
           THEN 1
-        ELSE admin_login_attempts.failed_count + 1
+        ELSE LEAST(admin_login_attempts.failed_count + 1, ${limit + 1})
       END,
       blocked_until = CASE
         WHEN admin_login_attempts.blocked_until > NOW()
@@ -151,11 +162,89 @@ async function recordFailedLogin(key: string, limit: number): Promise<void> {
         ELSE NULL
       END,
       updated_at = NOW()
+    RETURNING failed_count
   `);
+  const count = rowsOf<{ failed_count: number }>(result)[0]?.failed_count;
+  return typeof count === "number" && Number.isInteger(count) && count >= 1 && count <= limit;
 }
 
 async function clearFailedLogins(key: string): Promise<void> {
   await db.execute(sql`DELETE FROM admin_login_attempts WHERE key = ${key}`);
+}
+
+/** A database row is authoritative once created, even if Azure env secrets change. */
+async function getActiveAdminCredentials(): Promise<ActiveAdminCredentials | null> {
+  const result = await db.execute(sql`
+    SELECT username, password_hash
+    FROM admin_credentials
+    WHERE id = 1
+    LIMIT 1
+  `);
+  const row = rowsOf<{ username: string; password_hash: string }>(result)[0];
+  if (row) {
+    return {
+      username: row.username,
+      passwordHash: row.password_hash,
+      fromDatabase: true,
+    };
+  }
+
+  const username = process.env.ADMIN_USERNAME?.trim();
+  const passwordHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+  return username && passwordHash
+    ? { username, passwordHash, fromDatabase: false }
+    : null;
+}
+
+/** Called on each admin JWT use; no cache so rotation invalidates all replicas. */
+export async function getActiveAdminPasswordHash(): Promise<string | null> {
+  return (await getActiveAdminCredentials())?.passwordHash ?? null;
+}
+
+export type RotateAdminCredentialsResult =
+  | { ok: true }
+  | { ok: false; reason: "invalid-current" | "rate-limited" | "conflict" | "invalid-input" | "password-reused" };
+
+/** The admin server action checks the signed session before calling this. */
+export async function rotateAdminCredentials(
+  input: { currentPassword: string; newUsername: string; newPassword: string },
+): Promise<RotateAdminCredentialsResult> {
+  const parsed = rotationSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, reason: "invalid-input" };
+  if (!await reserveCredentialAttempt(ROTATION_ATTEMPT_KEY, MAX_FAILED_LOGINS)) {
+    return { ok: false, reason: "rate-limited" };
+  }
+
+  const active = await getActiveAdminCredentials();
+  if (!active || !await verifyAdminPassword(parsed.data.currentPassword, active.passwordHash)) {
+    return { ok: false, reason: "invalid-current" };
+  }
+
+  await clearFailedLogins(ROTATION_ATTEMPT_KEY);
+  if (parsed.data.newPassword === parsed.data.currentPassword) {
+    return { ok: false, reason: "password-reused" };
+  }
+  const newHash = await hashAdminPassword(parsed.data.newPassword);
+  const result = active.fromDatabase
+    ? await db.execute(sql`
+      UPDATE admin_credentials
+      SET username = ${parsed.data.newUsername},
+          password_hash = ${newHash},
+          updated_at = NOW()
+      WHERE id = 1
+        AND username = ${active.username}
+        AND password_hash = ${active.passwordHash}
+      RETURNING id
+    `)
+    : await db.execute(sql`
+      INSERT INTO admin_credentials (id, username, password_hash, created_at, updated_at)
+      VALUES (1, ${parsed.data.newUsername}, ${newHash}, NOW(), NOW())
+      ON CONFLICT (id) DO NOTHING
+      RETURNING id
+    `);
+
+  if (rowsOf(result).length === 0) return { ok: false, reason: "conflict" };
+  return { ok: true };
 }
 
 /** Credentials provider callback. No administrator row is stored in users. */
@@ -164,33 +253,33 @@ export async function authenticateAdminCredentials(
   request?: Request,
 ): Promise<AdminUser | null> {
   const parsed = credentialSchema.safeParse(credentials);
-  const configuredUsername = process.env.ADMIN_USERNAME?.trim();
-  const encodedHash = process.env.ADMIN_PASSWORD_HASH?.trim();
-  if (!parsed.success || !configuredUsername || !encodedHash) return null;
+  if (!parsed.success) return null;
 
   const { username, password } = parsed.data;
   const sourceId = trustedSourceId(request);
   if (!sourceId) return null;
+  const active = await getActiveAdminCredentials();
+  if (!active) return null;
+  const configuredUsername = active.username;
+  const encodedHash = active.passwordHash;
   const usernameValid = usernameMatches(username, configuredUsername);
   const attemptKey = usernameValid
     ? accountAttemptKey(configuredUsername, sourceId)
     : `admin:unknown:${sourceId}`;
-  if (await loginIsBlocked(attemptKey)) return null;
+  if (!await reserveCredentialAttempt(
+    attemptKey,
+    usernameValid ? MAX_FAILED_LOGINS : MAX_UNKNOWN_FAILED_LOGINS,
+  )) return null;
 
   const passwordValid = await verifyAdminPassword(password, encodedHash);
-  if (!passwordValid || !usernameValid) {
-    await recordFailedLogin(
-      attemptKey,
-      usernameValid ? MAX_FAILED_LOGINS : MAX_UNKNOWN_FAILED_LOGINS,
-    );
-    return null;
-  }
+  if (!passwordValid || !usernameValid) return null;
 
   await clearFailedLogins(attemptKey);
   return {
     id: `admin:${createHash("sha256").update(normalizedUsername(configuredUsername)).digest("hex").slice(0, 32)}`,
     name: configuredUsername,
     role: "admin",
+    adminCredentialVersion: adminCredentialVersion(encodedHash),
   };
 }
 

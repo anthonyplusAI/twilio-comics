@@ -18,10 +18,10 @@ export const metadata: Metadata = {
 export default async function AdminLoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; changed?: string }>;
 }) {
   if (isAdminSession(await auth())) redirect("/admin");
-  const { error } = await searchParams;
+  const { error, changed } = await searchParams;
 
   return (
     <main className={styles.loginShell}>
@@ -39,6 +39,10 @@ export default async function AdminLoginPage({
         {error ? (
           <p className={styles.loginError} role="alert">
             Sign in failed. Check your credentials or try again later.
+          </p>
+        ) : changed === "1" ? (
+          <p className={styles.loginSuccess} role="status">
+            Admin login updated. Sign in with your new username and password.
           </p>
         ) : null}
         <form action={adminSignIn} className={styles.loginForm}>

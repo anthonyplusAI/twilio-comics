@@ -18,44 +18,47 @@
 .intro {
   border-bottom: 3px solid var(--ink);
   background: var(--pale-blue);
-  padding: 28px clamp(24px, 6vw, 104px) 31px;
+  padding: 58px clamp(24px, 5vw, 86px) 62px;
 }
 
 .introInner {
-  max-width: 1100px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 350px);
+  align-items: end;
+  gap: 48px;
+  max-width: 1380px;
   margin: 0 auto;
 }
 
 .intro h1 {
   margin: 0;
   font-family: var(--font-bangers), Impact, sans-serif;
-  font-size: clamp(45px, 5.5vw, 68px);
+  font-size: clamp(66px, 6.4vw, 96px);
   font-weight: 400;
   line-height: 0.95;
   text-wrap: balance;
 }
 
 .introCopy {
-  max-width: 650px;
-  margin: 9px 0 0;
-  font-size: clamp(15px, 1.4vw, 18px);
+  margin: 0 0 7px;
+  font-size: clamp(18px, 1.6vw, 21px);
   font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .choicesSection {
-  padding: 24px clamp(24px, 6vw, 104px) 44px;
+  padding: 54px clamp(24px, 5vw, 86px) 78px;
 }
 
 .programDisclosure {
-  max-width: 1100px;
-  margin: 0 auto 20px;
-  border-left: 4px solid var(--red-action);
-  background: var(--surface);
-  padding: 10px 14px;
+  max-width: 760px;
+  margin: 46px auto 0;
+  border-top: 1px solid #c9d0df;
+  padding: 19px 0 0;
   color: #38425e;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.6;
+  text-align: center;
 }
 
 .programDisclosure a {
@@ -65,32 +68,34 @@
 }
 
 .cards {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 22px;
-  max-width: 1100px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(410px, 1fr));
+  gap: 30px;
+  max-width: 1380px;
   margin: 0 auto;
 }
 
 .card {
   display: flex;
-  flex: 1 1 400px;
   flex-direction: column;
-  max-width: 520px;
   min-width: 0;
+  min-height: 318px;
   border: 3px solid var(--ink);
   background: var(--paper);
-  box-shadow: 7px 7px 0 var(--ink);
+  box-shadow: 9px 9px 0 var(--ink);
+}
+
+.card:only-child {
+  max-width: 680px;
 }
 
 .cardBand {
   display: flex;
   align-items: center;
-  gap: 11px;
-  min-height: 50px;
+  gap: 13px;
+  min-height: 60px;
   border-bottom: 3px solid var(--ink);
-  padding: 7px 16px;
+  padding: 9px 22px;
   color: var(--paper);
 }
 
@@ -120,22 +125,23 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: 38px;
+  height: 38px;
   border: 2px solid currentColor;
   border-radius: 50%;
 }
 
 .channelLabel {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 800;
 }
 
 .cardTop {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px;
-  gap: 18px;
-  padding: 18px 20px 20px;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) 124px;
+  gap: 22px;
+  padding: 29px 27px 31px;
 }
 
 .cardAction {
@@ -147,15 +153,15 @@
 .cardAction h2 {
   margin: 0;
   font-family: var(--font-bangers), Impact, sans-serif;
-  font-size: clamp(34px, 3.3vw, 43px);
+  font-size: clamp(42px, 3.6vw, 56px);
   font-weight: 400;
   line-height: 1;
 }
 
 .destination {
   overflow-wrap: anywhere;
-  margin: 6px 0 14px;
-  font-size: 18px;
+  margin: 8px 0 24px;
+  font-size: 21px;
   font-weight: 800;
 }
 
@@ -164,11 +170,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 52px;
+  min-height: 58px;
   margin-top: auto;
   border: 3px solid var(--ink);
-  padding: 10px 12px;
-  font-size: 16px;
+  padding: 11px 16px;
+  font-size: 17px;
   font-weight: 800;
   text-decoration: none;
   touch-action: manipulation;
@@ -188,8 +194,9 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  width: 110px;
+  justify-content: center;
+  gap: 10px;
+  width: 124px;
 }
 
 .qrFrame {
@@ -211,7 +218,7 @@
   align-items: center;
   gap: 4px;
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   line-height: 1.2;
   text-align: center;
@@ -222,13 +229,13 @@
 }
 
 .photoPath {
-  max-width: 1100px;
-  margin: 25px auto 0;
+  max-width: 1380px;
+  margin: 49px auto 0;
   border: 2px solid var(--ink);
   background: var(--pale-blue);
-  padding: 12px 15px;
-  font-size: 14px;
-  line-height: 1.45;
+  padding: 19px 23px;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 .photoPath strong {
@@ -262,8 +269,8 @@
 }
 
 .howItWorks {
-  max-width: 1100px;
-  margin: 10px auto 0;
+  max-width: 1380px;
+  margin: 20px auto 0;
   color: #38425e;
   font-size: 14px;
   line-height: 1.5;
@@ -328,37 +335,95 @@
   line-height: 1.35;
 }
 
+@media (max-width: 1000px) {
+  .introInner {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  .introCopy {
+    max-width: 520px;
+    margin: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    min-height: 0;
+  }
+
+  .cardTop {
+    display: block;
+  }
+
+  .qrPanel {
+    display: none;
+  }
+}
+
 @media (max-width: 700px) {
   .startPage nav > .backLink:first-child {
     display: inline-flex;
   }
 
   .intro {
-    padding-top: 24px;
-    padding-bottom: 27px;
+    padding: 38px 24px 43px;
   }
 
   .intro h1 {
-    font-size: clamp(43px, 10.5vw, 60px);
+    font-size: clamp(52px, 12vw, 70px);
+  }
+
+  .introCopy {
+    font-size: 17px;
   }
 
   .choicesSection {
-    padding-top: 20px;
-    padding-bottom: 36px;
+    padding: 38px 24px 64px;
   }
 
   .cards {
-    gap: 17px;
+    gap: 30px;
   }
 
   .card {
-    flex-basis: 100%;
-    max-width: 600px;
+    box-shadow: 6px 6px 0 var(--ink);
+  }
+
+  .cardBand {
+    min-height: 56px;
+    padding: 8px 19px;
+  }
+
+  .channelLabel {
+    font-size: 17px;
   }
 
   .cardTop {
-    display: block;
-    padding: 16px 17px 18px;
+    padding: 24px 20px 26px;
+  }
+
+  .cardAction h2 {
+    font-size: clamp(42px, 10vw, 51px);
+  }
+
+  .destination {
+    margin: 8px 0 22px;
+    font-size: 18px;
+  }
+
+  .channelButton {
+    min-height: 58px;
+  }
+
+  .photoPath {
+    margin-top: 44px;
+    padding: 18px 20px;
+    font-size: 15px;
   }
 
   .cameraPath {
@@ -366,8 +431,13 @@
     flex-direction: column;
   }
 
-  .qrPanel {
-    display: none;
+  .howItWorks {
+    margin-top: 16px;
+  }
+
+  .programDisclosure {
+    margin-top: 35px;
+    text-align: left;
   }
 }
 

@@ -111,6 +111,10 @@
 }
 
 .startBlock {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 24px;
   width: 100%;
   margin-top: 34px;
   scroll-margin-top: 28px;
@@ -122,6 +126,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 24px;
+  flex: 1 1 280px;
+  max-width: 410px;
   width: min(100%, 410px);
   border: 3px solid var(--ink);
   padding: 15px 20px;
@@ -239,10 +245,7 @@
 }
 
 .qrCard {
-  position: absolute;
-  bottom: 6%;
-  left: 5%;
-  z-index: 4;
+  flex: 0 0 178px;
   width: 178px;
   border: 3px solid var(--ink);
   background: var(--paper);
@@ -533,10 +536,6 @@
     width: 34%;
   }
 
-  .qrCard {
-    left: 12%;
-  }
-
   .resultBubble {
     right: 9%;
   }
@@ -614,8 +613,7 @@
   }
 
   .qrCard {
-    bottom: 5%;
-    left: 5%;
+    flex-basis: 148px;
     width: 148px;
     padding: 7px;
   }

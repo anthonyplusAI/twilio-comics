@@ -157,6 +157,7 @@ cp "$TEST_ROOT/admin-initial-password" "$TEST_ROOT/original-password"
 cp "$TEST_ROOT/admin-password-hash" "$TEST_ROOT/original-hash"
 
 export SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
+export ROTATE_ADMIN_BOOTSTRAP_ONLY=yes
 export ROTATE_ADMIN_CONFIRM=yes
 export OPERATOR_PUBLIC_IPV4=8.8.8.8
 export ADMIN_ROTATION_ACCESS_RETRY_SECONDS=0
@@ -211,5 +212,12 @@ if SUBSCRIPTION_ID=wrong bash "$PROJECT_ROOT/scripts/rotate-admin-credentials.sh
   printf 'Expected a wrong subscription to fail before prompting.\n' >&2
   exit 1
 fi
+
+if ROTATE_ADMIN_BOOTSTRAP_ONLY=no bash "$PROJECT_ROOT/scripts/rotate-admin-credentials.sh" \
+    > "$TEST_ROOT/dashboard-rotation-output" 2>&1; then
+  printf 'Expected routine rotation to redirect to the dashboard.\n' >&2
+  exit 1
+fi
+grep -Fq 'Change the active admin login at /admin/settings' "$TEST_ROOT/dashboard-rotation-output"
 
 printf 'Admin credential rotation tests passed.\n'

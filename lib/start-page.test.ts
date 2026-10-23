@@ -64,7 +64,7 @@ function cardMarkup(html: string): string[] {
 }
 
 describe("channel chooser", () => {
-  it("shows short SMS and Voice choices with one nearby disclosure", async () => {
+  it("shows short SMS and Voice choices with one disclosure below the cards", async () => {
     const html = await renderPage({
       channels: "sms,voice",
       phone: "+18669012028",
@@ -83,7 +83,7 @@ describe("channel chooser", () => {
     expect(html).toMatch(/Reply HELP for help or STOP to opt out/i);
     expect(html).toContain('href="/privacy"');
     expect(html).toContain('href="/terms"');
-    expect(html.indexOf("Message frequency varies")).toBeLessThan(html.indexOf("<article"));
+    expect(html.indexOf("Message frequency varies")).toBeGreaterThan(html.lastIndexOf("</article>"));
 
     const cards = cardMarkup(html);
     expect(cards).toHaveLength(2);
