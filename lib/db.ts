@@ -3,6 +3,28 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool, type PoolConfig } from "pg";
 import "../envConfig.ts";
 
+// A PostgreSQL driver's error message and attached fields can include the
+// connection string. Only fixed, recognized codes may cross into logs.
+const reportablePostgresErrorCodes = new Set([
+  "08000", "08001", "08003", "08004", "08006", "08P01",
+  "28P01", "3D000", "42501", "53300", "57P01", "57P02", "57P03",
+  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "CERT_HAS_EXPIRED",
+]);
+
+export function safePostgresErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    const code = Reflect.get(error, "code");
+    return typeof code === "string" && reportablePostgresErrorCodes.has(code)
+      ? code
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Keep TLS verification explicit; node-postgres URL SSL options override ssl config. */
 export function createPostgresPoolConfig(databaseUrl: string): PoolConfig {
   let url: URL;
@@ -65,7 +87,8 @@ class LazyPool extends Pool {
       }
       this.actualPool = new Pool(createPostgresPoolConfig(databaseUrl));
       this.actualPool.on("error", (error) => {
-        console.error("PostgreSQL idle connection error", error);
+        const code = safePostgresErrorCode(error);
+        console.error(`PostgreSQL idle connection error${code ? ` (code ${code})` : ""}.`);
       });
     }
     return this.actualPool;

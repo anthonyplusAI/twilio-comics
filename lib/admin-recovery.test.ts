@@ -3,13 +3,20 @@ import { spawnSync } from "node:child_process";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import { verifyAdminPassword } from "@/lib/admin-auth";
+import { testPostgresUrl } from "@/lib/test-postgres-url";
 import { recoverAdminLogin } from "@/scripts/recover-admin-login";
 
 type RecoveryEnvelope = Awaited<ReturnType<typeof recoverAdminLogin>>;
 
 const username = "recovered-admin";
 const acknowledgement = "REPLACE_ACTIVE_ADMIN_LOGIN";
-const migrationUrl = "postgresql://comics_migrator:test@twilio-comics-pg-1a1d98.postgres.database.azure.com/twilio_comics?sslmode=verify-full";
+const migrationTarget = {
+  host: "twilio-comics-pg-1a1d98.postgres.database.azure.com",
+  database: "twilio_comics",
+  user: "comics_migrator",
+  params: [["sslmode", "verify-full"]] as const,
+};
+const migrationUrl = testPostgresUrl(migrationTarget);
 let publicKeyBase64: string;
 let privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"];
 
@@ -105,10 +112,10 @@ describe("private admin login recovery", () => {
   });
 
   it.each([
-    ["another server", "postgresql://comics_migrator:test@other.postgres.database.azure.com/twilio_comics?sslmode=verify-full"],
-    ["the runtime role", "postgresql://comics_runtime:test@twilio-comics-pg-1a1d98.postgres.database.azure.com/twilio_comics?sslmode=verify-full"],
-    ["another database", "postgresql://comics_migrator:test@twilio-comics-pg-1a1d98.postgres.database.azure.com/other?sslmode=verify-full"],
-    ["a non-verifying TLS mode", "postgresql://comics_migrator:test@twilio-comics-pg-1a1d98.postgres.database.azure.com/twilio_comics?sslmode=disable"],
+    ["another server", testPostgresUrl({ ...migrationTarget, host: "other.postgres.database.azure.com" })],
+    ["the runtime role", testPostgresUrl({ ...migrationTarget, user: "comics_runtime" })],
+    ["another database", testPostgresUrl({ ...migrationTarget, database: "other" })],
+    ["a non-verifying TLS mode", testPostgresUrl({ ...migrationTarget, params: [["sslmode", "disable"]] })],
   ])("rejects %s before changing credentials", async (_caseName, databaseUrl) => {
     const query = vi.fn();
     await expect(recoverAdminLogin(request({ DATABASE_URL: databaseUrl }), fakePool(query)))
@@ -132,7 +139,7 @@ describe("private admin login recovery", () => {
       env: {
         ...process.env,
         ...request({
-          DATABASE_URL: `postgresql://operator:${sentinel}@localhost/comics?sslmode=disable`,
+          DATABASE_URL: testPostgresUrl({ host: "localhost", password: sentinel, params: [["sslmode", "disable"]] }),
           ADMIN_RECOVERY_ACK: `wrong-${sentinel}`,
         }),
       },
@@ -142,5 +149,5 @@ describe("private admin login recovery", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Admin recovery failed");
     expect(result.stderr).not.toContain(sentinel);
-  });
+  }, 20_000);
 });

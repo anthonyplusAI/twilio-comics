@@ -305,7 +305,7 @@ PY
 create_role_url_file() {
   python3 - "$1" "$POSTGRES_FQDN" "$2" <<'PY'
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlunsplit
 import base64
 import os
 import secrets
@@ -313,7 +313,8 @@ import sys
 
 role, host, filename = sys.argv[1:]
 password = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode("ascii")
-value = f"postgresql://{role}:{quote(password, safe='')}@{host}/twilio_comics?sslmode=verify-full"
+netloc = f"{role}:{quote(password, safe='')}@{host}"
+value = urlunsplit(("postgresql", netloc, "/twilio_comics", "sslmode=verify-full", ""))
 path = Path(filename)
 path.write_text(value, encoding="utf-8")
 os.chmod(path, 0o600)

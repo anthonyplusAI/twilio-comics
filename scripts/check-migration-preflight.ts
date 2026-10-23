@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { Pool } from "pg";
-import { createPostgresPoolConfig } from "../lib/db";
+import { createPostgresPoolConfig, safePostgresErrorCode } from "../lib/db";
 
 type ColumnShape = { type: string; notNull: boolean };
 type TableShape = {
@@ -532,38 +532,67 @@ export async function inspectDatabase(databaseUrl: string): Promise<DatabaseStat
   }
 }
 
-async function main() {
-  const arg = process.argv[2];
-  if (process.argv.length > 3 || (arg && !arg.startsWith("--baseline-sql="))) {
-    throw new Error("Usage: node --import tsx scripts/check-migration-preflight.ts [--baseline-sql=TAG]");
-  }
+type MigrationPreflightStage =
+  | "check command"
+  | "load environment"
+  | "load migration files"
+  | "inspect database"
+  | "assess migration"
+  | "generate baseline SQL";
 
-  await import("../envConfig");
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error("DATABASE_URL is required for migration preflight");
+class MigrationAssessmentFailure extends Error {}
 
-  const plan = loadMigrationPlan();
-  const state = await inspectDatabase(databaseUrl);
-  const assessment = assessMigrationPreflight(plan, state);
-
-  if (arg) {
-    const tag = arg.slice("--baseline-sql=".length);
-    if (state.journalRows.length || !assessment.baselineCandidates.includes(tag)) {
-      throw new Error(
-        `Cannot generate baseline SQL for ${tag}. The live schema must exactly match that migration, with an empty or absent journal. ${assessment.message}`,
-      );
-    }
-    console.log(buildBaselineSql(plan, tag));
+export function logMigrationPreflightFailure(stage: MigrationPreflightStage, error: unknown): void {
+  if (error instanceof MigrationAssessmentFailure) {
+    // This message is assembled by assessMigrationPreflight from schema and
+    // journal state; it is not the PostgreSQL driver's error message.
+    console.error(`Migration preflight blocked: ${error.message}`);
     return;
   }
+  const code = safePostgresErrorCode(error);
+  console.error(`Migration preflight blocked at ${stage}${code ? ` (code ${code})` : ""}.`);
+}
 
-  if (!assessment.ok) throw new Error(assessment.message);
-  console.log(assessment.message);
+async function main() {
+  let stage: MigrationPreflightStage = "check command";
+  try {
+    const arg = process.argv[2];
+    if (process.argv.length > 3 || (arg && !arg.startsWith("--baseline-sql="))) {
+      throw new MigrationAssessmentFailure("Usage: node --import tsx scripts/check-migration-preflight.ts [--baseline-sql=TAG]");
+    }
+
+    stage = "load environment";
+    await import("../envConfig");
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) throw new MigrationAssessmentFailure("DATABASE_URL is required for migration preflight");
+
+    stage = "load migration files";
+    const plan = loadMigrationPlan();
+    stage = "inspect database";
+    const state = await inspectDatabase(databaseUrl);
+    stage = "assess migration";
+    const assessment = assessMigrationPreflight(plan, state);
+
+    if (arg) {
+      const tag = arg.slice("--baseline-sql=".length);
+      if (state.journalRows.length || !assessment.baselineCandidates.includes(tag)) {
+        throw new MigrationAssessmentFailure(
+          `Cannot generate baseline SQL. The live schema must exactly match that migration, with an empty or absent journal. ${assessment.message}`,
+        );
+      }
+      stage = "generate baseline SQL";
+      console.log(buildBaselineSql(plan, tag));
+      return;
+    }
+
+    if (!assessment.ok) throw new MigrationAssessmentFailure(assessment.message);
+    console.log(assessment.message);
+  } catch (error) {
+    logMigrationPreflightFailure(stage, error);
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  void main().catch((error: unknown) => {
-    console.error(`Migration preflight blocked: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
-  });
+  void main();
 }
