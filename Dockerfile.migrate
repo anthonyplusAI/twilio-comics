@@ -17,8 +17,8 @@ COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY --chown=node:node drizzle ./drizzle
-COPY --chown=node:node lib/db.ts lib/schema.ts ./lib/
-COPY --chown=node:node scripts/check-migration-preflight.ts ./scripts/
+COPY --chown=node:node lib/admin-auth.ts lib/db.ts lib/schema.ts ./lib/
+COPY --chown=node:node scripts/check-migration-preflight.ts scripts/recover-admin-login.ts ./scripts/
 COPY --chown=node:node drizzle.config.ts envConfig.ts tsconfig.json ./
 
 ENV NODE_ENV=production

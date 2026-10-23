@@ -11,6 +11,7 @@
     "dub:setup-folder": "tsx scripts/setup-dub-folder.ts",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:safe": "node --import tsx scripts/check-migration-preflight.ts && pnpm db:migrate",
+    "db:admin-recover": "node --import tsx scripts/recover-admin-login.ts",
     "dev": "next dev",
     "dev:voice": "tsx watch server/index.ts",
     "lint": "eslint .",
