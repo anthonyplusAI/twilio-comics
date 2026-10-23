@@ -1,0 +1,15 @@
+#!/bin/sh
+# Git supplies remote name and URL as arguments and ref updates on stdin.
+set -eu
+
+if [ "$#" -ne 2 ]; then
+  printf '%s\n' 'PostgreSQL URL guard could not inspect this push; push blocked.' >&2
+  exit 1
+fi
+
+repo_root=$(git rev-parse --show-toplevel) || {
+  printf '%s\n' 'PostgreSQL URL guard could not inspect this push; push blocked.' >&2
+  exit 1
+}
+
+exec python3 "$repo_root/scripts/check-outgoing-postgres-urls.py" "$1" "$2"
