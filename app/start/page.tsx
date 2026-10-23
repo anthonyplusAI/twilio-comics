@@ -116,7 +116,7 @@ export default async function StartPage() {
             </h1>
             <p className={styles.introCopy}>
               {activeChoices.length
-                ? "Your comic arrives on your phone."
+                ? "Your comic arrives on your phone. Public five-digit links can be guessed."
                 : "Come back to start your comic when a channel is ready."}
             </p>
           </div>

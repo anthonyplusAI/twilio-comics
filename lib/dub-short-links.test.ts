@@ -11,7 +11,7 @@ const config: DubConfig = {
   folderId: "fold_comics",
 };
 const storyId = "11111111-2222-4333-8444-555555555555";
-const key = `comic-${"1".repeat(19)}`;
+const key = `comic-${"1".repeat(5)}`;
 const url = "https://app.example/story/quiet-moon-a1b2";
 const externalId = `twilio-comics-${storyId}`;
 

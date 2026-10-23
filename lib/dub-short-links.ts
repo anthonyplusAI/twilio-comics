@@ -1,14 +1,15 @@
-import { randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { stories } from "@/lib/schema";
+import { dubShortLinkReservations, stories } from "@/lib/schema";
 
 const DUB_API = "https://api.dub.co";
 const DUB_TIMEOUT_MS = 8_000;
-const MAX_KEY_ATTEMPTS = 5;
+const MAX_KEY_ATTEMPTS = 8;
 const UNCERTAIN_POST_RECHECK_MS = [0, 300, 900] as const;
 const DOMAIN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
-const KEY = /^comic-[a-z0-9]{19}$/;
+const KEY = /^comic-\d{5}$/;
+const LEGACY_KEY = /^comic-[a-z0-9]{19}$/;
 
 export interface DubConfig {
   apiKey: string;
@@ -62,7 +63,8 @@ function parseOwnedLink(value: unknown, input: DubLinkInput): Extract<DubLinkRes
   if (value.folderId !== input.config.folderId) {
     throw new Error("Dub returned a link outside the configured folder");
   }
-  if (value.domain !== input.config.domain || typeof value.key !== "string" || !KEY.test(value.key)) {
+  if (value.domain !== input.config.domain || typeof value.key !== "string" ||
+      !(KEY.test(value.key) || LEGACY_KEY.test(value.key))) {
     throw new Error("Dub returned a link outside the configured domain or key format");
   }
   if (typeof value.id !== "string" || !value.id || typeof value.shortLink !== "string") {
@@ -166,10 +168,7 @@ export async function createOrRecoverDubLink(
 }
 
 function randomComicKey(): string {
-  // Dub keys are case-insensitive. Base36 preserves all 96 random bits while
-  // keeping the Voice result text within one GSM SMS segment.
-  const value = BigInt(`0x${randomBytes(12).toString("hex")}`);
-  return `comic-${value.toString(36).padStart(19, "0")}`;
+  return `comic-${randomInt(100_000).toString().padStart(5, "0")}`;
 }
 
 function savedShortUrl(value: string | null): string | null {
@@ -200,6 +199,13 @@ async function currentLinkState(storyId: string) {
 async function reserveKey(storyId: string, oldKey: string | null): Promise<string | null> {
   for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt += 1) {
     const candidate = randomComicKey();
+    // Keep this key after a comic is deleted. Otherwise a previously shared
+    // five-digit link could someday open a different person's comic.
+    const [reserved] = await db.insert(dubShortLinkReservations)
+      .values({ key: candidate })
+      .onConflictDoNothing()
+      .returning({ key: dubShortLinkReservations.key });
+    if (!reserved) continue;
     try {
       const [row] = await db.update(stories)
         .set({ dubKey: candidate })
@@ -242,9 +248,28 @@ export async function comicDeliveryUrl(
         if (!existing) throw new Error("Stored comic short URL is invalid");
         return existing;
       }
-      const key = latest.dubKey ?? await reserveKey(storyId, null);
-      if (!key) continue; // Another worker reserved a key or completed the link.
-      const result = await createOrRecoverDubLink({ config, storyId, key, url: canonicalUrl });
+      // A previous POST may have succeeded at Dub while its database save
+      // failed. Recover by stable story ID before replacing a pending long key.
+      let key: string | null = latest.dubKey && KEY.test(latest.dubKey) ? latest.dubKey : null;
+      let result: DubLinkResult | null = null;
+      if (latest.dubKey && LEGACY_KEY.test(latest.dubKey)) {
+        const input = { config, storyId, key: latest.dubKey, url: canonicalUrl };
+        const existing = await requestLinkInfo(
+          input,
+          new URLSearchParams({ externalId: externalIdFor(storyId) }),
+          fetch,
+        );
+        if (existing) {
+          key = latest.dubKey;
+          result = parseOwnedLink(existing, input);
+        }
+      }
+      if (!result) {
+        key ??= await reserveKey(storyId, latest.dubKey);
+        if (!key) continue; // Another worker reserved a key or completed the link.
+        result = await createOrRecoverDubLink({ config, storyId, key, url: canonicalUrl });
+      }
+      if (!key) throw new Error("Comic short-link key disappeared during recovery");
       if (result.kind === "key-conflict") {
         await reserveKey(storyId, key);
         continue;

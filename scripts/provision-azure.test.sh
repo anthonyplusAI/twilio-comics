@@ -46,8 +46,8 @@ assert_subject 'git@github.com:current-owner/twilio-comics.git' 'current-owner/t
 assert_subject 'https://github.com/new-owner/twilio-comics.git' 'new-owner/twilio-comics'
 assert_subject 'ssh://git@github.com/third-owner/twilio-comics.git' 'third-owner/twilio-comics'
 
-# Reuse mocked existing foundation resources and stop at the scheduled Job's
-# create call. This verifies the exact Azure CLI request without touching Azure.
+# Reuse mocked foundation resources and stop at each Job's create call. This
+# verifies the Azure CLI requests without touching Azure.
 cat > "$TEST_ROOT/bin/az" <<'AZ_RECOVERY'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -84,7 +84,14 @@ case "$1 $2 ${3:-}" in
   'containerapp create --name')
     printf '%s\n' "$@" > "$AZURE_TEST_LOG"
     exit 76 ;;
-  'containerapp job update') exit 0 ;;
+  'containerapp job update')
+    if [[ "${*}" == *'--polling-interval'* ]]; then
+      printf '%s\n' "$*" >> "${AZURE_TEST_JOB_UPDATE_LOG:?}"
+      if [[ -n "${AZURE_TEST_EVENT_POLLING_FILE:-}" ]]; then
+        after --polling-interval "$@" > "$AZURE_TEST_EVENT_POLLING_FILE"
+      fi
+    fi
+    exit 0 ;;
   'group show --name')
     [[ "${*}" == *'--query id'* ]] && printf '/resource-group\n'
     exit 0 ;;
@@ -180,11 +187,27 @@ case "$1 $2 ${3:-}" in
     exit 0 ;;
   'containerapp job show')
     name="$(after --name "$@")"
+    [[ "$name" == twilio-comics-generation && "${AZURE_TEST_MISSING_EVENT_JOB:-}" == 1 ]] && exit 1
     [[ "$name" == twilio-comics-recovery && "${AZURE_TEST_ALL_JOBS_EXIST:-}" != 1 ]] && exit 1
     [[ "$name" == twilio-comics-migrate-v2 && "${AZURE_TEST_MIGRATION_EXISTS:-}" != 1 ]] && exit 1
     [[ "${*}" == *'--query id'* ]] && printf '/resource-group/providers/Microsoft.App/jobs/%s\n' "$name"
-    [[ "${*}" == *'--output json'* ]] && workload_json \
-      "/resource-group/providers/Microsoft.App/jobs/$name" '/identity/worker' 'worker-client'
+    if [[ "${*}" == *'--output json'* ]]; then
+      if [[ "$name" == twilio-comics-generation* ]]; then
+        polling_interval="${AZURE_TEST_EVENT_POLLING_INTERVAL:-5}"
+        if [[ -n "${AZURE_TEST_EVENT_POLLING_FILE:-}" && -e "$AZURE_TEST_EVENT_POLLING_FILE" ]]; then
+          polling_interval="$(< "$AZURE_TEST_EVENT_POLLING_FILE")"
+        fi
+        workload_json \
+          "/resource-group/providers/Microsoft.App/jobs/$name" '/identity/worker' 'worker-client' \
+          | jq --arg trigger "${AZURE_TEST_GENERATION_TRIGGER_TYPE:-Event}" \
+              --argjson polling "$polling_interval" \
+              '.properties.configuration.triggerType = $trigger
+                | .properties.configuration.eventTriggerConfig.scale.pollingInterval = $polling'
+      else
+        workload_json \
+          "/resource-group/providers/Microsoft.App/jobs/$name" '/identity/worker' 'worker-client'
+      fi
+    fi
     exit 0 ;;
   *) printf 'Unexpected Azure call: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -196,12 +219,24 @@ export AZURE_TEST_LOG
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_MISSING_EVENT_JOB=1 bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 77 ]] || { printf '%s\n' "$output" >&2; exit 1; }
+arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_LOG"; }
+[[ "$(arg_after --name)" == twilio-comics-generation ]]
+[[ "$(arg_after --trigger-type)" == Event ]]
+[[ "$(arg_after --polling-interval)" == 5 ]]
+[[ "$(arg_after --scale-rule-type)" == azure-queue ]]
+
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
   bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
 status=$?
 set -e
 [[ "$status" == 77 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 
-arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_LOG"; }
 [[ "$(arg_after --name)" == twilio-comics-recovery ]]
 [[ "$(arg_after --trigger-type)" == Schedule ]]
 [[ "$(arg_after --cron-expression)" == '0 0 1 1 *' ]] || {
@@ -508,6 +543,67 @@ if grep -Eq 'api (PUT|POST|DELETE) repos/.*/environments/production' "$AZURE_TES
   printf 'Idempotent rerun unexpectedly changed GitHub environment policy.\n' >&2
   exit 1
 fi
+
+# An existing generation Job is reconciled with one narrowly scoped update.
+# Its next provisioning run should see the persisted value and skip the update.
+AZURE_TEST_JOB_UPDATE_LOG="$TEST_ROOT/job-updates"
+AZURE_TEST_EVENT_POLLING_FILE="$TEST_ROOT/event-polling"
+export AZURE_TEST_JOB_UPDATE_LOG
+printf '15\n' > "$AZURE_TEST_EVENT_POLLING_FILE"
+: > "$AZURE_TEST_JOB_UPDATE_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 0 && "$(< "$AZURE_TEST_EVENT_POLLING_FILE")" == 5 ]] \
+  || { printf '%s\n' "$output" >&2; exit 1; }
+[[ "$(< "$AZURE_TEST_JOB_UPDATE_LOG")" == \
+  'containerapp job update --name twilio-comics-generation-v2 --resource-group rg-twilio-comics --polling-interval 5 --output none' ]] \
+  || { printf 'Existing Job update changed more than its polling interval.\n' >&2; exit 1; }
+
+: > "$AZURE_TEST_JOB_UPDATE_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 0 && ! -s "$AZURE_TEST_JOB_UPDATE_LOG" ]] \
+  || { printf '%s\n' "$output" >&2; exit 1; }
+
+# A different trigger type is not a generation queue Job and must not be
+# silently rewritten just because it has the configured name.
+printf '15\n' > "$AZURE_TEST_EVENT_POLLING_FILE"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_JOB_NAME=twilio-comics-generation-v2 \
+  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
+  AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
+  AZURE_TEST_GENERATION_TRIGGER_TYPE=Schedule \
+  AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
+  AZURE_TEST_MIGRATION_ROLE_COUNT=1 AZURE_TEST_FEDERATED_EXISTS=1 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'is not event-triggered'* \
+  && ! -s "$AZURE_TEST_JOB_UPDATE_LOG" ]] \
+  || { printf '%s\n' "$output" >&2; exit 1; }
 
 # Existing GitHub subjects may include immutable owner and repository IDs.
 # A path-only default must not overwrite an ID-based credential silently.

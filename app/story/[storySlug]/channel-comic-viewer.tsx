@@ -43,12 +43,6 @@ export function ChannelComicViewer({
                 ? "Your comic is on its way"
                 : `${pages.length} ${pages.length === 1 ? "page" : "pages"} to read`}
             </div>
-            <ChannelComicActions
-              title={title}
-              imageUrls={pages.map((page) => page.imageUrl)}
-              shareUrl={shareUrl}
-            />
-            <p className={styles.linkNotice}>Anyone with this link can view your comic.</p>
           </div>
         </section>
 
@@ -77,6 +71,17 @@ export function ChannelComicViewer({
               ))}
             </div>
           )}
+        </section>
+
+        <section className={styles.actionSection} aria-label="Comic actions">
+          <div className={styles.actionInner}>
+            <ChannelComicActions
+              title={title}
+              imageUrls={pages.map((page) => page.imageUrl)}
+              shareUrl={shareUrl}
+            />
+            <p className={styles.linkNotice}>This comic is public; five-digit short links can be guessed.</p>
+          </div>
         </section>
 
         <section className={styles.makeAnother} aria-labelledby="make-another-title">

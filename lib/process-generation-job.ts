@@ -295,26 +295,26 @@ function failureMessage(error: unknown, source: string, hasPhotos: boolean): str
         : hasPhotos
           ? "Reply with a change, or NEW to resend photos and idea."
           : "Reply with a change or NEW.";
-      return `${reason} ${policyRevisionHint(error)} ${recovery}`;
+      return `${reason} ${policyRevisionHint(error)}\n\n${recovery}`;
     }
     if (error.type === "credit_limit") {
       const recovery = source === "voice"
         ? "Call again, verify, and say create it to retry or say NEW."
         : "Reply CREATE later to retry, or NEW for a new comic.";
-      return `The image service is temporarily unavailable. Your idea is saved. ${recovery}`;
+      return `The image service is temporarily unavailable. Your idea is saved.\n\n${recovery}`;
     }
   }
   const recovery = source === "voice"
     ? "Call again, verify, and say create it to retry or say NEW."
     : "Reply CREATE later to retry, or NEW for a new comic.";
-  return `A technical issue stopped your comic. Your idea is saved. ${recovery}`;
+  return `A technical issue stopped your comic. Your idea is saved.\n\n${recovery}`;
 }
 
 function recoveredFailureMessage(source: string): string {
   const recovery = source === "voice"
     ? "Call again, verify, and revise your idea or say create it to retry."
     : "Reply with a change or CREATE to retry; NEW starts a new comic.";
-  return `We couldn't finish your comic. Your idea is saved. ${recovery}`;
+  return `We couldn't finish your comic. Your idea is saved.\n\n${recovery}`;
 }
 
 function recoveredPolicyFailureMessage(source: string, hasPhotos: boolean): string {
@@ -323,7 +323,7 @@ function recoveredPolicyFailureMessage(source: string, hasPhotos: boolean): stri
     : hasPhotos
       ? "Reply with a change, or NEW to resend photos and idea."
       : "Reply with a change or NEW.";
-  return `The image service declined this comic. Your idea is saved for revision. ${recovery}`;
+  return `The image service declined this comic. Your idea is saved for revision.\n\n${recovery}`;
 }
 
 async function restoreFailedDraft(job: GenerationJob, requireRevision = false): Promise<boolean> {
@@ -566,12 +566,12 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const canonicalUrl = `${publicBaseUrl}/story/${result.story.slug}`;
     const link = await comicDeliveryUrl(result.story.id, result.story.slug, canonicalUrl);
     const readyMessage = claimed.targetStoryId
-      ? `Page ${result.page.pageNumber} is ready: ${link}`
-      : `Your comic is ready: ${link}`;
+      ? `Page ${result.page.pageNumber} is ready:\n${link}`
+      : `Your comic is ready:\n${link}`;
     const continuationInstruction = claimed.source === "voice"
       ? `Call again from this number within ${CONVERSATION_RESUME_DAYS} days; say CONTINUE for another page or NEW for a new comic.`
       : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`;
-    const body = `${readyMessage}\n${continuationInstruction}`;
+    const body = `${readyMessage}\n\n${continuationInstruction}`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;
@@ -767,7 +767,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       if (!restored) return;
     }
     const failureBody = generatedStoryId
-      ? "Your comic was created, but I couldn't deliver the link. Reply STATUS to get it."
+      ? "Your comic was created, but I couldn't deliver the link.\n\nReply STATUS to get it."
       : failureMessage(error, claimed.source, claimed.characterImageUrls.length > 0);
     await notifyGenerationFailure(claimed, failureBody);
   }

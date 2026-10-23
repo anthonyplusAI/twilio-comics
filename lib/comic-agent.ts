@@ -107,8 +107,12 @@ function approvalInstruction(channel: ComicAgentChannel): string {
     : "Reply CREATE when you're ready, or tell me what to change.";
 }
 
-function commandVerb(channel: ComicAgentChannel): "Say" | "Send" {
-  return channel === "voice" ? "Say" : "Send";
+function withInstruction(message: string, instruction: string, channel: ComicAgentChannel): string {
+  return `${message.trim()}${channel === "voice" ? " " : "\n\n"}${instruction}`;
+}
+
+function commandVerb(channel: ComicAgentChannel): "Say" | "Reply" {
+  return channel === "voice" ? "Say" : "Reply";
 }
 
 function ideaInvitation(channel: ComicAgentChannel): string {
@@ -201,16 +205,24 @@ export async function advanceComicAgent(
       "generating",
       existing,
       activeStoryId,
-      `I'm still creating your comic. I'll send it when it's ready.${photoNotice} ${commandVerb(turn.channel)} STATUS for an update.`,
+      withInstruction(
+        `I'm still creating your comic. I'll send it when it's ready.${photoNotice}`,
+        `${commandVerb(turn.channel)} STATUS for an update.`,
+        turn.channel,
+      ),
     );
   }
 
   if (command === "STATUS") {
     const reply =
       state === "done"
-        ? `Your comic is ready. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days to make another page, or NEW for a new story.`
+        ? withInstruction(
+            "Your comic is ready.",
+            `${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days to make another page, or NEW for a new story.`,
+            turn.channel,
+          )
         : state === "confirming"
-          ? `Your comic idea is ready. ${approvalInstruction(turn.channel)}`
+          ? withInstruction("Your comic idea is ready.", approvalInstruction(turn.channel), turn.channel)
           : existing.prompt?.trim()
             ? isCurrentBlockedPrompt(existing)
               ? "The image service declined this idea. Tell me what to change before we try again."
@@ -242,11 +254,11 @@ export async function advanceComicAgent(
       references.includes(url) && !previousReferences.includes(url)) ?? false;
     const reply = draft.prompt?.trim()
       ? state === "confirming"
-        ? `Your idea is ready. ${approvalInstruction(turn.channel)}`
+        ? withInstruction("Your idea is ready.", approvalInstruction(turn.channel), turn.channel)
         : "I have your idea. Tell me what to add, or send a photo."
       : references.length
         ? turn.imageUrls?.length && !newPhotoRetained
-          ? "I can use up to two photos. Tell me your comic idea, or send NEW for a fresh set."
+          ? "I can use up to two photos. Tell me your comic idea.\n\nSend NEW for a fresh set."
           : `${newPhotoRetained ? "Photo saved." : "I have your photos."} Tell me what should happen in your comic.`
         : "Send one or two photos of yourself, then tell me your comic idea. Photos are optional.";
     return result(startingFresh ? "collecting" : state, draft, startingFresh ? null : activeStoryId, reply);
@@ -258,7 +270,7 @@ export async function advanceComicAgent(
       { ...existing, characterImageUrls: [], suppressPhotoHandoff: true },
       activeStoryId,
       existing.prompt?.trim() && state === "confirming"
-        ? `Okay, I won't use the photos. ${approvalInstruction(turn.channel)}`
+        ? withInstruction("Okay, I won't use the photos.", approvalInstruction(turn.channel), turn.channel)
         : "Okay, I won't use photos. Tell me your comic idea.",
     );
   }
@@ -290,7 +302,11 @@ export async function advanceComicAgent(
       freshAgentCollected(existing, turn.channel),
       activeStoryId,
       activeStoryId
-        ? `Draft cancelled. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new story.`
+        ? withInstruction(
+            "Draft cancelled.",
+            `${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new story.`,
+            turn.channel,
+          )
         : "Draft cancelled. Tell me a new comic idea whenever you're ready.",
     );
   }
@@ -360,10 +376,14 @@ export async function advanceComicAgent(
         references.includes(url) && !previousReferences.includes(url));
       const reply =
         state === "confirming" && draft.prompt
-          ? `${newPhotoRetained ? "Photo added to your draft." : "I can use up to two photos."} ${approvalInstruction(turn.channel)}`
+          ? withInstruction(
+              newPhotoRetained ? "Photo added to your draft." : "I can use up to two photos.",
+              approvalInstruction(turn.channel),
+              turn.channel,
+            )
           : newPhotoRetained
             ? "Photo saved. What's your comic idea?"
-            : "I can use up to two photos. Tell me your idea, or send NEW for a fresh set.";
+            : "I can use up to two photos. Tell me your idea.\n\nSend NEW for a fresh set.";
       return result(state === "done" ? "collecting" : state, draft, draftStoryId, reply);
     }
     return result(
@@ -399,7 +419,7 @@ export async function advanceComicAgent(
   const reply = stillBlocked
     ? "The image service declined this idea. Tell me what to change before we try again."
     : ready
-      ? `${proposal.reply.trim()} ${approvalInstruction(turn.channel)}`.trim()
+      ? withInstruction(proposal.reply, approvalInstruction(turn.channel), turn.channel)
       : proposal.reply.trim() || "Tell me a little more about your comic idea.";
   if (ready) delete draft.blockedPrompt;
   return result(

@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { ArrowUpRight, Camera, Check, Copy, Download, Share2 } from "lucide-react";
-import { linkedInShareIntent, resolveComicShareUrl, xShareIntent } from "./comic-share-links";
+import { linkedInShareCaption, linkedInShareIntent, resolveComicShareUrl, xShareIntent } from "./comic-share-links";
 import styles from "./channel-comic-viewer.module.css";
 
 export function ChannelComicActions({
@@ -44,6 +44,15 @@ export function ChannelComicActions({
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
       await copyLink(false);
+    }
+  };
+
+  const copyLinkedInCaption = async () => {
+    try {
+      await navigator.clipboard.writeText(linkedInShareCaption());
+      setNotice("LinkedIn caption copied. Paste it, then retype @Twilio and select the official Page to make it a tag.");
+    } catch {
+      setNotice("In LinkedIn, type @Twilio and select its official Page. Add #Twilio too.");
     }
   };
 
@@ -130,9 +139,10 @@ export function ChannelComicActions({
               href={linkedInShareIntent(comicUrl())}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => void copyLinkedInCaption()}
             >
               <span className={styles.shareChoiceMark}>in</span>
-              <span className={styles.shareChoiceText}>LinkedIn<small>Share the comic link</small></span>
+              <span className={styles.shareChoiceText}>LinkedIn<small>Paste caption; retype @Twilio and select Twilio&apos;s Page</small></span>
               <ArrowUpRight size={18} aria-hidden="true" />
             </a>
             <button className={styles.shareChoice} onClick={() => void copyLink(true)} type="button">

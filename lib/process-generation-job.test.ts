@@ -599,7 +599,7 @@ describe("processGenerationJob", () => {
     await processing;
 
     expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.stringContaining("Your idea is saved. Reply CREATE later to retry"),
+      body: expect.stringContaining("Your idea is saved.\n\nReply CREATE later to retry"),
     }));
   });
 

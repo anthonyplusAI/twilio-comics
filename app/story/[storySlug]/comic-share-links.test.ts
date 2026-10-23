@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { linkedInShareIntent, resolveComicShareUrl, xShareIntent } from "./comic-share-links";
+import { linkedInShareCaption, linkedInShareIntent, resolveComicShareUrl, xShareIntent } from "./comic-share-links";
 
 describe("comic share links", () => {
   const pageUrl = "https://comics.example/story/my-comic";
@@ -27,5 +27,9 @@ describe("comic share links", () => {
     const intent = new URL(linkedInShareIntent("https://twil.io/comic-12?ref=share"));
     expect(intent.pathname).toBe("/sharing/share-offsite/");
     expect(intent.searchParams.get("url")).toBe("https://twil.io/comic-12?ref=share");
+  });
+
+  it("offers a LinkedIn caption with Twilio text for the user to turn into a Page mention", () => {
+    expect(linkedInShareCaption()).toContain("Twilio Comics! @Twilio #Twilio");
   });
 });

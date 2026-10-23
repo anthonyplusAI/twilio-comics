@@ -127,6 +127,12 @@ export const stories = pgTable(
   (story) => [index("stories_user_id_idx").on(story.userId)],
 );
 
+/** Keep public comic short-link keys reserved even after their stories are deleted. */
+export const dubShortLinkReservations = pgTable("dub_short_link_reservations", {
+  key: text("key").primaryKey(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const pages = pgTable(
   "pages",
   {

@@ -1,4 +1,5 @@
 const X_SHARE_TEXT = "I made a comic with Twilio Comics! @twilio #Twilio";
+const LINKEDIN_SHARE_TEXT = "I made a comic with Twilio Comics! @Twilio #Twilio";
 
 export function resolveComicShareUrl(
   preferredUrl: string | null | undefined,
@@ -32,4 +33,8 @@ export function linkedInShareIntent(comicUrl: string): string {
   const intent = new URL("https://www.linkedin.com/sharing/share-offsite/");
   intent.searchParams.set("url", comicUrl);
   return intent.toString();
+}
+
+export function linkedInShareCaption(): string {
+  return LINKEDIN_SHARE_TEXT;
 }
