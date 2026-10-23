@@ -111,11 +111,12 @@
 }
 
 .startBlock {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 244px) 176px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 24px;
-  width: 100%;
+  gap: 18px;
+  width: max-content;
+  max-width: 100%;
   margin-top: 34px;
   scroll-margin-top: 28px;
 }
@@ -125,16 +126,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  flex: 1 1 280px;
-  max-width: 410px;
-  width: min(100%, 410px);
+  gap: 10px;
+  width: 100%;
   border: 3px solid var(--ink);
-  padding: 15px 20px;
+  padding: 13px 16px;
   background: var(--red-action);
   color: #ffffff;
   text-decoration: none;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 800;
   box-shadow: 5px 5px 0 var(--ink);
   transition: transform 150ms ease, box-shadow 150ms ease;
@@ -245,8 +244,7 @@
 }
 
 .qrCard {
-  flex: 0 0 178px;
-  width: 178px;
+  width: 176px;
   border: 3px solid var(--ink);
   background: var(--paper);
   padding: 10px;
@@ -589,6 +587,12 @@
     width: 100%;
   }
 
+  .startBlock {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    width: min(100%, 360px);
+  }
+
   .heroArt {
     min-height: 485px;
   }
@@ -613,21 +617,27 @@
   }
 
   .qrCard {
-    flex-basis: 148px;
-    width: 148px;
-    padding: 7px;
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 8px 12px;
+    box-shadow: 4px 4px 0 var(--ink);
   }
 
   .qrFrame svg {
-    width: 112px;
+    width: 120px;
   }
 
   .qrCopy {
-    font-size: 10px;
+    margin-top: 0;
+    font-size: 12px;
+    line-height: 1.3;
   }
 
   .qrCopy svg {
-    width: 16px;
+    width: 18px;
   }
 
   .resultBubble {
