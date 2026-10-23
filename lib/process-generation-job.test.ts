@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   expireConversationForGeneration: vi.fn(),
   failConversationForGeneration: vi.fn(),
   createMmsPreview: vi.fn(),
+  comicDeliveryUrl: vi.fn(),
   recordActivityEvent: vi.fn(),
 }));
 
@@ -88,6 +89,7 @@ vi.mock("@/lib/db-actions", () => ({
   deleteBlankFailedGenerationStory: h.deleteBlankFailedGenerationStory,
 }));
 vi.mock("@/lib/mms-preview", () => ({ createMmsPreview: h.createMmsPreview }));
+vi.mock("@/lib/dub-short-links", () => ({ comicDeliveryUrl: h.comicDeliveryUrl }));
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
 import { ComicServiceError } from "@/lib/comic-service";
@@ -122,6 +124,7 @@ const secondCameraKey = `uploads/${cameraOwner}/camera/${secondCameraImageId}.jp
 beforeEach(() => {
   Object.values(h).forEach((mock) => mock.mockReset());
   process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+  delete process.env.RESULT_MEDIA_PREVIEW_ENABLED;
   h.claimGenerationJob.mockResolvedValue(job);
   h.getGenerationJob.mockResolvedValue(job);
   h.createComicStory.mockResolvedValue({
@@ -135,6 +138,7 @@ beforeEach(() => {
     imageUrl: "https://comics.example.com/api/media?key=page2",
   });
   h.createMmsPreview.mockResolvedValue("https://comics.example.com/api/media?key=preview");
+  h.comicDeliveryUrl.mockResolvedValue("https://twil.io/comic-1234567890123456");
   h.sendChannelMessage.mockResolvedValue("SMresult");
   h.completeConversationForGeneration.mockResolvedValue(true);
   h.expireConversationForGeneration.mockResolvedValue(true);
@@ -392,7 +396,7 @@ describe("processGenerationJob", () => {
       kind: "generation.delivery",
       messageSid: "SMresult",
       status: "accepted",
-      details: expect.objectContaining({ hadMedia: true, attemptCount: 1 }),
+      details: expect.objectContaining({ hadMedia: false, attemptCount: 1 }),
     }));
     expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventKey: `job:${job.id}:succeeded`,
@@ -864,27 +868,43 @@ describe("processGenerationJob", () => {
     expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
   });
 
-  it("creates and delivers the first page with a tracked MMS preview", async () => {
+  it("delivers the branded short link by text without an MMS preview by default", async () => {
     await processGenerationJob(job.id);
 
     expect(h.createComicStory).toHaveBeenCalledWith(
       expect.objectContaining({ userId: job.userId, prompt: job.prompt, style: job.style }),
     );
-    expect(h.createMmsPreview).toHaveBeenCalledOnce();
+    expect(h.comicDeliveryUrl).toHaveBeenCalledWith(
+      "story-1", "mars-dragon", "https://comics.example.com/story/mars-dragon",
+    );
+    expect(h.createMmsPreview).not.toHaveBeenCalled();
     expect(h.checkpointGenerationOutput).toHaveBeenCalledWith(job.id, expect.any(String), {
       storyId: "story-1",
       imageUrl: "https://comics.example.com/api/media?key=page1",
-      deliveryHadMedia: true,
+      deliveryHadMedia: false,
     });
     expect(h.sendChannelMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        mediaUrl: "https://comics.example.com/api/media?key=preview",
+        mediaUrl: undefined,
+        body: expect.stringContaining("https://twil.io/comic-1234567890123456"),
         validityPeriod: 36000,
         statusCallback: `https://comics.example.com/api/twilio/status?jobId=${job.id}#rc=3&rp=5xx,ct,rt`,
       }),
     );
     expect(h.completeConversationForGeneration).toHaveBeenCalledWith(job, "story-1");
     expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the MMS preview available only when explicitly enabled", async () => {
+    process.env.RESULT_MEDIA_PREVIEW_ENABLED = "true";
+
+    await processGenerationJob(job.id);
+
+    expect(h.createMmsPreview).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      mediaUrl: "https://comics.example.com/api/media?key=preview",
+      body: expect.stringContaining("https://twil.io/comic-1234567890123456"),
+    }));
   });
 
   it("uses up to two existing camera photos staged for the job's user", async () => {
@@ -1016,16 +1036,17 @@ describe("processGenerationJob", () => {
     );
   });
 
-  it("texts Voice callers to call again, verify, and say CONTINUE for another page", async () => {
+  it("texts Voice callers to call again from the same number for another page", async () => {
     h.claimGenerationJob.mockResolvedValue({ ...job, source: "voice" });
 
     await processGenerationJob(job.id);
 
     const result = h.sendChannelMessage.mock.calls[0][0];
     expect(result.channel).toBe("sms");
-    expect(result.body).toContain("Call again from this phone, verify, then say CONTINUE within 14 days for another page");
+    expect(result.body).toContain("Call again from this number within 14 days; say CONTINUE for another page");
     expect(result.body).toContain("NEW for a new comic");
     expect(result.body).not.toMatch(/reply CONTINUE/i);
+    expect(result.body.length).toBeLessThanOrEqual(160);
   });
 
   it("invites WhatsApp users to reply CONTINUE in their chat", async () => {
@@ -1108,15 +1129,17 @@ describe("processGenerationJob", () => {
   });
 
   it("sends the story link when a preview cannot be produced", async () => {
+    process.env.RESULT_MEDIA_PREVIEW_ENABLED = "true";
     h.createMmsPreview.mockRejectedValue(new Error("JPEG conversion failed"));
     await processGenerationJob(job.id);
     expect(h.sendChannelMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ mediaUrl: undefined, body: expect.stringContaining("https://comics.example.com/story/") }),
+      expect.objectContaining({ mediaUrl: undefined, body: expect.stringContaining("https://twil.io/comic-") }),
     );
     expect(h.markGenerationJobSucceeded).toHaveBeenCalledOnce();
   });
 
   it("sends a text link if Twilio rejects the media at submission", async () => {
+    process.env.RESULT_MEDIA_PREVIEW_ENABLED = "true";
     h.sendChannelMessage
       .mockRejectedValueOnce(Object.assign(new Error("Invalid media URL"), { code: 21620 }))
       .mockResolvedValueOnce("SMtext");
@@ -1155,7 +1178,7 @@ describe("processGenerationJob", () => {
       expect(h.checkpointGenerationOutput).toHaveBeenCalledWith(job.id, expect.any(String), {
         storyId: "story-1",
         imageUrl: "https://comics.example.com/api/media?key=page2",
-        deliveryHadMedia: true,
+        deliveryHadMedia: false,
       });
       expect(h.markGenerationJobSuppressed).toHaveBeenCalledWith(
         job.id, expect.any(String), "recipient_opted_out", "story-1",

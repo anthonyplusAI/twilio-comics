@@ -123,6 +123,14 @@ jobs:
             echo 'The sample placeholder is public. Set internal ingress before releasing.' >&2
             exit 1
           fi
+      - name: Verify Dub generation Job configuration
+        run: |
+          job_json="$(az containerapp job show \
+            --name "$ACA_JOB_NAME" \
+            --resource-group "$ACA_RESOURCE_GROUP" \
+            --output json \
+            --only-show-errors)"
+          bash scripts/check-aca-dub-config.sh <<< "$job_json"
       - name: Run private PostgreSQL migration Job
         run: bash scripts/run-azure-migration-job.sh
       - name: Deploy generation job

@@ -32,6 +32,7 @@ import {
   failConversationForGeneration,
 } from "@/lib/db-actions";
 import { createMmsPreview } from "@/lib/mms-preview";
+import { comicDeliveryUrl } from "@/lib/dub-short-links";
 import sharp from "sharp";
 import type { GenerationJob } from "@/lib/schema";
 
@@ -562,14 +563,15 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       return;
     }
 
-    const link = `${publicBaseUrl}/story/${result.story.slug}`;
+    const canonicalUrl = `${publicBaseUrl}/story/${result.story.slug}`;
+    const link = await comicDeliveryUrl(result.story.id, result.story.slug, canonicalUrl);
     const readyMessage = claimed.targetStoryId
-      ? `Page ${result.page.pageNumber} of "${result.story.title}" is ready! View it here: ${link}`
-      : `Your comic "${result.story.title}" is ready! View it here: ${link}`;
+      ? `Page ${result.page.pageNumber} is ready: ${link}`
+      : `Your comic is ready: ${link}`;
     const continuationInstruction = claimed.source === "voice"
-      ? `Call again from this phone, verify, then say CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page. Say NEW for a new comic.`
+      ? `Call again from this number within ${CONVERSATION_RESUME_DAYS} days; say CONTINUE for another page or NEW for a new comic.`
       : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`;
-    const body = `${readyMessage} ${continuationInstruction}`;
+    const body = `${readyMessage}\n${continuationInstruction}`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;
@@ -577,13 +579,15 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     acceptedDeliverySid = deliverySid;
     if (!deliverySid) {
       let mediaUrl: string | undefined;
-      try {
-        mediaUrl = await createMmsPreview(
-          imageKey,
-          imageKey.replace(/\.png$/, "-mms.jpg"),
-        );
-      } catch (error) {
-        console.error("MMS preview failed; sending story link", error);
+      if (process.env.RESULT_MEDIA_PREVIEW_ENABLED === "true") {
+        try {
+          mediaUrl = await createMmsPreview(
+            imageKey,
+            imageKey.replace(/\.png$/, "-mms.jpg"),
+          );
+        } catch (error) {
+          console.error("MMS preview failed; sending story link", error);
+        }
       }
       await checkpointGenerationOutput(claimed.id, workerId, {
         storyId: result.story.id,

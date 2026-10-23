@@ -91,6 +91,7 @@ export default async function StoryPage({
         title={result.story.title}
         description={result.story.description}
         pages={finishedPages}
+        shareUrl={result.story.dubShortUrl}
       />
     );
   }

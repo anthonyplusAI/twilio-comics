@@ -329,6 +329,33 @@ describe("sendFailedMmsTextFallback", () => {
     expect(claim.sql).toContain('"generation_jobs"."delivery_fallback_sid"');
   });
 
+  it("sends the saved Dub link when an MMS preview needs text fallback", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning.mockResolvedValueOnce([{
+      id: jobId,
+      storyId: "story-1",
+      source: "sms",
+      recipientAddress: "+15551112222",
+      senderAddress: "+15550000000",
+      deliveryFallbackAttempts: 1,
+      createdAt: new Date(Date.now() - 60_000),
+    }]);
+    h.getStoryById.mockResolvedValue({
+      slug: "dragon",
+      title: "Dragon Story",
+      dubShortUrl: "https://twil.io/comic-33",
+    });
+    h.sendChannelMessage.mockResolvedValue("SMfallback");
+    process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+
+    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: 'Your comic "Dragon Story" is ready. View it here: https://twil.io/comic-33',
+    }));
+  });
+
   it("bounds an MMS fallback's Twilio queue time to the remaining lifetime", async () => {
     vi.useFakeTimers();
     try {

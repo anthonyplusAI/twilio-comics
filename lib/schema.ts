@@ -112,6 +112,11 @@ export const stories = pgTable(
     description: text("description"),
     style: text("style").default("noir").notNull(),
     source: text("source").default("web").notNull(),
+    // These fields are populated only for comics delivered through a Dub link.
+    // A reserved key survives retries, and the full URL survives config changes.
+    dubKey: text("dub_key").unique(),
+    dubShortUrl: text("dub_short_url").unique(),
+    dubLinkId: text("dub_link_id").unique(),
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),

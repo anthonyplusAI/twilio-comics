@@ -13,10 +13,12 @@ export function ChannelComicViewer({
   title,
   description,
   pages,
+  shareUrl,
 }: {
   title: string;
   description: string | null;
   pages: ComicPage[];
+  shareUrl?: string | null;
 }) {
   return (
     <div className={styles.page}>
@@ -44,6 +46,7 @@ export function ChannelComicViewer({
             <ChannelComicActions
               title={title}
               imageUrls={pages.map((page) => page.imageUrl)}
+              shareUrl={shareUrl}
             />
             <p className={styles.linkNotice}>Anyone with this link can view your comic.</p>
           </div>
