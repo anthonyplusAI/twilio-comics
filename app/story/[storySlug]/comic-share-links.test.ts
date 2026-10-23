@@ -29,7 +29,9 @@ describe("comic share links", () => {
     expect(intent.searchParams.get("url")).toBe("https://twil.io/comic-12?ref=share");
   });
 
-  it("offers a LinkedIn caption with Twilio text for the user to turn into a Page mention", () => {
-    expect(linkedInShareCaption()).toContain("Twilio Comics! @Twilio #Twilio");
+  it("provides a selectable LinkedIn caption with the comic URL but no false Page mention", () => {
+    const caption = linkedInShareCaption("https://twil.io/comic-12345");
+    expect(caption).toBe("I made a comic with Twilio Comics! #Twilio\n\nhttps://twil.io/comic-12345");
+    expect(caption).not.toMatch(/@twilio/i);
   });
 });
