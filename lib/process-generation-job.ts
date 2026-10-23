@@ -28,6 +28,7 @@ import {
 import {
   completeConversationForGeneration,
   deleteBlankFailedGenerationStory,
+  expireConversationForGeneration,
   failConversationForGeneration,
 } from "@/lib/db-actions";
 import { createMmsPreview } from "@/lib/mms-preview";
@@ -37,8 +38,13 @@ import type { GenerationJob } from "@/lib/schema";
 const RESULT_DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TWILIO_VALIDITY_SAFETY_SECONDS = 10;
 const MIN_TWILIO_VALIDITY_SECONDS = 6;
+const FAILED_RECONCILIATION_GRACE_MS = 60_000;
 const EXPIRED_DELIVERY_REASON = "Result delivery expired after 24 hours";
+const EXPIRED_POLICY_REJECTION_REASON = "Result delivery expired after 24 hours (policy rejection)";
 const OPTED_OUT_DELIVERY_REASON = "recipient_opted_out";
+const POLICY_REJECTION_REASON = "Image service policy rejection";
+
+class TerminalConversationReconciliationError extends Error {}
 
 function resultDeliveryValiditySeconds(job: Pick<GenerationJob, "createdAt">): number | null {
   const createdAt = job.createdAt instanceof Date ? job.createdAt.getTime() : NaN;
@@ -60,14 +66,20 @@ function elapsedMs(since: Date | null | undefined): number | null {
 }
 
 function errorDetails(error: unknown): Record<string, unknown> {
-  const code = error && typeof error === "object" && "code" in error
-    ? String((error as { code: unknown }).code)
-    : "";
+  const rawCode = error && typeof error === "object" && "code" in error
+    ? (error as { code: unknown }).code : undefined;
+  const code = typeof rawCode === "string" || typeof rawCode === "number"
+    ? String(rawCode) : "";
+  const moderation = error instanceof ComicServiceError ? error.moderationDetails : undefined;
   return {
     errorType: error instanceof ComicServiceError
       ? error.type : error instanceof Error ? error.name : "unknown",
     httpStatus: error instanceof ComicServiceError ? error.status || null : null,
     errorCode: /^[A-Za-z0-9_-]{1,32}$/.test(code) ? code : null,
+    ...(moderation ? {
+      moderationStage: moderation.stage || null,
+      moderationCategories: moderation.categories,
+    } : {}),
   };
 }
 
@@ -154,15 +166,7 @@ async function suppressExpiredResult(
     resultGenerated: Boolean(storyId),
     totalDurationMs: elapsedMs(job.createdAt),
   }, { storyId });
-  try {
-    if (storyId) {
-      await completeConversationForGeneration(job, storyId);
-    } else {
-      await failConversationForGeneration(job);
-    }
-  } catch (error) {
-    console.error("Failed to reconcile expired comic conversation", error);
-  }
+  await clearExpiredConversation(job);
 }
 
 /** Twilio 21610 means further texts to this recipient are blocked until opt-in. */
@@ -194,14 +198,12 @@ async function suppressOptedOutResult(
     resultGenerated: Boolean(storyId),
     totalDurationMs: elapsedMs(job.createdAt),
   }, { storyId });
-  try {
-    if (storyId) {
-      await completeConversationForGeneration(job, storyId);
-    } else {
-      await failConversationForGeneration(job);
-    }
-  } catch (error) {
-    console.error("Failed to reconcile opted-out comic conversation", error);
+  if (resultDeliveryExpired(job)) {
+    await clearExpiredConversation(job);
+  } else if (storyId) {
+    await completeSavedStoryConversation(job, storyId);
+  } else {
+    await restoreFailedDraft(job);
   }
 }
 
@@ -253,21 +255,162 @@ async function ingestReferences(
   );
 }
 
-function failureMessage(error: unknown, source: string): string {
-  const voiceRecovery = "Call again from this phone, verify, and say what to change or NEW.";
+function policyRevisionHint(error: ComicServiceError): string {
+  const details = error.moderationDetails;
+  if (details?.stage === "output") return "Try a different scene.";
+  const categories = details?.categories || [];
+  if (categories.some((category) => category.startsWith("sexual"))) {
+    return "Try a non-explicit scene.";
+  }
+  if (categories.some((category) => category.startsWith("self-harm"))) {
+    return "Try a scene without self-harm.";
+  }
+  if (categories.some((category) =>
+    category.startsWith("harassment") || category.startsWith("hate"))) {
+    return "Remove abusive or targeting language.";
+  }
+  if (categories.some((category) => category.startsWith("violence"))) {
+    return "Try a less violent, non-graphic scene.";
+  }
+  if (categories.some((category) => category.startsWith("illicit"))) {
+    return "Avoid how-to details.";
+  }
+  if (details?.stage === "input") {
+    return "Try a simpler scene.";
+  }
+  return "It gave no detail. Try a simpler scene.";
+}
+
+function failureMessage(error: unknown, source: string, hasPhotos: boolean): string {
   if (error instanceof ComicServiceError) {
     if (error.type === "content_policy") {
-      return source === "voice"
-        ? `That idea couldn't be illustrated. ${voiceRecovery}`
-        : "That idea couldn't be illustrated. Tell me what to change, or send NEW for a new story.";
+      const reason = error.moderationDetails?.stage === "output"
+        ? "The generated image was blocked by a safety check."
+        : error.code === "moderation_blocked"
+          ? "The image service blocked this comic for safety."
+          : "The image service declined this request.";
+      const recovery = source === "voice"
+        ? "Call again, verify, and tell me what to change or say NEW."
+        : hasPhotos
+          ? "Reply with a change, or NEW to resend photos and idea."
+          : "Reply with a change or NEW.";
+      return `${reason} ${policyRevisionHint(error)} ${recovery}`;
     }
     if (error.type === "credit_limit") {
-      return "Our comic studio is temporarily unavailable. Please try again later.";
+      const recovery = source === "voice"
+        ? "Call again, verify, and say create it to retry or say NEW."
+        : "Reply CREATE later to retry, or NEW for a new comic.";
+      return `The image service is temporarily unavailable. Your idea is saved. ${recovery}`;
     }
   }
-  return source === "voice"
-    ? `Sorry, we couldn't create your comic this time. ${voiceRecovery}`
-    : "Sorry, we couldn't create your comic this time. Tell me what to change or send NEW.";
+  const recovery = source === "voice"
+    ? "Call again, verify, and say create it to retry or say NEW."
+    : "Reply CREATE later to retry, or NEW for a new comic.";
+  return `A technical issue stopped your comic. Your idea is saved. ${recovery}`;
+}
+
+function recoveredFailureMessage(source: string): string {
+  const recovery = source === "voice"
+    ? "Call again, verify, and revise your idea or say create it to retry."
+    : "Reply with a change or CREATE to retry; NEW starts a new comic.";
+  return `We couldn't finish your comic. Your idea is saved. ${recovery}`;
+}
+
+function recoveredPolicyFailureMessage(source: string, hasPhotos: boolean): string {
+  const recovery = source === "voice"
+    ? "Call again, verify, and tell me what to change or say NEW."
+    : hasPhotos
+      ? "Reply with a change, or NEW to resend photos and idea."
+      : "Reply with a change or NEW.";
+  return `The image service declined this comic. Your idea is saved for revision. ${recovery}`;
+}
+
+async function restoreFailedDraft(job: GenerationJob, requireRevision = false): Promise<boolean> {
+  try {
+    const restored = requireRevision
+      ? await failConversationForGeneration(job, { requireRevision: true })
+      : await failConversationForGeneration(job);
+    if (!restored) {
+      console.warn("No matching draft to restore after generation failure", { jobId: job.id });
+    }
+    return restored;
+  } catch (error) {
+    console.error("Failed to restore draft after generation failure", {
+      jobId: job.id,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    // The job is already terminal. Keep the queue message for a later
+    // reconciliation attempt instead of leaving the draft stuck generating.
+    throw new TerminalConversationReconciliationError("Failed to restore comic draft after terminal failure");
+  }
+}
+
+async function completeSavedStoryConversation(job: GenerationJob, storyId: string): Promise<boolean> {
+  try {
+    return await completeConversationForGeneration(job, storyId);
+  } catch (error) {
+    console.error("Failed to complete saved comic conversation", {
+      jobId: job.id,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    throw new TerminalConversationReconciliationError("Failed to complete comic conversation after terminal failure");
+  }
+}
+
+async function clearExpiredConversation(job: GenerationJob): Promise<boolean> {
+  try {
+    return await expireConversationForGeneration(job);
+  } catch (error) {
+    console.error("Failed to clear expired comic conversation", {
+      jobId: job.id,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    throw new TerminalConversationReconciliationError("Failed to clear expired comic conversation");
+  }
+}
+
+async function notifyGenerationFailure(job: GenerationJob, failureBody: string): Promise<void> {
+  try {
+    const validityPeriod = resultDeliveryValiditySeconds(job);
+    if (validityPeriod === null) {
+      await logGenerationEvent(job, "generation.delivery", "delivery:expired", "suppressed", {
+        reason: "delivery_window_expired",
+        ageMs: elapsedMs(job.createdAt),
+        purpose: "generation_failure_notice",
+      });
+      return;
+    }
+    const channel = (job.source === "voice" ? "sms" : job.source) as TwilioMessageChannel;
+    const callbackBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+    const failureSid = await sendChannelMessage({
+      channel,
+      to: job.recipientAddress,
+      from: job.senderAddress,
+      body: failureBody,
+      ...(channel === "sms" ? { validityPeriod } : {}),
+      ...(callbackBaseUrl ? {
+        statusCallback: `${callbackBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(job.id)}&failure=1#rc=3&rp=5xx,ct,rt`,
+      } : {}),
+    });
+    await recordActivityEvent({
+      eventKey: `message:${failureSid}:outbound`,
+      userId: job.userId,
+      channel,
+      kind: "message.outbound",
+      direction: "outbound",
+      address: job.recipientAddress,
+      messageSid: failureSid,
+      jobId: job.id,
+      content: failureBody,
+      status: "accepted",
+      details: { source: job.source, purpose: "generation_failure_notice", attemptCount: job.attemptCount },
+    });
+  } catch (error) {
+    console.error("Failed to send generation failure notification", {
+      jobId: job.id,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 function isPermanent(error: unknown, attempts: number): boolean {
@@ -302,7 +445,36 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       }
       return;
     }
-    if (["admitting", "failed", "quota_rejected", "processing"].includes(existing.status)) {
+    if (existing.status === "failed") {
+      // The previous worker may have failed to restore the submitted draft
+      // after marking its job terminal. Only the matching generating draft
+      // can be restored, so duplicate queue deliveries cannot notify twice.
+      const failedForMs = elapsedMs(existing.completedAt);
+      if (failedForMs !== null && failedForMs < FAILED_RECONCILIATION_GRACE_MS) {
+        // A separate queue delivery may race the worker that just marked the
+        // job failed. Keep it retryable while that worker cleans up output.
+        throw new Error("Terminal comic failure is still reconciling");
+      }
+      const expired = existing.lastError === EXPIRED_DELIVERY_REASON ||
+        existing.lastError === EXPIRED_POLICY_REJECTION_REASON || resultDeliveryExpired(existing);
+      if (expired) {
+        await clearExpiredConversation(existing);
+        return;
+      }
+      if (existing.storyId) {
+        await completeSavedStoryConversation(existing, existing.storyId);
+        return;
+      }
+      const policyRejected = existing.lastError === POLICY_REJECTION_REASON;
+      const restored = await restoreFailedDraft(existing, policyRejected);
+      if (restored && existing.lastError !== OPTED_OUT_DELIVERY_REASON) {
+        await notifyGenerationFailure(existing, policyRejected
+          ? recoveredPolicyFailureMessage(existing.source, existing.characterImageUrls.length > 0)
+          : recoveredFailureMessage(existing.source));
+      }
+      return;
+    }
+    if (["admitting", "quota_rejected", "processing"].includes(existing.status)) {
       return;
     }
     throw new Error("Generation job is already being processed");
@@ -395,8 +567,8 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       ? `Page ${result.page.pageNumber} of "${result.story.title}" is ready! View it here: ${link}`
       : `Your comic "${result.story.title}" is ready! View it here: ${link}`;
     const continuationInstruction = claimed.source === "voice"
-      ? `For another page, call again from this phone within ${CONVERSATION_RESUME_DAYS} days and say CONTINUE after verification.`
-      : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page.`;
+      ? `Call again from this phone, verify, then say CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page. Say NEW for a new comic.`
+      : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`;
     const body = `${readyMessage} ${continuationInstruction}`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
@@ -491,6 +663,11 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       // that owner may change state, release quota, or notify the caller.
       return;
     }
+    if (error instanceof TerminalConversationReconciliationError) {
+      // A failed job cannot be claimed again, but its queue redelivery can
+      // repair the matching conversation without regenerating or texting.
+      throw error;
+    }
     const message = error instanceof Error ? error.message : "Unknown error";
     if (acceptedDeliverySid) {
       // Twilio accepted the result. Retrying DB/quota checkpoints must never
@@ -538,7 +715,11 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     }
 
     try {
-      const terminalReason = expired ? EXPIRED_DELIVERY_REASON : message;
+      const policyRejected = !generatedStoryId && error instanceof ComicServiceError &&
+        error.type === "content_policy";
+      const terminalReason = expired
+        ? policyRejected ? EXPIRED_POLICY_REJECTION_REASON : EXPIRED_DELIVERY_REASON
+        : policyRejected ? POLICY_REJECTION_REASON : message;
       if (generatedStoryId) {
         await markGenerationJobSuppressed(claimed.id, workerId, terminalReason, generatedStoryId);
       } else {
@@ -563,61 +744,27 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     if (!generatedStoryId && !claimed.storyId) {
       await cleanupFailedEmptyOutput(claimed);
     }
+    if (expired || resultDeliveryExpired(claimed)) {
+      await clearExpiredConversation(claimed);
+      return;
+    }
     if (generatedStoryId) {
-      try {
-        await completeConversationForGeneration(claimed, generatedStoryId);
-      } catch (conversationError) {
-        console.error("Failed to reconcile saved comic conversation", conversationError);
-      }
+      const completed = await completeSavedStoryConversation(claimed, generatedStoryId);
+      // A newer draft may have replaced this submission while delivery was
+      // failing. Do not invite the current owner to retrieve that older job.
+      if (!completed) return;
     }
-    if (expired) return;
-    try {
-      const validityPeriod = resultDeliveryValiditySeconds(claimed);
-      if (validityPeriod === null) {
-        await logGenerationEvent(claimed, "generation.delivery", "delivery:expired", "suppressed", {
-          reason: "delivery_window_expired",
-          ageMs: elapsedMs(claimed.createdAt),
-          purpose: "generation_failure_notice",
-        });
-        return;
-      }
-      const failureBody = generatedStoryId
-        ? "Your comic was created, but I couldn't deliver the link. Reply STATUS to get it."
-        : failureMessage(error, claimed.source);
-      const channel = (claimed.source === "voice" ? "sms" : claimed.source) as TwilioMessageChannel;
-      const callbackBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
-      const failureSid = await sendChannelMessage({
-        channel,
-        to: claimed.recipientAddress,
-        from: claimed.senderAddress,
-        body: failureBody,
-        ...(channel === "sms" ? { validityPeriod } : {}),
-        ...(callbackBaseUrl ? {
-          statusCallback: `${callbackBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}&failure=1#rc=3&rp=5xx,ct,rt`,
-        } : {}),
-      });
-      await recordActivityEvent({
-        eventKey: `message:${failureSid}:outbound`,
-        userId: claimed.userId,
-        channel,
-        kind: "message.outbound",
-        direction: "outbound",
-        address: claimed.recipientAddress,
-        messageSid: failureSid,
-        jobId: claimed.id,
-        content: failureBody,
-        status: "accepted",
-        details: { source: claimed.source, purpose: "generation_failure_notice", attemptCount: claimed.attemptCount },
-      });
-    } catch (notificationError) {
-      console.error("Failed to send generation failure notification", notificationError);
-    }
+    // Restore before inviting CREATE or a revision. While still generating,
+    // inbound messages would only get a "still creating" reply. A false
+    // result means the original draft no longer matches this failed job.
     if (!generatedStoryId) {
-      try {
-        await failConversationForGeneration(claimed);
-      } catch (conversationError) {
-        console.error("Failed to restore draft after generation failure", conversationError);
-      }
+      const policyRejected = error instanceof ComicServiceError && error.type === "content_policy";
+      const restored = await restoreFailedDraft(claimed, policyRejected);
+      if (!restored) return;
     }
+    const failureBody = generatedStoryId
+      ? "Your comic was created, but I couldn't deliver the link. Reply STATUS to get it."
+      : failureMessage(error, claimed.source, claimed.characterImageUrls.length > 0);
+    await notifyGenerationFailure(claimed, failureBody);
   }
 }

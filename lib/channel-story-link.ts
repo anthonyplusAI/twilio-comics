@@ -66,8 +66,10 @@ export async function channelStoryLink(input: {
  * The inbound webhook has already verified the Twilio request and created the
  * SMS identity. A matching Voice identity, job owner, story owner, recipient,
  * and Twilio destination are all required before returning a Voice result.
- * Completed stories remain stored, but a texted link is recoverable only
- * shortly after generation because a phone number can later be reassigned.
+ * The source-channel conversation must still point at the completed story.
+ * An expiry reset clears that marker, while the job and story remain in admin
+ * history. Voice results also require a job created and completed within 24
+ * hours; a late completion must not reopen an expired caller's link.
  */
 export async function latestStoryLinkForSms(input: {
   address: string;
@@ -85,6 +87,11 @@ export async function latestStoryLinkForSms(input: {
       ON sms_identity.user_id = job.user_id
     JOIN channel_identities AS source_identity
       ON source_identity.user_id = job.user_id
+    JOIN conversations AS source_conversation
+      ON source_conversation.channel = job.source
+      AND source_conversation.phone_number = sms_identity.address
+      AND source_conversation.state = 'done'
+      AND source_conversation.active_story_id = story.id
     WHERE sms_identity.provider = 'twilio'
       AND sms_identity.channel = 'sms'
       AND sms_identity.address = ${input.address}
@@ -98,6 +105,10 @@ export async function latestStoryLinkForSms(input: {
       AND job.sender_address = ${input.senderAddress}
       AND job.completed_at IS NOT NULL
       AND job.completed_at >= NOW() - (${CONVERSATION_RESUME_DAYS} * INTERVAL '1 day')
+      AND (job.source <> 'voice' OR (
+        job.created_at >= NOW() - INTERVAL '24 hours'
+        AND job.completed_at >= NOW() - INTERVAL '24 hours'
+      ))
       AND (
         job.status = 'succeeded'
         OR (job.status = 'failed' AND EXISTS (

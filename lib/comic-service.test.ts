@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   getBlobPublicUrl: vi.fn(),
   createStory: vi.fn(),
   createPage: vi.fn(),
+  getStoryWithPages: vi.fn(),
   updateStory: vi.fn(),
   updatePage: vi.fn(),
   deleteStory: vi.fn(),
@@ -23,12 +24,13 @@ vi.mock("@/lib/blob-storage", () => ({
 vi.mock("@/lib/db-actions", () => ({
   createStory: h.createStory,
   createPage: h.createPage,
+  getStoryWithPages: h.getStoryWithPages,
   updateStory: h.updateStory,
   updatePage: h.updatePage,
   deleteStory: h.deleteStory,
 }));
 
-import { createComicStory } from "@/lib/comic-service";
+import { createComicContinuationPage, createComicStory } from "@/lib/comic-service";
 
 beforeEach(() => {
   Object.values(h).forEach((f) => f.mockReset());
@@ -87,6 +89,62 @@ describe("createComicStory", () => {
       createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false }),
     ).rejects.toMatchObject({ type: "content_policy" });
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
+  });
+
+  it("treats a generic NO_IMAGE response as an image service error", async () => {
+    h.generateComicImage.mockRejectedValue(new Error("NO_IMAGE: no image data returned"));
+
+    await expect(
+      createComicStory({ userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false }),
+    ).rejects.toMatchObject({ type: "api_error" });
+    expect(h.deleteStory).toHaveBeenCalledWith("s1");
+  });
+
+  it("preserves only documented moderation details when the image provider blocks a new comic", async () => {
+    const error = Object.assign(new Error("Image request blocked"), {
+      status: 400,
+      code: "moderation_blocked",
+      error: {
+        type: "image_generation_user_error",
+        code: "moderation_blocked",
+        moderation_details: {
+          moderation_stage: "input",
+          categories: ["harassment", "invented_category", "violence"],
+        },
+      },
+    });
+    h.generateComicImage.mockRejectedValue(error);
+
+    await expect(
+      createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false }),
+    ).rejects.toMatchObject({
+      type: "content_policy",
+      code: "moderation_blocked",
+      status: 400,
+      moderationDetails: { stage: "input", categories: ["harassment", "violence"] },
+    });
+  });
+
+  it("does not preserve untrusted moderation labels when provider details are malformed", async () => {
+    const error = Object.assign(new Error("Image request blocked"), {
+      status: 400,
+      code: "moderation_blocked",
+      error: {
+        moderation_details: {
+          moderation_stage: "not-a-stage",
+          categories: ["copyright", { secret: "do-not-expose" }],
+        },
+      },
+    });
+    h.generateComicImage.mockRejectedValue(error);
+
+    try {
+      await createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false });
+      throw new Error("Expected generation to fail");
+    } catch (caught) {
+      expect(caught).toMatchObject({ type: "content_policy", code: "moderation_blocked" });
+      expect((caught as { moderationDetails?: unknown }).moderationDetails).toBeUndefined();
+    }
   });
 
   it("maps a 402 to credit_limit and cleans up", async () => {
@@ -166,5 +224,52 @@ describe("createComicStory", () => {
     ).rejects.toThrow("page update failed");
 
     expect(h.deleteStory).not.toHaveBeenCalled();
+  });
+});
+
+describe("createComicContinuationPage", () => {
+  it("preserves provider moderation details for a blocked additional page", async () => {
+    h.getStoryWithPages.mockResolvedValue({
+      story: {
+        id: "s1",
+        slug: "hero-abcd",
+        title: "The Rooftop Hero",
+        description: null,
+        style: "noir",
+        userId: "u1",
+      },
+      pages: [{
+        id: "p1",
+        storyId: "s1",
+        pageNumber: 1,
+        prompt: "A hero appears",
+        generatedImageUrl: "https://account.blob.core.windows.net/comics/s1/page-1.png",
+      }],
+    });
+    h.createPage.mockResolvedValue({
+      id: "p2",
+      storyId: "s1",
+      pageNumber: 2,
+      prompt: "A second page",
+      generatedImageUrl: null,
+    });
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Image request blocked"), {
+      status: 400,
+      code: "moderation_blocked",
+      error: {
+        moderation_details: { moderation_stage: "output", categories: ["sexual"] },
+      },
+    }));
+
+    await expect(createComicContinuationPage({
+      userId: "u1",
+      storyId: "s1",
+      pageId: "p2",
+      prompt: "A second page",
+    })).rejects.toMatchObject({
+      type: "content_policy",
+      code: "moderation_blocked",
+      moderationDetails: { stage: "output", categories: ["sexual"] },
+    });
   });
 });

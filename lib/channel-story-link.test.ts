@@ -88,7 +88,7 @@ describe("channel story link", () => {
       .rejects.toThrow("PostgreSQL unavailable");
   });
 
-  it("finds the newest owned SMS or Voice comic within 14 days of completion", async () => {
+  it("finds the newest owned active comic, allowing recent Voice recovery", async () => {
     h.execute.mockResolvedValue({ rows: [{
       story_id: storyId,
       slug: "phone-call-hero",
@@ -116,10 +116,12 @@ describe("channel story link", () => {
     expect(query.sql).toMatch(/source_identity\.channel = job\.source/);
     expect(query.sql).toMatch(/source_identity\.address = \$3/);
     expect(query.sql).toMatch(/source_identity\.normalized_address = \$4/);
+    expect(query.sql).toMatch(/JOIN conversations AS source_conversation\s+ON source_conversation\.channel = job\.source\s+AND source_conversation\.phone_number = sms_identity\.address\s+AND source_conversation\.state = 'done'\s+AND source_conversation\.active_story_id = story\.id/s);
     expect(query.sql).toMatch(/job\.source IN \('sms', 'voice'\)/);
     expect(query.sql).toMatch(/job\.recipient_address = \$5/);
     expect(query.sql).toMatch(/job\.sender_address = \$6/);
     expect(query.sql).toMatch(/job\.completed_at IS NOT NULL/);
+    expect(query.sql).toMatch(/job\.source <> 'voice' OR \(\s*job\.created_at >= NOW\(\) - INTERVAL '24 hours'\s+AND job\.completed_at >= NOW\(\) - INTERVAL '24 hours'\s*\)/s);
     expect(query.sql).toMatch(
       /job\.completed_at >= NOW\(\) - \(\$7 \* INTERVAL '1 day'\)/,
     );
@@ -129,6 +131,20 @@ describe("channel story link", () => {
       "+15551112222", "+15551112222", "+15551112222",
       "+15551112222", "+15551112222", "+15553334444", 14,
     ]);
+  });
+
+  it("returns no old Voice link after the source conversation is reset", async () => {
+    // PostgreSQL excludes rows without a matching active source conversation.
+    h.execute.mockResolvedValue({ rows: [] });
+
+    await expect(latestStoryLinkForSms({
+      address: "+15551112222",
+      senderAddress: "+15553334444",
+    })).resolves.toBeNull();
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toContain("source_conversation.active_story_id = story.id");
+    expect(query.sql).toContain("job.created_at >= NOW() - INTERVAL '24 hours'");
   });
 
   it("recovers a saved comic after any terminal delivery failure when this job has an image", async () => {

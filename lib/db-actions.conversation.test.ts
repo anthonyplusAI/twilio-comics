@@ -23,6 +23,7 @@ vi.mock("@/lib/db", () => ({
 
 import {
   completeConversationForGeneration,
+  expireConversationForGeneration,
   failConversationForGeneration,
   getOrCreateConversation,
 } from "@/lib/db-actions";
@@ -88,5 +89,53 @@ describe("generation conversation checkpoints", () => {
     expect(query.set).toHaveBeenCalledWith(expect.objectContaining({ state: "confirming" }));
     const sql = dialect.sqlToQuery(query.where.mock.calls[0][0]).sql;
     expect(sql).toContain("generationRequestKey");
+  });
+
+  it("keeps a blocked prompt and photos in collecting until the idea is revised", async () => {
+    const query = chain([{ id: "conversation-1" }]);
+    h.update.mockReturnValue(query);
+
+    const changed = await failConversationForGeneration(job, { requireRevision: true });
+
+    expect(changed).toBe(true);
+    const update = query.set.mock.calls[0][0];
+    expect(update.state).toBe("collecting");
+    const collected = dialect.sqlToQuery(update.collected);
+    expect(collected.sql).toContain("jsonb_build_object");
+    expect(collected.sql).toContain("generationRequestKey");
+    expect(collected.sql).toContain("blockedPrompt");
+    expect(collected.params).toContain(job.prompt);
+    const where = dialect.sqlToQuery(query.where.mock.calls[0][0]);
+    expect(where.params).toContain("generating");
+    expect(where.params).toContain(job.idempotencyKey);
+  });
+
+  it("clears only the matching expired draft and active story without touching job history", async () => {
+    const query = chain([{ id: "conversation-1" }]);
+    h.update.mockReturnValue(query);
+
+    const changed = await expireConversationForGeneration(job);
+
+    expect(changed).toBe(true);
+    expect(query.set).toHaveBeenCalledWith(expect.objectContaining({
+      state: "collecting",
+      collected: {},
+      activeStoryId: null,
+    }));
+    const where = dialect.sqlToQuery(query.where.mock.calls[0][0]);
+    expect(where.params).toContain("generating");
+    expect(where.params).toContain(job.idempotencyKey);
+    expect(where.params).toContain(job.recipientAddress);
+    expect(where.params).toContain(job.source);
+  });
+
+  it("leaves a newer conversation alone after an expired job", async () => {
+    const query = chain([]);
+    h.update.mockReturnValue(query);
+
+    const changed = await expireConversationForGeneration(job);
+
+    expect(changed).toBe(false);
+    expect(query.where).toHaveBeenCalledOnce();
   });
 });

@@ -178,7 +178,9 @@ describe("inbound voice verification", () => {
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
 
     expect(response.status).toBe(200);
-    expect(await response.text()).toMatch(/too many verification codes/i);
+    const xml = await response.text();
+    expect(xml).toMatch(/temporary verification limit/i);
+    expect(xml).not.toMatch(/this number has requested/i);
     expect(startVoiceVerification).not.toHaveBeenCalled();
   });
 

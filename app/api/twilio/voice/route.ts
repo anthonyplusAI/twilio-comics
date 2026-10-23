@@ -65,7 +65,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   });
   if (!reservation.allowed) {
     return voiceHangupTwiML(reservation.reason === "rate_limit"
-      ? "This number has requested too many verification codes. Please try again later."
+      ? "We've reached a temporary verification limit. Please try again later."
       : "I couldn't start verification for this call. Please try again later.");
   }
 

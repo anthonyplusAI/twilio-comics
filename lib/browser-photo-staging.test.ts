@@ -1,14 +1,46 @@
-import { describe, expect, it } from "vitest";
-import { currentCameraReferences, newCameraBlobKey, planCameraStage } from "@/lib/browser-photo-staging";
+import { describe, expect, it, vi } from "vitest";
+import {
+  clearStagedCameraPhotoReferences,
+  currentCameraReferences,
+  newCameraBlobKey,
+  planCameraStage,
+} from "@/lib/browser-photo-staging";
+import { channelUserId } from "@/lib/channel-identities";
 import { VOICE_PHOTO_HANDOFF_WINDOW_MS } from "@/lib/voice-photo-handoff";
 
-const OWNER = `twilio_${"a".repeat(32)}`;
+const h = vi.hoisted(() => ({ transaction: vi.fn() }));
+vi.mock("@/lib/db", () => ({ db: { transaction: h.transaction } }));
+
+const PHONE = "+14155552671";
+const OWNER = channelUserId(PHONE);
 const OTHER = `twilio_${"b".repeat(32)}`;
 const FIRST = `uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000001.jpg`;
 const SECOND = `uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000002.jpg`;
 const REPLACEMENT = `uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000003.jpg`;
 const NOW = Date.parse("2026-10-22T12:00:00Z");
 const FRESH = new Date(NOW - 1000);
+
+function cameraStageDb(initialReferences: string[]) {
+  const row = {
+    id: "camera-conversation",
+    collected: { characterImageUrls: [...initialReferences] },
+    updatedAt: new Date(),
+  };
+  const tx = {
+    select: vi.fn(() => ({
+      from: () => ({ where: () => ({ for: () => ({
+        limit: async () => [{ ...row, collected: structuredClone(row.collected) }],
+      }) }) }),
+    })),
+    update: vi.fn(() => ({
+      set: (values: Partial<typeof row>) => ({
+        where: async () => { Object.assign(row, values); },
+      }),
+    })),
+  };
+  h.transaction.mockImplementation(async (work: (value: typeof tx) => Promise<unknown>) => work(tx));
+  return { row, tx };
+}
 
 describe("verified browser photo staging", () => {
   it("keeps at most two owner-scoped photos and permits deliberate replacement", () => {
@@ -51,5 +83,42 @@ describe("verified browser photo staging", () => {
       .toEqual([`blob:${FIRST}`]);
     expect(currentCameraReferences(collected, new Date(NOW + 30_001), OWNER, NOW))
       .toEqual([]);
+  });
+
+  it("clears the exact handed-off camera set under a row lock", async () => {
+    const { row, tx } = cameraStageDb([`blob:${FIRST}`, `blob:${SECOND}`]);
+
+    expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`, `blob:${SECOND}`]))
+      .toBe(true);
+    expect(row.collected).toEqual({});
+    expect(tx.select).toHaveBeenCalledOnce();
+    expect(tx.update).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a newly restaged photo when an old submitted turn retries cleanup", async () => {
+    const { row, tx } = cameraStageDb([`blob:${REPLACEMENT}`]);
+
+    expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`])).toBe(false);
+    expect(row.collected).toEqual({ characterImageUrls: [`blob:${REPLACEMENT}`] });
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it("removes consumed photos while retaining a newly added second photo", async () => {
+    const { row } = cameraStageDb([`blob:${FIRST}`, `blob:${REPLACEMENT}`]);
+
+    expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`])).toBe(true);
+    expect(row.collected).toEqual({ characterImageUrls: [`blob:${REPLACEMENT}`] });
+  });
+
+  it("clears any staged set for an explicit reset and rejects malformed input", async () => {
+    const { row, tx } = cameraStageDb([`blob:${FIRST}`]);
+
+    expect(await clearStagedCameraPhotoReferences(PHONE, [])).toBe(false);
+    expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST.replace(OWNER, OTHER)}`]))
+      .toBe(false);
+    expect(await clearStagedCameraPhotoReferences("invalid phone")).toBe(false);
+    expect(tx.update).not.toHaveBeenCalled();
+    expect(await clearStagedCameraPhotoReferences(PHONE)).toBe(true);
+    expect(row.collected).toEqual({});
   });
 });

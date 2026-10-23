@@ -22,6 +22,66 @@ const CAMERA_REFERENCE = /^blob:uploads\/twilio_[a-f0-9]{32}\/camera\/[a-f0-9]{8
 
 export type PhotoHandoffSourceChannel = "sms" | "camera";
 
+export interface VoicePhotoHandoffCandidate<TSource extends PhotoHandoffConversation> {
+  sourceChannel: PhotoHandoffSourceChannel;
+  source: TSource;
+  recentSmsMediaUrls?: string[];
+}
+
+/** Select the first fresh source in the admin's preferred order. */
+export function selectVoicePhotoHandoff<TSource extends PhotoHandoffConversation>(input: {
+  mode: VoicePhotoMode;
+  voice: VoicePhotoDraft;
+  candidates: VoicePhotoHandoffCandidate<TSource>[];
+  now?: Date;
+}): (VoicePhotoHandoffCandidate<TSource> & { handoff: VoicePhotoDraft }) | null {
+  let newestUnchangedSourceAt = -Infinity;
+  for (const candidate of input.candidates) {
+    const handoff = planVoicePhotoHandoff({
+      mode: input.mode,
+      sourceChannel: candidate.sourceChannel,
+      voice: input.voice,
+      source: candidate.source,
+      recentSmsMediaUrls: candidate.recentSmsMediaUrls,
+      now: input.now,
+    });
+    if (handoff === "unchanged") {
+      newestUnchangedSourceAt = Math.max(
+        newestUnchangedSourceAt,
+        candidate.source.updatedAt.getTime(),
+      );
+      continue;
+    }
+    if (handoff && candidate.source.updatedAt.getTime() > newestUnchangedSourceAt) {
+      return { ...candidate, handoff };
+    }
+  }
+  return null;
+}
+
+function photoFingerprint(sourceChannel: PhotoHandoffSourceChannel, references: readonly string[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ sourceChannel, references }))
+    .digest("hex");
+}
+
+/** An accepted Voice job consumes only the SMS photo stage it actually used. */
+export function planConsumedSmsPhotoStage(
+  source: PhotoHandoffConversation,
+  submittedReferences: readonly string[],
+): AgentCollected | null {
+  const staged = source.collected.characterImageUrls;
+  if (!isPhotoOnlySmsStage(source) || source.collected.targetStoryId ||
+      !Array.isArray(staged) || staged.length < 1 || staged.length > 2 ||
+      submittedReferences.length !== staged.length ||
+      !staged.every((reference, index) =>
+        isTwilioMediaUrl(reference) && reference === submittedReferences[index]) ||
+      source.collected.photoHandoffFingerprint !== photoFingerprint("sms", staged)) {
+    return null;
+  }
+  return { ...source.collected, characterImageUrls: [], photoHandoffFingerprint: undefined };
+}
+
 /** The selected source wins when both text and kiosk photos are staged. */
 export function photoHandoffSourceChannels(
   mode: VoicePhotoMode,
@@ -88,10 +148,11 @@ export function planVoicePhotoHandoff({
     .slice(0, 2);
   if (references.length === 0) return null;
 
-  const fingerprint = createHash("sha256")
-    .update(JSON.stringify({ sourceChannel, references }))
-    .digest("hex");
+  const fingerprint = photoFingerprint(sourceChannel, references);
   if (voice.collected.photoHandoffFingerprint === fingerprint) return "unchanged";
+
+  const resetAt = Date.parse(voice.collected.photoHandoffResetAt || "");
+  if (Number.isFinite(resetAt) && source.updatedAt.getTime() <= resetAt) return null;
 
   // A finished Voice comic is preserved until the person stages new photos.
   // New photos signal a fresh comic, while an unfinished call keeps its idea.

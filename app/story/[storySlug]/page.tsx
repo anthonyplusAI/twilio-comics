@@ -1,10 +1,20 @@
 import { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { cache } from "react";
 import { getStoryWithPagesBySlug } from "@/lib/db-actions";
+import { ChannelComicViewer } from "./channel-comic-viewer";
 import { StoryEditorClient } from "./story-editor-client";
 
 // Deleted comics should stop resolving through the page and its metadata.
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+// Metadata and the page render share one database read per request.
+const getStory = cache(getStoryWithPagesBySlug);
+
+function isPhoneChannel(source: string) {
+  return source === "sms" || source === "voice" || source === "whatsapp";
+}
 
 export async function generateMetadata({
   params,
@@ -14,7 +24,7 @@ export async function generateMetadata({
   const { storySlug: slug } = await params;
 
   try {
-    const result = await getStoryWithPagesBySlug(slug);
+    const result = await getStory(slug);
 
     if (!result) {
       return {
@@ -35,10 +45,20 @@ export async function generateMetadata({
     return {
       title,
       description,
+      // Phone-channel comics can be shared by link without appearing in search.
+      ...(isPhoneChannel(story.source)
+        ? { robots: { index: false, follow: false } }
+        : {}),
       openGraph: {
         title,
         description,
         type: "website",
+        images: [firstPageImage],
+      },
+      twitter: {
+        card: "summary_large_image",
+        title,
+        description,
         images: [firstPageImage],
       },
     };
@@ -51,6 +71,29 @@ export async function generateMetadata({
   }
 }
 
-export default function StoryEditorPage() {
+export default async function StoryPage({
+  params,
+}: {
+  params: Promise<{ storySlug: string }>;
+}) {
+  const { storySlug: slug } = await params;
+  const result = await getStory(slug);
+  if (!result) notFound();
+
+  if (isPhoneChannel(result.story.source)) {
+    const finishedPages = result.pages.flatMap((page) =>
+      page.generatedImageUrl
+        ? [{ pageNumber: page.pageNumber, imageUrl: page.generatedImageUrl }]
+        : [],
+    );
+    return (
+      <ChannelComicViewer
+        title={result.story.title}
+        description={result.story.description}
+        pages={finishedPages}
+      />
+    );
+  }
+
   return <StoryEditorClient />;
 }

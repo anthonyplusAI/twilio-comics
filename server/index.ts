@@ -4,6 +4,7 @@ import next from "next";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
 import { recordVoiceCallStart, recordVoiceTurn } from "@/lib/activity-events";
+import { clearStagedCameraPhotoReferences } from "@/lib/browser-photo-staging";
 import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { advanceComicAgent, emptyAgentCollected } from "@/lib/comic-agent";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
@@ -12,6 +13,7 @@ import { getGenerationJobByIdempotencyKey, submitGenerationJob } from "@/lib/gen
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
+import { isTwilioMediaUrl } from "@/lib/twilio";
 import {
   createVoiceRelaySession,
   type VoiceConversationSnapshot,
@@ -23,9 +25,11 @@ import { getConversationRelayUrl } from "@/lib/voice-twiml";
 import {
   isPhotoOnlySmsStage,
   photoHandoffSourceChannels,
-  planVoicePhotoHandoff,
+  planConsumedSmsPhotoStage,
+  selectVoicePhotoHandoff,
   VOICE_PHOTO_HANDOFF_WINDOW_MS,
   withoutVoicePhotoReferences,
+  type VoicePhotoHandoffCandidate,
 } from "@/lib/voice-photo-handoff";
 
 function snapshot(row: Conversation): VoiceConversationSnapshot {
@@ -104,6 +108,7 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
       return snapshot(updated);
     }
 
+    const candidates: VoicePhotoHandoffCandidate<Conversation>[] = [];
     for (const sourceChannel of sourceChannels) {
       const [source] = await tx.select().from(conversations)
         .where(and(
@@ -129,43 +134,68 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
           .limit(20))
           .flatMap((message) => message.mediaUrls)
         : [];
-      const handoff = planVoicePhotoHandoff({
-        mode: voicePhotoMode,
-        sourceChannel,
-        voice: snapshot(voice),
-        source,
-        recentSmsMediaUrls,
-      });
-      if (!handoff) continue;
-      if (handoff === "unchanged") return snapshot(voice);
+      candidates.push({ sourceChannel, source, recentSmsMediaUrls });
+    }
 
-      const [updated] = await tx.update(conversations)
+    // A source already handed to this caller must not hide a fresh stage from
+    // the other channel. The first new candidate still follows admin priority.
+    const selected = selectVoicePhotoHandoff({
+      mode: voicePhotoMode,
+      voice: snapshot(voice),
+      candidates,
+    });
+    if (!selected) return snapshot(voice);
+    const { handoff, source, sourceChannel } = selected;
+    const [updated] = await tx.update(conversations)
+      .set({
+        state: handoff.state,
+        collected: handoff.collected,
+        activeStoryId: handoff.activeStoryId,
+        updatedAt: nextRevision,
+      })
+      .where(and(eq(conversations.id, voice.id), eq(conversations.updatedAt, voice.updatedAt)))
+      .returning();
+    if (!updated) throw new Error("Voice photo handoff lost its conversation revision");
+
+    // Keep a photo-only SMS draft available if the caller hangs up. Once
+    // Voice accepts the comic job, the matching stage is consumed below.
+    const fingerprint = handoff.collected.photoHandoffFingerprint;
+    if (sourceChannel === "sms" && fingerprint && isPhotoOnlySmsStage(source) &&
+        source.collected.photoHandoffFingerprint !== fingerprint) {
+      await tx.update(conversations)
         .set({
-          state: handoff.state,
-          collected: handoff.collected,
-          activeStoryId: handoff.activeStoryId,
+          collected: { ...source.collected, photoHandoffFingerprint: fingerprint },
           updatedAt: nextRevision,
         })
-        .where(and(eq(conversations.id, voice.id), eq(conversations.updatedAt, voice.updatedAt)))
-        .returning();
-      if (!updated) throw new Error("Voice photo handoff lost its conversation revision");
-
-      // Keep the SMS draft usable if a caller hangs up. A marker lets the next
-      // MMS begin a fresh photo set while the existing set remains available
-      // for someone who finishes their idea by text instead.
-      const fingerprint = handoff.collected.photoHandoffFingerprint;
-      if (sourceChannel === "sms" && fingerprint && isPhotoOnlySmsStage(source) &&
-          source.collected.photoHandoffFingerprint !== fingerprint) {
-        await tx.update(conversations)
-          .set({
-            collected: { ...source.collected, photoHandoffFingerprint: fingerprint },
-            updatedAt: nextRevision,
-          })
-          .where(eq(conversations.id, source.id));
-      }
-      return snapshot(updated);
+        .where(eq(conversations.id, source.id));
     }
-    return snapshot(voice);
+    return snapshot(updated);
+  });
+}
+
+async function consumeSubmittedVoiceSmsPhotos(
+  phone: string,
+  submittedReferences: readonly string[],
+): Promise<boolean> {
+  if (!/^\+[1-9]\d{6,14}$/.test(phone) || submittedReferences.length === 0) return false;
+  return db.transaction(async (tx) => {
+    const [source] = await tx.select().from(conversations)
+      .where(and(eq(conversations.channel, "sms"), eq(conversations.phoneNumber, phone)))
+      .for("update")
+      .limit(1);
+    if (!source) return false;
+    // An SMS turn holding this lease may have read the earlier photo draft.
+    // Let its checkpoint finish rather than clearing a concurrently used set.
+    if (source.leaseOwner && source.leaseExpiresAt && source.leaseExpiresAt > new Date()) {
+      return false;
+    }
+    const collected = planConsumedSmsPhotoStage(source, submittedReferences);
+    if (!collected) return false;
+    const [updated] = await tx.update(conversations)
+      .set({ collected, updatedAt: nextRevision })
+      .where(and(eq(conversations.id, source.id), eq(conversations.updatedAt, source.updatedAt)))
+      .returning({ id: conversations.id });
+    return Boolean(updated);
   });
 }
 
@@ -261,7 +291,33 @@ async function main(): Promise<void> {
       save: saveVoiceConversation,
       advance: advanceComicAgent,
       identity,
-      submit: submitGenerationJob,
+      submit: async (input) => {
+        const submission = await submitGenerationJob(input);
+        if (submission.accepted) {
+          const smsReferences = input.characterImageUrls.filter(isTwilioMediaUrl);
+          if (smsReferences.length) {
+            try {
+              await consumeSubmittedVoiceSmsPhotos(input.recipientAddress, smsReferences);
+            } catch (error) {
+              console.error("Voice SMS photo stage cleanup failed", error instanceof Error ? error.name : "unknown");
+            }
+          }
+          const cameraReferences = input.characterImageUrls.filter((reference) =>
+            reference.startsWith("blob:uploads/"));
+          if (cameraReferences.length) {
+            try {
+              // The conditional clear leaves any kiosk photos uploaded after
+              // this call's handoff ready for the next comic.
+              await clearStagedCameraPhotoReferences(input.recipientAddress, cameraReferences);
+            } catch (error) {
+              // The job is queued with its own saved references. A cleanup
+              // failure must not turn an accepted comic into a retry prompt.
+              console.error("Voice camera stage cleanup failed", error instanceof Error ? error.name : "unknown");
+            }
+          }
+        }
+        return submission;
+      },
       lookupJob: getGenerationJobByIdempotencyKey,
       onCallStart: async ({ callSid, from, to }) => {
         try {
