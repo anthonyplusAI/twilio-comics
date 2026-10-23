@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Readable } from "node:stream";
 
 const h = vi.hoisted(() => {
   const uploadData = vi.fn();
+  const download = vi.fn();
   const exists = vi.fn();
   const listBlobsFlat = vi.fn();
   const getBlockBlobClient = vi.fn((key: string) => ({
     url: `https://account.blob.core.windows.net/comics/${key}`,
     uploadData,
+    download,
     exists,
   }));
   const getContainerClient = vi.fn(() => ({ getBlockBlobClient, listBlobsFlat }));
@@ -20,6 +23,7 @@ const h = vi.hoisted(() => {
     getContainerClient,
     getBlockBlobClient,
     uploadData,
+    download,
     exists,
     listBlobsFlat,
   };
@@ -58,6 +62,10 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   h.uploadData.mockResolvedValue({});
+  h.download.mockResolvedValue({
+    contentType: "image/png",
+    readableStreamBody: Readable.from([Buffer.from("one"), Buffer.from("two")]),
+  });
   h.exists.mockResolvedValue(true);
   h.listBlobsFlat.mockImplementation(({ prefix }: { prefix: string }) => ({
     async *[Symbol.asyncIterator]() {
@@ -145,5 +153,17 @@ describe("blob storage", () => {
       "uploads/twilio_abc/one.png",
     ]);
     await expect(storage.listBlobKeysByPrefixes([""])).rejects.toThrow(/prefix/);
+  });
+
+  it("opens a blob as a readable stream while preserving its content type", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    const storage = await import("@/lib/blob-storage");
+
+    const blob = await storage.downloadBlobStream("stories/one.png");
+
+    expect(blob.contentType).toBe("image/png");
+    expect(Buffer.from(await new Response(blob.stream).arrayBuffer())).toEqual(Buffer.from("onetwo"));
+    expect(h.download).toHaveBeenCalledOnce();
+    expect(h.getBlockBlobClient).toHaveBeenCalledWith("stories/one.png");
   });
 });

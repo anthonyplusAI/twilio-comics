@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { Readable } from "node:stream";
 
 const h = vi.hoisted(() => {
   const getProperties = vi.fn();
+  const download = vi.fn();
   const downloadToBuffer = vi.fn();
-  const getBlockBlobClient = vi.fn(() => ({ getProperties, downloadToBuffer }));
+  const getBlockBlobClient = vi.fn(() => ({ getProperties, download, downloadToBuffer }));
   const getContainerClient = vi.fn(() => ({ getBlockBlobClient }));
   return {
     getProperties,
+    download,
     downloadToBuffer,
     getBlockBlobClient,
     fromConnectionString: vi.fn(() => ({ getContainerClient })),
@@ -30,12 +33,17 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   h.getProperties.mockReset();
+  h.download.mockReset();
   h.downloadToBuffer.mockReset();
   process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
   process.env.AZURE_STORAGE_CONTAINER_NAME = "comics";
   process.env.PUBLIC_BASE_URL = "https://comics.example.com";
   process.env.MEDIA_SIGNING_SECRET = "media-test-secret";
   h.getProperties.mockResolvedValue({ contentType: "image/jpeg", contentLength: 1234 });
+  h.download.mockResolvedValue({
+    contentType: "image/jpeg",
+    readableStreamBody: Readable.from([Buffer.from("test "), Buffer.from("image")]),
+  });
   h.downloadToBuffer.mockResolvedValue(Buffer.from("test image"));
 });
 
@@ -97,7 +105,7 @@ describe("signed media endpoint", () => {
     expect(h.downloadToBuffer).not.toHaveBeenCalled();
   });
 
-  it("continues to serve GET image bytes", async () => {
+  it("streams signed GET image bytes without buffering the full blob", async () => {
     const { getBlobPublicUrl } = await import("@/lib/blob-storage");
     const { GET } = await import("@/app/api/media/route");
 
@@ -107,6 +115,29 @@ describe("signed media endpoint", () => {
     expect(response.headers.get("content-type")).toBe("image/jpeg");
     expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
     expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("test image"));
-    expect(h.downloadToBuffer).toHaveBeenCalledOnce();
+    expect(h.download).toHaveBeenCalledOnce();
+    expect(h.downloadToBuffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unsigned GET before opening a blob", async () => {
+    const { GET } = await import("@/app/api/media/route");
+
+    const response = await GET(new NextRequest("https://comics.example.com/api/media?key=preview%2Fpage-1.jpg"));
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
+    expect(h.getBlockBlobClient).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when a signed GET blob no longer exists", async () => {
+    const { getBlobPublicUrl } = await import("@/lib/blob-storage");
+    const { GET } = await import("@/app/api/media/route");
+    h.download.mockRejectedValueOnce(new Error("BlobNotFound"));
+
+    const response = await GET(new NextRequest(getBlobPublicUrl("missing.jpg")));
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0");
+    expect(h.downloadToBuffer).not.toHaveBeenCalled();
   });
 });

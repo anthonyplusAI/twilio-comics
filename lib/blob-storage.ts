@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
 import { BlobServiceClient, type ContainerClient } from "@azure/storage-blob";
 import {
   getAzureCredential,
@@ -116,5 +117,19 @@ export async function downloadBlob(key: string): Promise<{
   return {
     buffer,
     contentType: properties.contentType || "application/octet-stream",
+  };
+}
+
+export async function downloadBlobStream(key: string): Promise<{
+  stream: ReadableStream<Uint8Array>;
+  contentType: string;
+}> {
+  const download = await getContainerClient().getBlockBlobClient(key).download();
+  if (!download.readableStreamBody) {
+    throw new Error("Blob download did not provide a readable stream");
+  }
+  return {
+    stream: Readable.toWeb(download.readableStreamBody as Readable) as ReadableStream<Uint8Array>,
+    contentType: download.contentType || "application/octet-stream",
   };
 }

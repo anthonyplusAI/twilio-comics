@@ -18,8 +18,8 @@ export async function createStory(data: { id?: string; title: string; descriptio
   }
 
   if (attempts >= maxAttempts) {
-    // Fallback to a simple random slug if we can't generate a unique one
-    slug = `story-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    // A fresh 128-bit suffix also protects the unlikely fallback path.
+    slug = generateComicSlug();
   }
 
   const [story] = await db
@@ -351,12 +351,32 @@ export async function completeConversationForGeneration(
 
 export async function failConversationForGeneration(
   job: GenerationConversationJob,
+  options: { requireRevision?: boolean } = {},
 ): Promise<boolean> {
   const [updated] = await db
     .update(conversations)
     .set({
-      state: "confirming",
-      collected: sql`${conversations.collected} - 'generationRequestKey'`,
+      state: options.requireRevision ? "collecting" : "confirming",
+      collected: options.requireRevision
+        ? sql`(${conversations.collected} - 'generationRequestKey') || jsonb_build_object('blockedPrompt', ${job.prompt})`
+        : sql`${conversations.collected} - 'generationRequestKey'`,
+      updatedAt: new Date(),
+    })
+    .where(submittedDraftCondition(job))
+    .returning({ id: conversations.id });
+  return Boolean(updated);
+}
+
+/** Forget the submitted draft after the 24-hour delivery cutoff. */
+export async function expireConversationForGeneration(
+  job: GenerationConversationJob,
+): Promise<boolean> {
+  const [updated] = await db
+    .update(conversations)
+    .set({
+      state: "collecting",
+      collected: {},
+      activeStoryId: null,
       updatedAt: new Date(),
     })
     .where(submittedDraftCondition(job))

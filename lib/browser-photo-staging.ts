@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import { channelUserId } from "@/lib/channel-identities";
 import { db } from "@/lib/db";
 import { conversations } from "@/lib/schema";
 import { VOICE_PHOTO_HANDOFF_WINDOW_MS } from "@/lib/voice-photo-handoff";
@@ -104,5 +105,48 @@ export async function stageCameraPhoto(
       .set({ collected: { characterImageUrls: plan.references }, updatedAt: new Date() })
       .where(eq(conversations.id, row.id));
     return { count: plan.references.length, replaced: plan.replaced };
+  });
+}
+
+/**
+ * Remove kiosk photos after a submitted comic or an explicit fresh start.
+ * A conditional clear removes only the refs seen by the comic or reset turn,
+ * so a later upload survives a delayed Voice submission or SMS retry.
+ */
+export async function clearStagedCameraPhotoReferences(
+  phone: string,
+  expectedReferences?: readonly string[],
+): Promise<boolean> {
+  if (!/^\+[1-9]\d{6,14}$/.test(phone)) return false;
+  const userId = channelUserId(phone);
+  if (expectedReferences !== undefined &&
+      (!Array.isArray(expectedReferences) || expectedReferences.length < 1 ||
+        expectedReferences.length > MAX_CAMERA_PHOTOS ||
+        !expectedReferences.every((ref) => validCameraRef(ref, userId)))) {
+    return false;
+  }
+
+  return db.transaction(async (tx) => {
+    const [row] = await tx.select({
+      id: conversations.id,
+      collected: conversations.collected,
+    }).from(conversations)
+      .where(and(eq(conversations.channel, "camera"), eq(conversations.phoneNumber, phone)))
+      .for("update")
+      .limit(1);
+    if (!row) return false;
+    const stored = row.collected.characterImageUrls;
+    if (!Array.isArray(stored) || stored.length === 0) return false;
+    const remaining = expectedReferences === undefined
+      ? []
+      : stored.filter((ref) => !expectedReferences.includes(ref));
+    if (remaining.length === stored.length) return false;
+    await tx.update(conversations)
+      .set({
+        collected: remaining.length ? { ...row.collected, characterImageUrls: remaining } : {},
+        updatedAt: new Date(),
+      })
+      .where(eq(conversations.id, row.id));
+    return true;
   });
 }

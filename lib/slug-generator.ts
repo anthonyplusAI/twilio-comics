@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 // Comic-themed words for generating beautiful slugs
 const COMIC_WORDS = {
   heroes: ['super', 'hero', 'captain', 'iron', 'spider', 'bat', 'wonder', 'flash', 'green', 'black', 'deadpool', 'wolverine', 'hulk', 'thor', 'captain'],
@@ -27,13 +29,10 @@ export function generateComicSlug(): string {
     words.push(randomNumber);
   }
 
-  // Generate short random string (4-5 chars)
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  const randomString = Array.from({ length: 4 + Math.floor(Math.random() * 2) }, () =>
-    chars[Math.floor(Math.random() * chars.length)]
-  ).join('');
+  // The suffix carries 128 bits of cryptographic randomness so the story URL is hard to guess.
+  const randomString = randomBytes(16).toString('hex');
 
-  // Combine words with hyphens and add random string
+  // Combine words with hyphens and add the opaque suffix.
   const slugWords = words.join('-');
   return `${slugWords}-${randomString}`;
 }

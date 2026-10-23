@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { advanceComicAgent } from "@/lib/comic-agent";
 import {
   isPhotoOnlySmsStage,
   photoHandoffSourceChannels,
+  planConsumedSmsPhotoStage,
   planVoicePhotoHandoff,
+  selectVoicePhotoHandoff,
   VOICE_PHOTO_HANDOFF_WINDOW_MS,
   withoutVoicePhotoReferences,
   type PhotoHandoffConversation,
@@ -97,6 +100,225 @@ describe("Voice photo handoff", () => {
       collected: { characterImageUrls: [PHOTO_1] },
     });
     expect(planned?.collected.prompt).toBeUndefined();
+  });
+
+  it.each(["NEW", "RESET", "RESTART", "DISCARD"])(
+    "does not hand the same staged photos back to Voice after %s",
+    async (command) => {
+      const originalSource = source(
+        { characterImageUrls: [PHOTO_1] },
+        { updatedAt: new Date(Date.now() - 60_000) },
+      );
+      const imported = applied(planVoicePhotoHandoff({
+        mode: "sms", sourceChannel: "sms", voice: voice(), source: originalSource,
+        recentSmsMediaUrls: [PHOTO_1], now: new Date(),
+      }));
+      const reset = await advanceComicAgent(imported, { text: command, channel: "voice" });
+      const resetAt = Date.parse(reset.collected.photoHandoffResetAt || "");
+      const nextCall = voice({
+        state: reset.nextState,
+        collected: reset.collected,
+        activeStoryId: reset.activeStoryId,
+      });
+
+      expect(Number.isFinite(resetAt)).toBe(true);
+      expect(reset.collected.characterImageUrls).toBeUndefined();
+      expect(planVoicePhotoHandoff({
+        mode: "sms", sourceChannel: "sms", voice: nextCall, source: originalSource,
+        recentSmsMediaUrls: [PHOTO_1], now: new Date(resetAt + 2_000),
+      })).toBe("unchanged");
+
+      const newlyStaged = applied(planVoicePhotoHandoff({
+        mode: "sms", sourceChannel: "sms", voice: nextCall,
+        source: source(
+          { characterImageUrls: [PHOTO_2] },
+          { updatedAt: new Date(resetAt + 1_000) },
+        ),
+        recentSmsMediaUrls: [PHOTO_2], now: new Date(resetAt + 2_000),
+      }));
+      expect(newlyStaged.collected.characterImageUrls).toEqual([PHOTO_2]);
+    },
+  );
+
+  it("does not reimport old photos after a completed Voice comic starts a new idea", async () => {
+    const originalSource = source({ characterImageUrls: [PHOTO_1] });
+    const imported = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms", voice: voice(), source: originalSource,
+      recentSmsMediaUrls: [PHOTO_1], now: NOW,
+    }));
+    const nextIdea = await advanceComicAgent(
+      {
+        state: "done",
+        activeStoryId: "completed-story",
+        collected: { ...imported.collected, prompt: "The first comic" },
+      },
+      { text: "A completely new space adventure", channel: "voice" },
+      async () => ({
+        reply: "A space adventure. Sound right?",
+        prompt: "A completely new space adventure",
+        style: "noir",
+        readyForConfirmation: true,
+      }),
+    );
+
+    expect(nextIdea.collected.characterImageUrls).toBeUndefined();
+    expect(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms",
+      voice: voice({
+        state: nextIdea.nextState,
+        collected: nextIdea.collected,
+        activeStoryId: nextIdea.activeStoryId,
+      }),
+      source: originalSource,
+      recentSmsMediaUrls: [PHOTO_1], now: NOW,
+    })).toBe("unchanged");
+  });
+
+  it("uses a newly staged camera photo when the earlier SMS handoff is unchanged", async () => {
+    const originalSms = source(
+      { characterImageUrls: [PHOTO_1] },
+      { updatedAt: new Date(Date.now() - 60_000) },
+    );
+    const imported = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms", voice: voice(), source: originalSms,
+      recentSmsMediaUrls: [PHOTO_1], now: new Date(),
+    }));
+    const reset = await advanceComicAgent(imported, { text: "NEW", channel: "voice" });
+    const resetAt = Date.parse(reset.collected.photoHandoffResetAt || "");
+    const selected = selectVoicePhotoHandoff({
+      mode: "sms",
+      voice: voice({ state: reset.nextState, collected: reset.collected, activeStoryId: reset.activeStoryId }),
+      candidates: [
+        { sourceChannel: "sms", source: originalSms, recentSmsMediaUrls: [PHOTO_1] },
+        {
+          sourceChannel: "camera",
+          source: source({ characterImageUrls: [CAMERA_PHOTO] }, { updatedAt: new Date(resetAt + 1_000) }),
+        },
+      ],
+      now: new Date(resetAt + 2_000),
+    });
+
+    expect(Number.isFinite(resetAt)).toBe(true);
+    expect(selected?.sourceChannel).toBe("camera");
+    expect(selected?.handoff.collected.characterImageUrls).toEqual([CAMERA_PHOTO]);
+  });
+
+  it("rejects old kiosk photos after Voice reset even when the SMS stage was consumed", async () => {
+    const initial = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms", voice: voice(),
+      source: source({ characterImageUrls: [PHOTO_1] }, { updatedAt: new Date(Date.now() - 60_000) }),
+      recentSmsMediaUrls: [PHOTO_1], now: new Date(),
+    }));
+    const reset = await advanceComicAgent(initial, { text: "NEW", channel: "voice" });
+    const resetAt = Date.parse(reset.collected.photoHandoffResetAt || "");
+    const afterReset = voice({ state: reset.nextState, collected: reset.collected, activeStoryId: reset.activeStoryId });
+    const oldCamera = source(
+      { characterImageUrls: [CAMERA_PHOTO] },
+      { updatedAt: new Date(resetAt - 90_000) },
+    );
+
+    expect(selectVoicePhotoHandoff({
+      mode: "sms", voice: afterReset,
+      candidates: [{ sourceChannel: "camera", source: oldCamera }],
+      now: new Date(resetAt + 2_000),
+    })).toBeNull();
+
+    const newCamera = source(
+      { characterImageUrls: [CAMERA_PHOTO] },
+      { updatedAt: new Date(resetAt + 1_000) },
+    );
+    expect(selectVoicePhotoHandoff({
+      mode: "sms", voice: afterReset,
+      candidates: [{ sourceChannel: "camera", source: newCamera }],
+      now: new Date(resetAt + 2_000),
+    })?.handoff.collected.characterImageUrls).toEqual([CAMERA_PHOTO]);
+  });
+
+  it("does not take an older fallback when the preferred photo stage is unchanged", () => {
+    const sms = source({ characterImageUrls: [PHOTO_1] }, { updatedAt: new Date(NOW.getTime() - 60_000) });
+    const imported = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms", voice: voice(), source: sms,
+      recentSmsMediaUrls: [PHOTO_1], now: NOW,
+    }));
+    const olderCamera = source(
+      { characterImageUrls: [CAMERA_PHOTO] },
+      { updatedAt: new Date(NOW.getTime() - 90_000) },
+    );
+    expect(selectVoicePhotoHandoff({
+      mode: "sms", voice: imported,
+      candidates: [
+        { sourceChannel: "sms", source: sms, recentSmsMediaUrls: [PHOTO_1] },
+        { sourceChannel: "camera", source: olderCamera },
+      ],
+      now: NOW,
+    })).toBeNull();
+  });
+
+  it("still gives a fresh SMS photo set priority over camera photos in text-first mode", () => {
+    const selected = selectVoicePhotoHandoff({
+      mode: "sms",
+      voice: voice(),
+      candidates: [
+        { sourceChannel: "sms", source: source({ characterImageUrls: [PHOTO_2] }), recentSmsMediaUrls: [PHOTO_2] },
+        { sourceChannel: "camera", source: source({ characterImageUrls: [CAMERA_PHOTO] }) },
+      ],
+      now: NOW,
+    });
+
+    expect(selected?.sourceChannel).toBe("sms");
+    expect(selected?.handoff.collected.characterImageUrls).toEqual([PHOTO_2]);
+  });
+
+  it("consumes only the SMS photo-only stage that was submitted by Voice", async () => {
+    const staged = source({ characterImageUrls: [PHOTO_1] });
+    const handoff = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "sms", voice: voice(), source: staged,
+      recentSmsMediaUrls: [PHOTO_1], now: NOW,
+    }));
+    const markedStage = source({
+      characterImageUrls: [PHOTO_1],
+      photoHandoffFingerprint: handoff.collected.photoHandoffFingerprint,
+    });
+
+    const consumed = planConsumedSmsPhotoStage(markedStage, [PHOTO_1]);
+    expect(consumed).toEqual({
+      characterImageUrls: [],
+      photoHandoffFingerprint: undefined,
+    });
+    if (!consumed) throw new Error("Expected matching SMS stage to be consumed");
+    const nextSmsIdea = await advanceComicAgent(
+      { state: "collecting", collected: consumed },
+      { text: "A rocket visits the moon", channel: "sms" },
+      async () => ({
+        reply: "A rocket visits the moon. Ready?",
+        prompt: "A rocket visits the moon",
+        style: "noir",
+        readyForConfirmation: true,
+      }),
+    );
+    const nextSmsComic = await advanceComicAgent(
+      {
+        state: nextSmsIdea.nextState,
+        collected: nextSmsIdea.collected,
+        activeStoryId: nextSmsIdea.activeStoryId,
+      },
+      { text: "CREATE", channel: "sms" },
+    );
+    expect(nextSmsComic.submission?.characterImageUrls).toEqual([]);
+    expect(planConsumedSmsPhotoStage(markedStage, [PHOTO_2])).toBeNull();
+    expect(planConsumedSmsPhotoStage(staged, [PHOTO_1])).toBeNull();
+    expect(planConsumedSmsPhotoStage(
+      source({ ...markedStage.collected, characterImageUrls: [PHOTO_2] }),
+      [PHOTO_1],
+    )).toBeNull();
+    expect(planConsumedSmsPhotoStage(
+      source({ ...markedStage.collected, prompt: "A new SMS idea" }, { state: "confirming" }),
+      [PHOTO_1],
+    )).toBeNull();
+    expect(planConsumedSmsPhotoStage(
+      source({ ...markedStage.collected, targetStoryId: "existing-story" }),
+      [PHOTO_1],
+    )).toBeNull();
   });
 
   it("does not import old media merely because a newer SMS refreshed the draft", () => {

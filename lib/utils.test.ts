@@ -4,7 +4,11 @@ import { isContentPolicyViolation } from "@/lib/utils";
 describe("isContentPolicyViolation", () => {
   it("matches legacy image-provider phrasing", () => {
     expect(isContentPolicyViolation("Invalid content detected")).toBe(true);
-    expect(isContentPolicyViolation("NO_IMAGE")).toBe(true);
+  });
+
+  it("does not assume a missing image is a safety block", () => {
+    expect(isContentPolicyViolation("NO_IMAGE")).toBe(false);
+    expect(isContentPolicyViolation("NO_IMAGE: no image data returned")).toBe(false);
   });
 
   it("matches OpenAI moderation phrasing", () => {

@@ -12,9 +12,11 @@ export type AgentMessage = { role: "user" | "assistant"; content: string };
 export interface AgentCollected {
   name?: string; // Legacy conversations can have a name from the old flow.
   prompt?: string;
+  blockedPrompt?: string;
   style?: string;
   characterImageUrls?: string[];
   photoHandoffFingerprint?: string;
+  photoHandoffResetAt?: string;
   suppressPhotoHandoff?: boolean;
   targetStoryId?: string;
   generationRequestKey?: string;
@@ -77,6 +79,20 @@ export function emptyAgentCollected(): AgentCollected {
   return {};
 }
 
+function freshAgentCollected(existing: AgentCollected, channel: ComicAgentChannel): AgentCollected {
+  // The fingerprint dismisses the last set handed to Voice. The reset time
+  // also dismisses other photo stages that were already waiting at a booth
+  // or in SMS before this caller asked to start over.
+  return channel === "voice"
+    ? {
+        ...(existing.photoHandoffFingerprint
+          ? { photoHandoffFingerprint: existing.photoHandoffFingerprint }
+          : {}),
+        photoHandoffResetAt: new Date().toISOString(),
+      }
+    : emptyAgentCollected();
+}
+
 function isStyle(value: string | undefined): value is ComicStyle {
   return COMIC_STYLES.some((style) => style.id === value);
 }
@@ -103,6 +119,17 @@ function ideaInvitation(channel: ComicAgentChannel): string {
 
 function normalizedCommand(text: string): string {
   return text.trim().replace(/[.!?,;:…。！？]+$/u, "").trim().toUpperCase();
+}
+
+function sameDraftPrompt(left: string, right: string): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return normalize(left) === normalize(right);
+}
+
+function isCurrentBlockedPrompt(collected: AgentCollected): boolean {
+  return Boolean(collected.prompt?.trim() && collected.blockedPrompt &&
+    sameDraftPrompt(collected.prompt, collected.blockedPrompt));
 }
 
 function isApproval(text: string, channel: ComicAgentChannel): boolean {
@@ -167,11 +194,14 @@ export async function advanceComicAgent(
   // A submitted draft must stay attached to its job until completion. In
   // particular, NEW must not let a late worker overwrite a newer draft.
   if (state === "generating") {
+    const photoNotice = turn.channel !== "voice" && turn.imageUrls?.length
+      ? ` Please resend your ${turn.imageUrls.length === 1 ? "photo" : "photos"} afterward; I can't save it yet.`
+      : "";
     return result(
       "generating",
       existing,
       activeStoryId,
-      `I'm still creating your comic. I'll send it when it's ready. ${commandVerb(turn.channel)} STATUS for an update.`,
+      `I'm still creating your comic. I'll send it when it's ready.${photoNotice} ${commandVerb(turn.channel)} STATUS for an update.`,
     );
   }
 
@@ -181,7 +211,11 @@ export async function advanceComicAgent(
         ? `Your comic is ready. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days to make another page, or NEW for a new story.`
         : state === "confirming"
           ? `Your comic idea is ready. ${approvalInstruction(turn.channel)}`
-          : `I'm ready for your comic idea. ${ideaInvitation(turn.channel)}`;
+          : existing.prompt?.trim()
+            ? isCurrentBlockedPrompt(existing)
+              ? "The image service declined this idea. Tell me what to change before we try again."
+              : "I have your idea. Tell me what to add or change."
+            : `I'm ready for your comic idea. ${ideaInvitation(turn.channel)}`;
     return result(state, existing, activeStoryId, reply);
   }
 
@@ -230,11 +264,21 @@ export async function advanceComicAgent(
   }
 
   if (["NEW", "RESET", "RESTART"].includes(command)) {
+    const fresh = freshAgentCollected(existing, turn.channel);
+    const references = mergeReferences(undefined, turn.imageUrls);
+    if (references.length) fresh.characterImageUrls = references;
+    const photoReply = references.length
+      ? turn.imageUrls && turn.imageUrls.length > references.length
+        ? "I saved the first two photos. "
+        : `${references.length === 1 ? "Photo" : "Photos"} saved. `
+      : "";
     return result(
       "collecting",
-      emptyAgentCollected(),
+      fresh,
       null,
-      `Let's make a new comic. ${ideaInvitation(turn.channel)}`,
+      `Let's make a new comic. ${photoReply}${references.length && turn.channel !== "voice"
+        ? "Tell me your comic idea."
+        : ideaInvitation(turn.channel)}`,
     );
   }
 
@@ -243,7 +287,7 @@ export async function advanceComicAgent(
   if (command === "DISCARD" || (turn.channel === "voice" && command === "CANCEL")) {
     return result(
       activeStoryId ? "done" : "collecting",
-      emptyAgentCollected(),
+      freshAgentCollected(existing, turn.channel),
       activeStoryId,
       activeStoryId
         ? `Draft cancelled. ${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new story.`
@@ -258,6 +302,7 @@ export async function advanceComicAgent(
     return result(
       "collecting",
       {
+        ...freshAgentCollected(existing, turn.channel),
         targetStoryId: activeStoryId,
         style: isStyle(existing.style) ? existing.style : undefined,
       },
@@ -272,7 +317,11 @@ export async function advanceComicAgent(
         state,
         existing,
         activeStoryId,
-        "Tell me your comic idea first. I'll summarize it for you to approve.",
+        existing.prompt?.trim()
+          ? isCurrentBlockedPrompt(existing)
+            ? "The image service declined this idea. Tell me what to change before we try again."
+            : "Tell me what to add or change first. I'll summarize the revised idea for approval."
+          : "Tell me your comic idea first. I'll summarize it for you to approve.",
       );
     }
     const submission: ComicAgentSubmission = {
@@ -297,7 +346,9 @@ export async function advanceComicAgent(
 
   // A normal new idea after completion starts a new book. CONTINUE is the
   // explicit path that retains the prior story ID for page generation.
-  const draft: AgentCollected = state === "done" ? emptyAgentCollected() : { ...existing };
+  const draft: AgentCollected = state === "done"
+    ? freshAgentCollected(existing, turn.channel)
+    : { ...existing };
   const draftStoryId = state === "done" ? null : activeStoryId;
   const previousReferences = Array.isArray(draft.characterImageUrls) ? draft.characterImageUrls : [];
   const references = mergeReferences(draft.characterImageUrls, turn.imageUrls);
@@ -342,10 +393,15 @@ export async function advanceComicAgent(
   }
 
   const nextPrompt = proposal.prompt.trim() || draft.prompt;
-  const ready = Boolean(proposal.readyForConfirmation && nextPrompt);
-  const reply = ready
-    ? `${proposal.reply.trim()} ${approvalInstruction(turn.channel)}`.trim()
-    : proposal.reply.trim() || "Tell me a little more about your comic idea.";
+  const stillBlocked = Boolean(draft.blockedPrompt && nextPrompt &&
+    sameDraftPrompt(nextPrompt, draft.blockedPrompt));
+  const ready = Boolean(proposal.readyForConfirmation && nextPrompt && !stillBlocked);
+  const reply = stillBlocked
+    ? "The image service declined this idea. Tell me what to change before we try again."
+    : ready
+      ? `${proposal.reply.trim()} ${approvalInstruction(turn.channel)}`.trim()
+      : proposal.reply.trim() || "Tell me a little more about your comic idea.";
+  if (ready) delete draft.blockedPrompt;
   return result(
     ready ? "confirming" : "collecting",
     {

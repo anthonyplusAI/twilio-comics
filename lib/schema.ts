@@ -158,9 +158,11 @@ export const conversations = pgTable(
       .$type<{
         name?: string;
         prompt?: string;
+        blockedPrompt?: string;
         style?: string;
         characterImageUrls?: string[];
         photoHandoffFingerprint?: string;
+        photoHandoffResetAt?: string;
         suppressPhotoHandoff?: boolean;
         targetStoryId?: string;
         generationRequestKey?: string;

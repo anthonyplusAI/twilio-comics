@@ -13,7 +13,6 @@ export function isContentPolicyViolation(errorMessage: string): boolean {
     errorMessage.includes("Invalid content detected") ||
     errorMessage.includes("content moderation") ||
     errorMessage.includes("flagged and rejected") ||
-    errorMessage.includes("NO_IMAGE") ||
     // OpenAI moderation phrasing
     errorMessage.includes("safety system") ||
     errorMessage.includes("moderation_blocked") ||

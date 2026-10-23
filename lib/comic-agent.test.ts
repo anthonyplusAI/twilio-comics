@@ -138,6 +138,23 @@ describe("advanceComicAgent", () => {
     expect(nextSet.reply).toMatch(/photo saved/i);
   });
 
+  it.each(["NEW", "RESET", "RESTART"])("keeps photos attached to an SMS %s in its fresh draft", async (command) => {
+    const reset = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: { prompt: IDEA, characterImageUrls: ["old-photo"] },
+      },
+      { text: command, channel: "sms", imageUrls: ["new-photo"] },
+      modelReply(),
+    );
+
+    expect(reset.nextState).toBe("collecting");
+    expect(reset.collected.prompt).toBeUndefined();
+    expect(reset.collected.characterImageUrls).toEqual(["new-photo"]);
+    expect(reset.reply).toMatch(/photo saved/i);
+    expect(reset.reply).toMatch(/comic idea/i);
+  });
+
   it.each(["sms", "whatsapp"] as const)(
     "treats the suggested %s opening text as an invitation to send photos and an idea",
     async (channel) => {
@@ -240,6 +257,115 @@ describe("advanceComicAgent", () => {
     }
   });
 
+  it("asks for a revision when STATUS follows a blocked generation", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "STATUS", channel: "sms" },
+      modelReply(),
+    );
+
+    expect(result.nextState).toBe("collecting");
+    expect(result.reply).toMatch(/change|revise/i);
+    expect(result.reply).not.toMatch(/ready for your comic idea/i);
+  });
+
+  it("does not submit CREATE again until a blocked prompt has changed", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "CREATE", channel: "sms" },
+      modelReply(),
+    );
+
+    expect(result.action).toBe("none");
+    expect(result.nextState).toBe("collecting");
+    expect(result.reply).toMatch(/change|revise/i);
+  });
+
+  it("keeps a blocked prompt out of confirming when the model repeats it", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "Maybe make it work", channel: "sms" },
+      modelReply({ prompt: IDEA, readyForConfirmation: true }),
+    );
+
+    expect(result.nextState).toBe("collecting");
+    expect(result.collected.blockedPrompt).toBe(IDEA);
+    expect(result.reply).toMatch(/change|revise/i);
+    expect(result.reply).not.toMatch(/reply CREATE/i);
+  });
+
+  it("does not treat punctuation-only edits of a declined prompt as a revision", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "Try that again, please", channel: "sms" },
+      modelReply({ prompt: `  ${IDEA}...  `, readyForConfirmation: true }),
+    );
+
+    expect(result.nextState).toBe("collecting");
+    expect(result.collected.blockedPrompt).toBe(IDEA);
+    expect(result.reply).toMatch(/change/i);
+  });
+
+  it("asks for a revision even when the model repeats a declined idea without approval", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "Try again", channel: "sms" },
+      modelReply({ prompt: IDEA, reply: "This sounds ready to make.", readyForConfirmation: false }),
+    );
+
+    expect(result.nextState).toBe("collecting");
+    expect(result.reply).toMatch(/change/i);
+    expect(result.reply).not.toMatch(/ready to make/i);
+  });
+
+  it("clears a blocked prompt after a revised draft passes preflight", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "Instead, make it a playful adventure", channel: "voice" },
+      modelReply({ prompt: "A playful dragon and astronaut explore the moon", readyForConfirmation: true }),
+    );
+
+    expect(result.nextState).toBe("confirming");
+    expect(result.collected.prompt).toBe("A playful dragon and astronaut explore the moon");
+    expect(result.collected.blockedPrompt).toBeUndefined();
+    expect(result.reply).toMatch(/create it/i);
+  });
+
+  it("does not call an unfinished revision declined while its prior failure marker remains", async () => {
+    const revised = await advanceComicAgent(
+      { state: "collecting", collected: { prompt: IDEA, blockedPrompt: IDEA } },
+      { text: "Make the dragon a playful original character", channel: "sms" },
+      modelReply({ prompt: "An original playful dragon visits the moon", readyForConfirmation: false }),
+    );
+
+    expect(revised.nextState).toBe("collecting");
+    expect(revised.collected.blockedPrompt).toBe(IDEA);
+    const revisedCurrent = {
+      state: revised.nextState,
+      collected: revised.collected,
+      activeStoryId: revised.activeStoryId,
+    };
+    const status = await advanceComicAgent(revisedCurrent, { text: "STATUS", channel: "sms" }, modelReply());
+    const create = await advanceComicAgent(revisedCurrent, { text: "CREATE", channel: "sms" }, modelReply());
+    expect(status.reply).not.toMatch(/declined/i);
+    expect(create.reply).not.toMatch(/declined/i);
+    expect(status.reply).toMatch(/add or change/i);
+    expect(create.action).toBe("none");
+  });
+
+  it("tells an MMS sender to resend photos that arrive while a comic is generating", async () => {
+    const result = await advanceComicAgent(
+      { state: "generating", collected: { prompt: IDEA, characterImageUrls: ["original-photo"] } },
+      { text: "NEW", channel: "sms", imageUrls: ["new-photo"] },
+      modelReply(),
+    );
+
+    expect(result.nextState).toBe("generating");
+    expect(result.collected.characterImageUrls).toEqual(["original-photo"]);
+    expect(result.reply).toMatch(/resend (?:the|your) photo/i);
+    expect(result.reply).toMatch(/after|when.*ready/i);
+  });
+
   it("starts a continuation draft tied to the completed story", async () => {
     const next = await advanceComicAgent(
       {
@@ -328,7 +454,8 @@ describe("advanceComicAgent", () => {
 
     const reset = await advanceComicAgent(current, { text: "New...", channel: "voice" }, model);
     expect(reset.nextState).toBe("collecting");
-    expect(reset.collected).toEqual({});
+    expect(reset.collected.prompt).toBeUndefined();
+    expect(Number.isFinite(Date.parse(reset.collected.photoHandoffResetAt || ""))).toBe(true);
     expect(model).not.toHaveBeenCalled();
 
     await advanceComicAgent(current, { text: "Continue the battle.", channel: "voice" }, model);

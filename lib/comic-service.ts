@@ -17,18 +17,87 @@ import {
 } from "./db-actions";
 import { isContentPolicyViolation } from "./utils";
 
+const PUBLIC_MODERATION_CATEGORIES = [
+  "harassment",
+  "harassment/threatening",
+  "hate",
+  "hate/threatening",
+  "illicit",
+  "illicit/violent",
+  "self-harm",
+  "self-harm/intent",
+  "self-harm/instructions",
+  "sexual",
+  "sexual/minors",
+  "violence",
+  "violence/graphic",
+] as const;
+
+export type ComicModerationCategory = (typeof PUBLIC_MODERATION_CATEGORIES)[number];
+export type ComicModerationStage = "input" | "output" | "unknown";
+export interface ComicModerationDetails {
+  stage?: ComicModerationStage;
+  categories: ComicModerationCategory[];
+}
+
 export class ComicServiceError extends Error {
   type: "content_policy" | "credit_limit" | "api_error";
   status?: number;
+  code?: "moderation_blocked";
+  moderationDetails?: ComicModerationDetails;
   constructor(
     type: "content_policy" | "credit_limit" | "api_error",
     message: string,
     status?: number,
+    options?: { code?: "moderation_blocked"; moderationDetails?: ComicModerationDetails },
   ) {
     super(message);
     this.type = type;
     this.status = status;
+    this.code = options?.code;
+    this.moderationDetails = options?.moderationDetails;
   }
+}
+
+function providerModerationDetails(error: unknown): ComicModerationDetails | undefined {
+  if (!error || typeof error !== "object" || !("error" in error)) return undefined;
+  const body = (error as { error?: unknown }).error;
+  if (!body || typeof body !== "object" || !("moderation_details" in body)) return undefined;
+  const raw = (body as { moderation_details?: unknown }).moderation_details;
+  if (!raw || typeof raw !== "object") return undefined;
+
+  const stageValue = "moderation_stage" in raw
+    ? (raw as { moderation_stage?: unknown }).moderation_stage : undefined;
+  const stage = stageValue === "input" || stageValue === "output" || stageValue === "unknown"
+    ? stageValue : undefined;
+  const categoryValues = "categories" in raw
+    ? (raw as { categories?: unknown }).categories : undefined;
+  const categories = Array.isArray(categoryValues)
+    ? [...new Set(categoryValues.filter((value): value is ComicModerationCategory =>
+      typeof value === "string" &&
+      (PUBLIC_MODERATION_CATEGORIES as readonly string[]).includes(value),
+    ))]
+    : [];
+  return stage || categories.length ? { ...(stage ? { stage } : {}), categories } : undefined;
+}
+
+function comicImageError(error: unknown): ComicServiceError {
+  const message = error instanceof Error ? error.message : "Unknown error";
+  const statusValue = error && typeof error === "object" && "status" in error
+    ? (error as { status?: unknown }).status : undefined;
+  const status = typeof statusValue === "number" && Number.isInteger(statusValue)
+    ? statusValue : undefined;
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code : undefined;
+
+  if (code === "moderation_blocked" || isContentPolicyViolation(message)) {
+    return new ComicServiceError("content_policy", message, status, code === "moderation_blocked"
+      ? { code, moderationDetails: providerModerationDetails(error) } : undefined);
+  }
+  if (status === 402 || status === 429) {
+    return new ComicServiceError("credit_limit", message, status);
+  }
+  return new ComicServiceError("api_error", message, status);
 }
 
 export interface CreateComicArgs {
@@ -167,19 +236,7 @@ export async function createComicStory({
     });
   } catch (error) {
     await cleanupStoryAfterFailure();
-    const message =
-      error instanceof Error ? error.message : "Unknown error";
-    if (error instanceof Error && isContentPolicyViolation(message)) {
-      throw new ComicServiceError("content_policy", message);
-    }
-    const status =
-      error && typeof error === "object" && "status" in error
-        ? (error as { status?: number }).status
-        : undefined;
-    if (status === 402 || status === 429) {
-      throw new ComicServiceError("credit_limit", message, status);
-    }
-    throw new ComicServiceError("api_error", message, status);
+    throw comicImageError(error);
   }
 
   let imageUrl: string;
@@ -319,17 +376,7 @@ export async function createComicContinuationPage({
       referenceImageUrls,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    if (isContentPolicyViolation(message)) {
-      throw new ComicServiceError("content_policy", message);
-    }
-    const status = error && typeof error === "object" && "status" in error
-      ? (error as { status?: number }).status
-      : undefined;
-    if (status === 402 || status === 429) {
-      throw new ComicServiceError("credit_limit", message, status);
-    }
-    throw new ComicServiceError("api_error", message, status);
+    throw comicImageError(error);
   }
 
   const imageUrl = await uploadBufferToBlob(imageBuffer, imageKey, "image/png");

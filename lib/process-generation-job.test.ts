@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   isTwilioMediaUrl: vi.fn(),
   sendChannelMessage: vi.fn(),
   completeConversationForGeneration: vi.fn(),
+  expireConversationForGeneration: vi.fn(),
   failConversationForGeneration: vi.fn(),
   createMmsPreview: vi.fn(),
   recordActivityEvent: vi.fn(),
@@ -36,10 +37,19 @@ vi.mock("@/lib/comic-service", () => ({
   ComicServiceError: class ComicServiceError extends Error {
     type: string;
     status?: number;
-    constructor(type: string, message: string, status?: number) {
+    code?: string;
+    moderationDetails?: { stage?: string; categories: string[] };
+    constructor(
+      type: string,
+      message: string,
+      status?: number,
+      options?: { code?: string; moderationDetails?: { stage?: string; categories: string[] } },
+    ) {
       super(message);
       this.type = type;
       this.status = status;
+      this.code = options?.code;
+      this.moderationDetails = options?.moderationDetails;
     }
   },
   createComicStory: h.createComicStory,
@@ -73,6 +83,7 @@ vi.mock("@/lib/twilio", () => ({
 }));
 vi.mock("@/lib/db-actions", () => ({
   completeConversationForGeneration: h.completeConversationForGeneration,
+  expireConversationForGeneration: h.expireConversationForGeneration,
   failConversationForGeneration: h.failConversationForGeneration,
   deleteBlankFailedGenerationStory: h.deleteBlankFailedGenerationStory,
 }));
@@ -126,6 +137,7 @@ beforeEach(() => {
   h.createMmsPreview.mockResolvedValue("https://comics.example.com/api/media?key=preview");
   h.sendChannelMessage.mockResolvedValue("SMresult");
   h.completeConversationForGeneration.mockResolvedValue(true);
+  h.expireConversationForGeneration.mockResolvedValue(true);
   h.failConversationForGeneration.mockResolvedValue(true);
   h.blobExists.mockResolvedValue(false);
   h.getBlobPublicUrl.mockReturnValue("https://comics.example.com/api/media?key=ref");
@@ -147,7 +159,8 @@ describe("processGenerationJob", () => {
       job.id, expect.any(String), "Result delivery expired after 24 hours",
     );
     expect(h.markGenerationJobSuppressed).not.toHaveBeenCalled();
-    expect(h.failConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ id: job.id }));
+    expect(h.expireConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ id: job.id }));
+    expect(h.failConversationForGeneration).not.toHaveBeenCalled();
   });
 
   it("expires an undelivered job after 24 hours without generating or texting an old number", async () => {
@@ -181,7 +194,8 @@ describe("processGenerationJob", () => {
     expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
     expect(h.deleteBlankFailedGenerationStory).not.toHaveBeenCalled();
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
-    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(expired, "story-already-generated");
+    expect(h.completeConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.expireConversationForGeneration).toHaveBeenCalledWith(expired);
   });
 
   it("preserves a completed comic if generation crosses the 24-hour delivery cutoff", async () => {
@@ -213,15 +227,16 @@ describe("processGenerationJob", () => {
       expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
       expect(h.markGenerationJobSucceeded).not.toHaveBeenCalled();
       expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
-      expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
-        expect.objectContaining({ id: job.id }), "story-1",
+      expect(h.completeConversationForGeneration).not.toHaveBeenCalled();
+      expect(h.expireConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ id: job.id }),
       );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("does not send a failure notice or reactivate a draft after the delivery window", async () => {
+  it("clears a failed draft without texting after the delivery window", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = new Date("2026-10-21T12:00:00.000Z");
@@ -236,7 +251,36 @@ describe("processGenerationJob", () => {
 
       expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
       expect(h.sendChannelMessage).not.toHaveBeenCalled();
+      expect(h.expireConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ id: job.id }),
+      );
       expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("requires a new idea after an expired safety block without texting the old number", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-10-21T12:00:00.000Z");
+      vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 - 30_000));
+      h.claimGenerationJob.mockResolvedValue({ ...job, createdAt: startedAt });
+      h.createComicStory.mockImplementation(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 24 * 60 * 60 * 1000 + 1000));
+        throw new ComicServiceError("content_policy", "Image request blocked", 400, { code: "moderation_blocked" });
+      });
+
+      await processGenerationJob(job.id);
+
+      expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "Result delivery expired after 24 hours (policy rejection)",
+      );
+      expect(h.expireConversationForGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ id: job.id }),
+      );
+      expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+      expect(h.sendChannelMessage).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -377,10 +421,11 @@ describe("processGenerationJob", () => {
         attemptCount: 3,
         errorType: "api_error",
         httpStatus: 503,
+        errorCode: null,
       }),
     }));
     expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.stringContaining("couldn't create your comic"),
+      body: expect.stringContaining("technical issue stopped your comic"),
       validityPeriod: 36000,
       statusCallback: `https://comics.example.com/api/twilio/status?jobId=${job.id}&failure=1#rc=3&rp=5xx,ct,rt`,
     }));
@@ -396,10 +441,369 @@ describe("processGenerationJob", () => {
     }));
   });
 
+  it("uses provider moderation details for a specific, short revision hint", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "content_policy",
+      "provider message with private request details",
+      400,
+      {
+        code: "moderation_blocked",
+        moderationDetails: { stage: "input", categories: ["harassment"] },
+      },
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("blocked this comic for safety");
+    expect(body).toContain("Remove abusive or targeting language");
+    expect(body).toContain("Reply with a change or NEW");
+    expect(body).not.toContain("provider message");
+    expect(body.length).toBeLessThanOrEqual(160);
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), { requireRevision: true },
+    );
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image service policy rejection",
+    );
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "generation.failed",
+      details: expect.objectContaining({
+        errorCode: "moderation_blocked",
+        moderationStage: "input",
+        moderationCategories: ["harassment"],
+      }),
+    }));
+  });
+
+  it("does not claim a specific safety reason from a legacy text-only rejection", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "content_policy",
+      "Possible copyright or illegal issue",
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("image service declined this request");
+    expect(body).toContain("It gave no detail");
+    expect(body).toContain("Try a simpler scene");
+    expect(body).not.toMatch(/copyright|illegal|for safety/i);
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
+  it("reports a verified provider safety block without inventing a category", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "content_policy",
+      "Provider supplied no details",
+      400,
+      { code: "moderation_blocked" },
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("blocked this comic for safety");
+    expect(body).toContain("It gave no detail");
+    expect(body).not.toMatch(/copyright|illegal/i);
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
+  it("tells a two-photo SMS user how to replace photos after a safety block", async () => {
+    h.claimGenerationJob.mockResolvedValue({
+      ...job,
+      userId: cameraOwner,
+      characterImageUrls: [`blob:${cameraKey}`, `blob:${secondCameraKey}`],
+    });
+    h.blobExists.mockResolvedValue(true);
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "content_policy", "Image request blocked", 400,
+      { code: "moderation_blocked", moderationDetails: { stage: "input", categories: [] } },
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("NEW to resend photos and idea");
+    expect(body).not.toMatch(/try another photo|try a simpler scene or photo/i);
+    expect(body.length).toBeLessThanOrEqual(160);
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), { requireRevision: true },
+    );
+  });
+
+  it("identifies a blocked generated image without blaming the input", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "content_policy",
+      "Generated output was rejected",
+      400,
+      {
+        code: "moderation_blocked",
+        moderationDetails: { stage: "output", categories: ["sexual"] },
+      },
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("generated image was blocked by a safety check");
+    expect(body).toContain("Try a different scene");
+    expect(body).not.toContain("non-explicit");
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
+  it("keeps a technical image error distinct from a user-correctable prompt", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new Error("internal connection failure"));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("technical issue");
+    expect(body).toContain("Your idea is saved");
+    expect(body).toContain("Reply CREATE later to retry");
+    expect(body).not.toContain("internal connection failure");
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
+  it("gives technical retry guidance for a generic NO_IMAGE error", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError("api_error", "NO_IMAGE: no image data returned"));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("technical issue stopped your comic");
+    expect(body).toContain("Reply CREATE later to retry");
+    expect(body).not.toMatch(/safety|policy|NO_IMAGE/i);
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
+  it("waits for the matching draft to be restored before sending retry instructions", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
+    let finishRestore: (restored: boolean) => void = () => {};
+    h.failConversationForGeneration.mockImplementation(() => new Promise<boolean>((resolve) => {
+      finishRestore = resolve;
+    }));
+
+    const processing = processGenerationJob(job.id);
+    await vi.waitFor(() => expect(h.failConversationForGeneration).toHaveBeenCalledOnce());
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+
+    finishRestore(true);
+    await processing;
+
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining("Your idea is saved. Reply CREATE later to retry"),
+    }));
+  });
+
+  it("does not send stale retry instructions when the submitted draft no longer matches", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
+    h.failConversationForGeneration.mockResolvedValue(false);
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a failed job after a temporary draft restoration error", async () => {
+    h.claimGenerationJob.mockResolvedValueOnce({ ...job, attemptCount: 3 }).mockResolvedValueOnce(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "private provider detail",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+    h.createComicStory.mockRejectedValue(new Error("private provider detail"));
+    h.failConversationForGeneration
+      .mockRejectedValueOnce(new Error("temporary database outage"))
+      .mockResolvedValueOnce(true);
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("Failed to restore comic draft");
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("Your idea is saved");
+    expect(body).toContain("CREATE to retry");
+    expect(body).not.toContain("private provider detail");
+    expect(body.length).toBeLessThanOrEqual(160);
+    expect(h.failConversationForGeneration).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores a policy-blocked draft for revision after a transient DB failure", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "Image service policy rejection",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), { requireRevision: true },
+    );
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("Reply with a change");
+    expect(body).not.toContain("CREATE to retry");
+  });
+
+  it("repairs an expired failed draft on redelivery without sending late SMS", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "Result delivery expired after 24 hours",
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      completedAt: new Date(Date.now() - 120_000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.expireConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }),
+    );
+    expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("clears an expired saved comic's conversation on redelivery without exposing its link", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      storyId: "story-1",
+      lastError: "Result delivery expired after 24 hours",
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      completedAt: new Date(Date.now() - 120_000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.expireConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }),
+    );
+    expect(h.completeConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("completes a saved comic's conversation on failed-job redelivery without sending again", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      storyId: "story-1",
+      lastError: "delivery failed",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), "story-1",
+    );
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps an expired job retryable when clearing its draft fails", async () => {
+    h.claimGenerationJob.mockResolvedValueOnce({
+      ...job,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    }).mockResolvedValueOnce(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "Result delivery expired after 24 hours",
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      completedAt: new Date(Date.now() - 120_000),
+    });
+    h.expireConversationForGeneration
+      .mockRejectedValueOnce(new Error("temporary DB issue"))
+      .mockResolvedValueOnce(true);
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("Failed to clear expired comic conversation");
+    await processGenerationJob(job.id);
+
+    expect(h.expireConversationForGeneration).toHaveBeenCalledTimes(2);
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps a suppressed saved story retryable until its conversation is complete", async () => {
+    h.claimGenerationJob.mockResolvedValueOnce({ ...job, attemptCount: 3 }).mockResolvedValueOnce(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      storyId: "story-1",
+      lastError: "delivery failed",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio delivery unavailable"));
+    h.completeConversationForGeneration
+      .mockRejectedValueOnce(new Error("temporary DB issue"))
+      .mockResolvedValueOnce(true);
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("Failed to complete comic conversation");
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    await processGenerationJob(job.id);
+
+    expect(h.completeConversationForGeneration).toHaveBeenCalledTimes(2);
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+  });
+
+  it("does not send an old saved-story notice after its submitted draft was replaced", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio delivery unavailable"));
+    h.completeConversationForGeneration.mockResolvedValue(false);
+
+    await processGenerationJob(job.id);
+
+    expect(h.markGenerationJobSuppressed).toHaveBeenCalledOnce();
+    expect(h.completeConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }), "story-1",
+    );
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a fresh failed job for its original worker to finish reconciling", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "provider error",
+      completedAt: new Date(),
+    });
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("still reconciling");
+
+    expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("tells users how to retry a saved idea after image credits are unavailable", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "credit_limit", "insufficient_quota", 402,
+    ));
+
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("temporarily unavailable");
+    expect(body).toContain("Your idea is saved");
+    expect(body).toContain("Reply CREATE later to retry");
+    expect(body.length).toBeLessThanOrEqual(160);
+  });
+
   it.each([
-    ["image failure", new Error("Image service unavailable"), 3],
-    ["content policy rejection", new ComicServiceError("content_policy", "Rejected"), 1],
-  ])("tells Voice callers to call again after %s", async (_reason, error, attemptCount) => {
+    ["image failure", new Error("Image service unavailable"), 3, "say create it to retry", false],
+    ["content policy rejection", new ComicServiceError("content_policy", "Rejected"), 1, "tell me what to change", true],
+  ])("tells Voice callers to call again after %s", async (_reason, error, attemptCount, nextStep, requireRevision) => {
     h.claimGenerationJob.mockResolvedValue({ ...job, source: "voice", attemptCount });
     h.createComicStory.mockRejectedValue(error);
 
@@ -407,9 +811,15 @@ describe("processGenerationJob", () => {
 
     const notice = h.sendChannelMessage.mock.calls[0][0];
     expect(notice.channel).toBe("sms");
-    expect(notice.body).toMatch(/Call again from this phone, verify, and say what to change or NEW\.$/);
+    expect(notice.body).toContain("Call again, verify");
+    expect(notice.body).toContain(nextStep);
+    expect(notice.body).toContain("say NEW");
     expect(notice.body).not.toMatch(/send NEW/i);
-    expect(h.failConversationForGeneration).toHaveBeenCalledWith(expect.objectContaining({ source: "voice" }));
+    expect(notice.body.length).toBeLessThanOrEqual(160);
+    expect(h.failConversationForGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "voice" }),
+      ...(requireRevision ? [{ requireRevision: true }] : []),
+    );
   });
 
   it("keeps WhatsApp failure instructions in the chat", async () => {
@@ -426,7 +836,7 @@ describe("processGenerationJob", () => {
 
     const notice = h.sendChannelMessage.mock.calls[0][0];
     expect(notice.channel).toBe("whatsapp");
-    expect(notice.body).toContain("Tell me what to change or send NEW.");
+    expect(notice.body).toContain("Reply CREATE later to retry, or NEW for a new comic.");
   });
 
   it("records a transient retry without exposing the raw error message", async () => {
@@ -589,6 +999,14 @@ describe("processGenerationJob", () => {
     expect(h.sendChannelMessage.mock.calls[0][0].body).toContain("Page 2");
   });
 
+  it("distinguishes another page from a new comic in SMS delivery", async () => {
+    await processGenerationJob(job.id);
+
+    const body = h.sendChannelMessage.mock.calls[0][0].body as string;
+    expect(body).toContain("Reply CONTINUE within 14 days for another page");
+    expect(body).toContain("NEW for a new comic");
+  });
+
   it("marks a completed voice conversation without touching a newer draft", async () => {
     h.claimGenerationJob.mockResolvedValue({ ...job, source: "voice" });
     await processGenerationJob(job.id);
@@ -605,7 +1023,8 @@ describe("processGenerationJob", () => {
 
     const result = h.sendChannelMessage.mock.calls[0][0];
     expect(result.channel).toBe("sms");
-    expect(result.body).toMatch(/For another page, call again from this phone within 14 days and say CONTINUE after verification\.$/);
+    expect(result.body).toContain("Call again from this phone, verify, then say CONTINUE within 14 days for another page");
+    expect(result.body).toContain("NEW for a new comic");
     expect(result.body).not.toMatch(/reply CONTINUE/i);
   });
 
@@ -621,7 +1040,8 @@ describe("processGenerationJob", () => {
 
     const result = h.sendChannelMessage.mock.calls[0][0];
     expect(result.channel).toBe("whatsapp");
-    expect(result.body).toContain("Reply CONTINUE within 14 days for another page.");
+    expect(result.body).toContain("Reply CONTINUE within 14 days for another page");
+    expect(result.body).toContain("NEW for a new comic");
   });
 
   it("treats a duplicate queue message during active processing as handled", async () => {
@@ -844,7 +1264,9 @@ describe("processGenerationJob", () => {
 
     await processGenerationJob(job.id);
 
-    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(job.id, expect.any(String), "Rejected");
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image service policy rejection",
+    );
     expect(h.deleteBlankFailedGenerationStory).toHaveBeenCalledWith({
       jobId: job.id,
       userId: job.userId,

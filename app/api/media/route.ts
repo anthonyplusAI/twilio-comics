@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { downloadBlob, getBlobMetadata, isValidMediaToken } from "@/lib/blob-storage";
+import { downloadBlobStream, getBlobMetadata, isValidMediaToken } from "@/lib/blob-storage";
 
 export const runtime = "nodejs";
 const MEDIA_CACHE_CONTROL = "private, no-store, max-age=0";
@@ -44,8 +44,8 @@ export async function GET(request: NextRequest) {
   });
 
   try {
-    const blob = await downloadBlob(key);
-    return new Response(new Uint8Array(blob.buffer), {
+    const blob = await downloadBlobStream(key);
+    return new Response(blob.stream, {
       headers: {
         "Content-Type": blob.contentType,
         "Cache-Control": MEDIA_CACHE_CONTROL,

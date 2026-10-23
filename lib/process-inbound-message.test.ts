@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   reserveMessageAgentTurn: vi.fn(),
   channelUserId: vi.fn(),
   getStagedCameraPhotoReferences: vi.fn(),
+  clearStagedCameraPhotoReferences: vi.fn(),
   getExperienceSettings: vi.fn(),
   getPublicEnabledChannels: vi.fn(),
 }));
@@ -46,6 +47,7 @@ vi.mock("@/lib/channel-identities", () => ({
 }));
 vi.mock("@/lib/browser-photo-staging", () => ({
   getStagedCameraPhotoReferences: h.getStagedCameraPhotoReferences,
+  clearStagedCameraPhotoReferences: h.clearStagedCameraPhotoReferences,
 }));
 vi.mock("@/lib/photo-experience-settings", () => ({
   getExperienceSettings: h.getExperienceSettings,
@@ -199,6 +201,7 @@ beforeEach(() => {
   h.reserveMessageAgentTurn.mockResolvedValue({ allowed: true, duplicate: false });
   h.channelUserId.mockReturnValue("channel-user");
   h.getStagedCameraPhotoReferences.mockResolvedValue([]);
+  h.clearStagedCameraPhotoReferences.mockResolvedValue(false);
   h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
   h.getPublicEnabledChannels.mockReturnValue([]);
 });
@@ -254,6 +257,57 @@ describe("ordered inbound messaging processor", () => {
     );
     expect(conversation).toMatchObject({ state: "collecting", activeStoryId: null });
     expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("does not disclose an old SMS comic from an empty reset conversation", async () => {
+    const oldStoryId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    conversation.state = "collecting";
+    conversation.collected = {};
+    conversation.activeStoryId = null;
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: {},
+      activeStoryId: null,
+      reply: "I'm ready for your comic idea. Tell me what should happen.",
+      action: "none",
+    });
+    // Even a stale lookup result must not bypass the current SMS draft state.
+    h.latestStoryLinkForSms.mockResolvedValue({
+      storyId: oldStoryId,
+      source: "sms",
+      link: "https://comics.example.com/story/previous-owner",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toBe("I'm ready for your comic idea. Tell me what should happen.");
+    expect(sends[0].body).not.toContain("previous-owner");
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh idea before CREATE after conversation expiry", async () => {
+    conversation.state = "collecting";
+    conversation.collected = {};
+    conversation.activeStoryId = null;
+    receipts.SM1.body = "CREATE";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: {},
+      activeStoryId: null,
+      reply: "Tell me your comic idea first. I'll summarize it for you to approve.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).toHaveBeenCalledWith(
+      { state: "collecting", collected: {}, activeStoryId: null },
+      { text: "CREATE", channel: "sms", imageUrls: [] },
+    );
+    expect(h.submitGenerationJob).not.toHaveBeenCalled();
+    expect(h.latestStoryLinkForSms).not.toHaveBeenCalled();
+    expect(sends[0].body).toMatch(/tell me your comic idea first/i);
   });
 
   it("answers an expired Voice result STATUS with a new-idea invitation", async () => {
@@ -641,6 +695,358 @@ describe("ordered inbound messaging processor", () => {
       expect.objectContaining({ collected: { characterImageUrls: [] } }),
       { text: "A robot detective", channel: "sms", imageUrls: [mmsPhoto] },
     );
+  });
+
+  it.each(["NEW", "RESET!", "RESTART", "DISCARD"])(
+    "clears staged booth photos before checkpointing %s",
+    async (command) => {
+      const stagedPhoto = "blob:uploads/twilio_owner/camera/old.jpg";
+      conversation.state = "confirming";
+      conversation.collected = {
+        prompt: "Old draft", characterImageUrls: [stagedPhoto],
+      };
+      receipts.SM1.body = command;
+      h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+      h.getStagedCameraPhotoReferences.mockResolvedValue([stagedPhoto]);
+      h.advanceComicAgent.mockResolvedValue({
+        nextState: "collecting",
+        collected: {},
+        activeStoryId: null,
+        reply: "Let's make a new comic. Tell me your idea.",
+        action: "none",
+      });
+
+      await processInboundMessage("SM1");
+
+      expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, [stagedPhoto]);
+      expect(h.clearStagedCameraPhotoReferences.mock.invocationCallOrder[0])
+        .toBeLessThan(h.checkpointInboundTurn.mock.invocationCallOrder[0]);
+      expect(h.getStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, "channel-user");
+      expect(conversation.collected).toEqual({});
+    },
+  );
+
+  it("does not clear staged booth photos when NEW is blocked by an active generation", async () => {
+    conversation.state = "generating";
+    conversation.collected = { prompt: "Comic being drawn" };
+    receipts.SM1.body = "NEW";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { prompt: "Comic being drawn" },
+      activeStoryId: null,
+      reply: "I'm still creating your comic. Send STATUS for an update.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("generating");
+  });
+
+  it("preserves a new kiosk photo uploaded while a reset is being processed", async () => {
+    const oldPhoto = "blob:uploads/twilio_owner/camera/old.jpg";
+    const newPhoto = "blob:uploads/twilio_owner/camera/new.jpg";
+    let stagedPhotos = [oldPhoto];
+    receipts.SM1.body = "NEW";
+    h.getStagedCameraPhotoReferences.mockImplementation(async () => [...stagedPhotos]);
+    h.clearStagedCameraPhotoReferences.mockImplementation(async (_phone: string, expected?: string[]) => {
+      if (expected?.join() !== stagedPhotos.join()) return false;
+      stagedPhotos = [];
+      return true;
+    });
+    h.advanceComicAgent.mockImplementation(async () => {
+      stagedPhotos = [newPhoto];
+      return {
+        nextState: "collecting", collected: {}, activeStoryId: null,
+        reply: "Let's make a new comic.", action: "none",
+      };
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, [oldPhoto]);
+    expect(stagedPhotos).toEqual([newPhoto]);
+    expect(conversation.collected).toEqual({});
+  });
+
+  it("keeps the attached MMS photo while NEW clears the older booth stage", async () => {
+    const boothPhoto = "blob:uploads/twilio_owner/camera/old.jpg";
+    const mmsPhoto = "https://api.twilio.com/new-photo";
+    conversation.collected = { prompt: "Old idea", characterImageUrls: [boothPhoto] };
+    receipts.SM1.body = "NEW";
+    receipts.SM1.mediaUrls = [mmsPhoto];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue([boothPhoto]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: { characterImageUrls: [mmsPhoto] },
+      activeStoryId: null,
+      reply: "Fresh photo saved. Tell me your new idea.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ collected: { prompt: "Old idea", characterImageUrls: [] } }),
+      { text: "NEW", channel: "sms", imageUrls: [mmsPhoto] },
+    );
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, [boothPhoto]);
+    expect(conversation.collected).toEqual({ characterImageUrls: [mmsPhoto] });
+  });
+
+  it("clears accepted camera photos after admission without clearing a new upload on retry", async () => {
+    const submittedPhoto = "blob:uploads/twilio_owner/camera/submitted.jpg";
+    const nextPhoto = "blob:uploads/twilio_owner/camera/next.jpg";
+    let stagedPhotos = [submittedPhoto];
+    conversation.state = "confirming";
+    conversation.collected = {
+      prompt: "Robot detective", style: "noir", characterImageUrls: [submittedPhoto],
+    };
+    receipts.SM1.body = "CREATE";
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockImplementation(async () => [...stagedPhotos]);
+    h.clearStagedCameraPhotoReferences.mockImplementation(async (_phone: string, expected: string[]) => {
+      if (JSON.stringify(expected) !== JSON.stringify(stagedPhotos)) return false;
+      stagedPhotos = [];
+      return true;
+    });
+    const submission = {
+      prompt: "Robot detective", style: "noir", characterImageUrls: [submittedPhoto],
+    };
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { ...conversation.collected },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission,
+    });
+    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio unavailable"))
+      .mockResolvedValueOnce("SM-out-2");
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio unavailable");
+
+    expect(h.getStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, "channel-user");
+    expect(h.clearStagedCameraPhotoReferences)
+      .toHaveBeenCalledExactlyOnceWith(FROM, [submittedPhoto]);
+    expect(h.clearStagedCameraPhotoReferences.mock.invocationCallOrder[0])
+      .toBeGreaterThan(h.submitGenerationJob.mock.invocationCallOrder[0]);
+    expect(h.clearStagedCameraPhotoReferences.mock.invocationCallOrder[0])
+      .toBeLessThan(h.sendChannelMessage.mock.invocationCallOrder[0]);
+    expect(stagedPhotos).toEqual([]);
+    expect(conversation.collected.characterImageUrls).toEqual([submittedPhoto]);
+    expect(h.submitGenerationJob).toHaveBeenCalledWith(expect.objectContaining({
+      characterImageUrls: [submittedPhoto],
+    }));
+
+    stagedPhotos = [nextPhoto];
+    await processInboundMessage("SM1");
+
+    expect(stagedPhotos).toEqual([nextPhoto]);
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledTimes(2);
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenLastCalledWith(FROM, [submittedPhoto]);
+    expect(h.advanceComicAgent).toHaveBeenCalledOnce();
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("does not depend on camera staging when approving a text-only comic with camera disabled", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Robot detective", style: "noir" };
+    receipts.SM1.body = "CREATE";
+    h.getStagedCameraPhotoReferences.mockRejectedValue(new Error("camera staging unavailable"));
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { prompt: "Robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [] },
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("keeps staged camera photos available when generation admission rejects CREATE", async () => {
+    const cameraPhoto = "blob:uploads/twilio_owner/camera/saved.jpg";
+    conversation.state = "confirming";
+    conversation.collected = {
+      prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
+    };
+    receipts.SM1.body = "CREATE";
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { ...conversation.collected },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto] },
+    });
+    h.submitGenerationJob.mockResolvedValue({
+      accepted: false, job: { id: "job-1", status: "quota_rejected" }, remaining: 0,
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected.characterImageUrls).toEqual([cameraPhoto]);
+    expect(sends[0].body).toMatch(/free limit/i);
+  });
+
+  it("sends the creating reply even if accepted camera-stage cleanup fails", async () => {
+    const cameraPhoto = "blob:uploads/twilio_owner/camera/saved.jpg";
+    conversation.state = "confirming";
+    conversation.collected = {
+      prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
+    };
+    receipts.SM1.body = "CREATE";
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { ...conversation.collected },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto] },
+    });
+    h.clearStagedCameraPhotoReferences.mockRejectedValueOnce(new Error("stage temporarily unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processInboundMessage("SM1");
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(h.submitGenerationJob).toHaveBeenCalledOnce();
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, [cameraPhoto]);
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(sends[0].body).toMatch(/creating your comic/i);
+    expect(h.advanceComicAgent).toHaveBeenCalledOnce();
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("finishes camera cleanup if an accepted job fails before the receipt retry", async () => {
+    const cameraPhoto = "blob:uploads/twilio_owner/camera/saved.jpg";
+    conversation.state = "confirming";
+    conversation.collected = {
+      prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
+    };
+    receipts.SM1.body = "CREATE";
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "generating",
+      collected: { ...conversation.collected },
+      activeStoryId: null,
+      reply: "I'm creating your comic now.",
+      action: "submit",
+      submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto] },
+    });
+    h.submitGenerationJob
+      .mockResolvedValueOnce({ accepted: true, job: { id: "job-1", status: "queued" }, remaining: 2 })
+      .mockResolvedValueOnce({ accepted: false, job: { id: "job-1", status: "failed" }, remaining: 2 });
+    h.clearStagedCameraPhotoReferences
+      .mockRejectedValueOnce(new Error("stage temporarily unavailable"))
+      .mockResolvedValueOnce(true);
+    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio unavailable");
+      expect(receipts.SM1.status).toBe("reply_pending");
+
+      await processInboundMessage("SM1");
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(h.advanceComicAgent).toHaveBeenCalledOnce();
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenCalledTimes(2);
+    expect(h.clearStagedCameraPhotoReferences).toHaveBeenLastCalledWith(FROM, [cameraPhoto]);
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected.characterImageUrls).toEqual([cameraPhoto]);
+    expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("keeps a reset retryable if clearing staged photos fails", async () => {
+    receipts.SM1.body = "NEW";
+    h.getStagedCameraPhotoReferences.mockResolvedValue(["blob:uploads/twilio_owner/camera/old.jpg"]);
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting", collected: {}, activeStoryId: null,
+      reply: "Let's make a new comic.", action: "none",
+    });
+    h.clearStagedCameraPhotoReferences.mockRejectedValueOnce(new Error("database unavailable"));
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow("database unavailable");
+
+    expect(h.checkpointInboundTurn).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(receipts.SM1.status).toBe("processing");
+  });
+
+  it("explains an unsupported attachment without changing an existing draft", async () => {
+    conversation.state = "confirming";
+    conversation.collected = { prompt: "Robot detective", style: "noir" };
+    receipts.SM1.body = "";
+    receipts.SM1.mediaUrls = ["https://api.twilio.com/attachment"];
+    receipts.SM1.mediaContentTypes = ["application/pdf"];
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("confirming");
+    expect(conversation.collected).toEqual({ prompt: "Robot detective", style: "noir" });
+    expect(sends[0].body).toMatch(/couldn't use that attachment.*idea is saved.*send a photo.*reply CREATE/i);
+  });
+
+  it("does not invite a new idea while generation is running after an unsupported attachment", async () => {
+    conversation.state = "generating";
+    conversation.collected = { prompt: "Robot detective", generationRequestKey: "job-1" };
+    receipts.SM1.body = "";
+    receipts.SM1.mediaUrls = ["https://api.twilio.com/attachment"];
+    receipts.SM1.mediaContentTypes = ["video/mp4"];
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).not.toHaveBeenCalled();
+    expect(conversation.state).toBe("generating");
+    expect(sends[0].body).toMatch(/couldn't use that attachment.*still creating.*STATUS/i);
+    expect(sends[0].body).not.toMatch(/send a photo or text your comic idea/i);
+  });
+
+  it("keeps the image and idea when an MMS also includes an unsupported attachment", async () => {
+    const photo = "https://api.twilio.com/photo";
+    receipts.SM1.mediaUrls = [photo, "https://api.twilio.com/video"];
+    receipts.SM1.mediaContentTypes = ["image/jpeg", "video/mp4"];
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", characterImageUrls: [photo] },
+      activeStoryId: null,
+      reply: "A robot detective. Reply CREATE to approve.",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).toHaveBeenCalledWith(expect.anything(), {
+      text: "A robot detective", channel: "sms", imageUrls: [photo],
+    });
+    expect(sends[0].body).toMatch(/reply CREATE to approve.*skipped the non-photo attachment/i);
+    expect(conversation.collected).toMatchObject({
+      characterImageUrls: [photo],
+    });
   });
 
   it("checkpoints a confirmed draft before publishing its idempotent generation job", async () => {
