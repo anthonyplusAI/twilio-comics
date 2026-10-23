@@ -1,11 +1,13 @@
 import { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { testPostgresUrl } from "./test-postgres-url";
 
 import {
   assessMigrationPreflight,
   buildBaselineSql,
   inspectDatabase,
   loadMigrationPlan,
+  logMigrationPreflightFailure,
   type DatabaseState,
   type MigrationPlanEntry,
   type SchemaShape,
@@ -14,6 +16,24 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 describe("live PostgreSQL inspection", () => {
+  it("logs a safe stage and code without a rejected connection URL", () => {
+    const secret = "sentinel_" + "preflight_password";
+    const databaseUrl = testPostgresUrl({ password: secret });
+    const rawError = Object.assign(new Error(`Connection failed for ${databaseUrl}`), {
+      code: "28P01",
+      detail: secret,
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    logMigrationPreflightFailure("inspect database", rawError);
+
+    const logged = JSON.stringify(errorLog.mock.calls);
+    expect(logged).toContain("inspect database");
+    expect(logged).toContain("28P01");
+    expect(logged).not.toContain(secret);
+    expect(logged).not.toContain(databaseUrl);
+  });
+
   it("uses one read-only snapshot and closes the connection", async () => {
     const commands: string[] = [];
     const release = vi.fn();
@@ -25,7 +45,7 @@ describe("live PostgreSQL inspection", () => {
     const end = vi.spyOn(Pool.prototype, "end").mockResolvedValue();
 
     const state = await inspectDatabase(
-      "postgresql://migrator:secret@localhost/comics?sslmode=disable",
+      testPostgresUrl({ params: [["sslmode", "disable"]] }),
     );
 
     expect(state).toEqual({
@@ -46,7 +66,7 @@ describe("live PostgreSQL inspection", () => {
     const end = vi.spyOn(Pool.prototype, "end").mockResolvedValue();
 
     await expect(inspectDatabase(
-      "postgresql://migrator:secret@localhost/comics?sslmode=disable",
+      testPostgresUrl({ params: [["sslmode", "disable"]] }),
     )).rejects.toThrow("database unavailable");
     expect(end).toHaveBeenCalledOnce();
   });

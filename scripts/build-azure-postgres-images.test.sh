@@ -25,7 +25,8 @@ for path in Dockerfile.bootstrap Dockerfile.migrate package.json pnpm-lock.yaml 
   printf '%s\n' "$path" > "$fixture/$path"
 done
 for path in scripts/bootstrap-azure-postgres-roles.ts scripts/check-migration-preflight.ts \
-  lib/db.ts lib/schema.ts drizzle/0000_test.sql; do
+  scripts/recover-admin-login.ts lib/admin-auth.ts lib/db.ts lib/schema.ts \
+  drizzle/0000_test.sql; do
   printf '%s\n' "$path" > "$fixture/$path"
 done
 printf '%s\n' 'local-secret-must-not-be-uploaded' > "$fixture/.env"
@@ -58,6 +59,10 @@ elif [[ "${1:-} ${2:-}" == 'acr build' ]]; then
   else
     [[ -f "$context/scripts/check-migration-preflight.ts" ]] \
       || assert_context 'migration preflight input is missing'
+    [[ -f "$context/scripts/recover-admin-login.ts" ]] \
+      || assert_context 'admin recovery command is missing'
+    [[ -f "$context/lib/admin-auth.ts" ]] \
+      || assert_context 'admin credential hashing code is missing'
     [[ -f "$context/drizzle/0000_test.sql" ]] \
       || assert_context 'committed migration is missing'
     [[ ! -e "$context/scripts/bootstrap-azure-postgres-roles.ts" ]] \

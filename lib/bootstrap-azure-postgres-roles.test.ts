@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testPostgresUrl } from "./test-postgres-url";
 import {
   POSTGRES_BOOTSTRAP,
   KeyVaultHttpError,
@@ -112,7 +113,7 @@ describe("private PostgreSQL role bootstrap", () => {
     try {
       await retry.request("PUT", async () => {
         attempts++;
-        return new Response(JSON.stringify({ error: { code: "Forbidden", message: "postgresql://secret-value" } }), {
+        return new Response(JSON.stringify({ error: { code: "Forbidden", message: testPostgresUrl({ host: "example.invalid" }) } }), {
           status: 403,
         });
       });
@@ -186,10 +187,10 @@ describe("private PostgreSQL role bootstrap", () => {
   });
 
   it.each([
-    "postgresql://comics_runtime:abcdefghijklmnopqrstuvwxyzABCDEF@evil.example/twilio_comics?sslmode=verify-full",
-    `postgresql://comics_runtime:abcdefghijklmnopqrstuvwxyzABCDEF@${POSTGRES_BOOTSTRAP.host}/other_db?sslmode=verify-full`,
-    `postgresql://comics_runtime:abcdefghijklmnopqrstuvwxyzABCDEF@${POSTGRES_BOOTSTRAP.host}/twilio_comics?sslmode=disable`,
-    `postgresql://comics_runtime:abcdefghijklmnopqrstuvwxyzABCDEF@${POSTGRES_BOOTSTRAP.host}/twilio_comics?sslmode=verify-full&sslmode=disable`,
+    testPostgresUrl({ host: "evil.example", database: POSTGRES_BOOTSTRAP.database, user: POSTGRES_BOOTSTRAP.runtimeUser, params: [["sslmode", "verify-full"]] }),
+    testPostgresUrl({ host: POSTGRES_BOOTSTRAP.host, database: "other_db", user: POSTGRES_BOOTSTRAP.runtimeUser, params: [["sslmode", "verify-full"]] }),
+    testPostgresUrl({ host: POSTGRES_BOOTSTRAP.host, database: POSTGRES_BOOTSTRAP.database, user: POSTGRES_BOOTSTRAP.runtimeUser, params: [["sslmode", "disable"]] }),
+    testPostgresUrl({ host: POSTGRES_BOOTSTRAP.host, database: POSTGRES_BOOTSTRAP.database, user: POSTGRES_BOOTSTRAP.runtimeUser, params: [["sslmode", "verify-full"], ["sslmode", "disable"]] }),
   ])("rejects a stored URL that could redirect a role credential: %s", (url) => {
     expect(() => parseStoredRolePassword(url, POSTGRES_BOOTSTRAP.runtimeUser)).toThrow();
   });
@@ -233,7 +234,7 @@ describe("private PostgreSQL role bootstrap", () => {
   it("fails closed before SQL changes when an existing Key Vault URL points elsewhere", async () => {
     const { store, createClient, queries, writes } = fixture({
       existingSecrets: {
-        [POSTGRES_BOOTSTRAP.runtimeUrlSecret]: "postgresql://comics_runtime:abc@evil.example/twilio_comics?sslmode=verify-full",
+        [POSTGRES_BOOTSTRAP.runtimeUrlSecret]: testPostgresUrl({ host: "evil.example", database: POSTGRES_BOOTSTRAP.database, user: POSTGRES_BOOTSTRAP.runtimeUser, params: [["sslmode", "verify-full"]] }),
       },
     });
     await expect(bootstrapRoles(store, createClient)).rejects.toThrow("Stored comics_runtime URL");

@@ -71,14 +71,12 @@ jobs:
             '
       - run: docker build --file Dockerfile.migrate --tag twilio-comics-migrate:test .
 
-  security:
-    name: Security checks
+  dependency_audit:
+    name: Dependency audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: pnpm/action-setup@v6
         with:
           version: 10.20.0
@@ -87,15 +85,32 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Dependency audit
-        run: pnpm audit --prod --audit-level=high
+      - run: pnpm audit --prod --audit-level=high
+
+  secret_scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Secret scan
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 detect --source=/repo --no-banner --redact
+
+  postgres_url_guard:
+    name: PostgreSQL URL literal guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/check-postgres-url-literals.test.py
+      - run: python3 scripts/check-postgres-url-literals.py
 
   validate:
     name: Validate
     if: always()
-    needs: [quality, test, build, security]
+    needs: [quality, test, build, dependency_audit, secret_scan, postgres_url_guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -104,9 +119,11 @@ jobs:
           QUALITY: ${{ needs.quality.result }}
           TEST: ${{ needs.test.result }}
           BUILD: ${{ needs.build.result }}
-          SECURITY: ${{ needs.security.result }}
+          DEPENDENCY_AUDIT: ${{ needs.dependency_audit.result }}
+          SECRET_SCAN: ${{ needs.secret_scan.result }}
+          POSTGRES_URL_GUARD: ${{ needs.postgres_url_guard.result }}
         run: |
-          if [ "$QUALITY" != "success" ] || [ "$TEST" != "success" ] || [ "$BUILD" != "success" ] || [ "$SECURITY" != "success" ]; then
-            echo "Required checks: quality=$QUALITY test=$TEST build=$BUILD security=$SECURITY"
+          if [ "$QUALITY" != "success" ] || [ "$TEST" != "success" ] || [ "$BUILD" != "success" ] || [ "$DEPENDENCY_AUDIT" != "success" ] || [ "$SECRET_SCAN" != "success" ] || [ "$POSTGRES_URL_GUARD" != "success" ]; then
+            echo "Required checks: quality=$QUALITY test=$TEST build=$BUILD dependency_audit=$DEPENDENCY_AUDIT secret_scan=$SECRET_SCAN postgres_url_guard=$POSTGRES_URL_GUARD"
             exit 1
           fi

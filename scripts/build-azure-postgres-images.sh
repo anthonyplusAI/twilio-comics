@@ -23,7 +23,8 @@ cd "$project_root"
 source_paths=(
   Dockerfile.bootstrap Dockerfile.migrate package.json pnpm-lock.yaml pnpm-workspace.yaml
   scripts/bootstrap-azure-postgres-roles.ts scripts/check-migration-preflight.ts
-  drizzle.config.ts envConfig.ts tsconfig.json lib/db.ts lib/schema.ts drizzle
+  scripts/recover-admin-login.ts drizzle.config.ts envConfig.ts tsconfig.json
+  lib/admin-auth.ts lib/db.ts lib/schema.ts drizzle
 )
 for path in "${source_paths[@]}"; do
   [[ -e "$path" ]] || die "Missing build input '$path'."
@@ -48,9 +49,14 @@ cp scripts/bootstrap-azure-postgres-roles.ts "$build_root/bootstrap/scripts/"
 
 cp Dockerfile.migrate package.json pnpm-lock.yaml pnpm-workspace.yaml \
   drizzle.config.ts envConfig.ts tsconfig.json "$build_root/migration/"
-cp scripts/check-migration-preflight.ts "$build_root/migration/scripts/"
-cp lib/db.ts lib/schema.ts "$build_root/migration/lib/"
-git archive HEAD drizzle | tar -x -C "$build_root/migration"
+cp scripts/check-migration-preflight.ts scripts/recover-admin-login.ts \
+  "$build_root/migration/scripts/"
+cp lib/admin-auth.ts lib/db.ts lib/schema.ts "$build_root/migration/lib/"
+# macOS bsdtar may close a pipe after the tar end marker while git archive is
+# still writing padding. Materialize the archive outside the upload context so
+# pipefail does not mistake that SIGPIPE for a failed build.
+git archive HEAD drizzle > "$build_root/drizzle.tar"
+tar -xf "$build_root/drizzle.tar" -C "$build_root/migration"
 
 az acr build --registry "$acr_name" --image "twilio-comics-bootstrap:$release_sha" \
   --file Dockerfile.bootstrap --only-show-errors --output none "$build_root/bootstrap"
