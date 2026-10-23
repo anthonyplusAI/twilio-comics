@@ -376,7 +376,7 @@ gh workflow run deploy.yml --ref main
 gh run list --workflow deploy.yml --limit 1
 ```
 
-Watch the selected run with `gh run watch <run-id> --exit-status`. The workflow must finish the private migration Job before rolling out the runtime workloads, then check the commit SHA at `/api/healthz`. An initial closed release shows “opening soon” on the homepage and `/start`. The actual public V2 release is `1e94459`; [Deploy run 39816986055](https://github.com/anthonyplusAI/twilio-comics/actions/runs/39816986055) succeeded and `/api/readyz` returned HTTP 200. The old managed-network placeholder is not the public app.
+Watch the selected run with `gh run watch <run-id> --exit-status`. The workflow must finish the private migration Job before rolling out the runtime workloads, then check the commit SHA at `/api/healthz`. An initial closed release shows “opening soon” on `/start`; the homepage still points there with its single start link and QR code. Check `/api/readyz` for HTTP 200 before directing visitors to the current release. The old managed-network placeholder is not the public app.
 
 After `PUBLIC_BASE_URL` is the final HTTPS origin and `/api/readyz` reports `ready: true`, use the authenticated Twilio CLI profile to configure or reverify the approved number. This cutover has completed for the current pilot:
 
