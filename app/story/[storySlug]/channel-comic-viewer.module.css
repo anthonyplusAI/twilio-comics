@@ -16,7 +16,8 @@
 }
 
 .page a:focus-visible,
-.page button:focus-visible {
+.page button:focus-visible,
+.page textarea:focus-visible {
   outline: 3px solid var(--blue);
   outline-offset: 4px;
 }
@@ -192,7 +193,7 @@
 
 .shareChoices {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
 }
 
@@ -238,6 +239,106 @@
   font-size: 11px;
   font-weight: 600;
   line-height: 1.25;
+}
+
+.linkedInShare {
+  margin-top: 12px;
+  border: 2px solid var(--ink);
+  background: var(--pale-blue);
+  padding: 16px;
+}
+
+.linkedInHeading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.linkedInHeading > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  place-items: center;
+  background: #0a66c2;
+  color: var(--paper);
+}
+
+.linkedInHeading strong {
+  font-size: 18px;
+}
+
+.linkedInHeading p {
+  margin: 2px 0 0;
+  color: #414d6b;
+  font-size: 13px;
+}
+
+.linkedInActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.linkedInButton {
+  display: inline-flex;
+  min-height: 48px;
+  flex: 1 1 190px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  padding: 10px 14px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+  text-decoration: none;
+}
+
+.linkedInButton:first-child {
+  background: var(--blue);
+  color: var(--paper);
+}
+
+.linkedInButton:hover {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.linkedInInstructions {
+  margin: 14px 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.linkedInCaption {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.linkedInCaption span {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.linkedInCaption textarea {
+  display: block;
+  width: 100%;
+  min-height: 76px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  padding: 9px 10px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: vertical;
 }
 
 .actionNotice {

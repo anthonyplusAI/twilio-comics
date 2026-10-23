@@ -18,6 +18,7 @@ export function ChannelComicActions({
   const [isDownloading, setIsDownloading] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
   const downloadInProgress = useRef(false);
+  const linkedInCaptionRef = useRef<HTMLTextAreaElement>(null);
 
   const comicUrl = () => resolveComicShareUrl(shareUrl, window.location.origin, window.location.pathname);
 
@@ -49,10 +50,12 @@ export function ChannelComicActions({
 
   const copyLinkedInCaption = async () => {
     try {
-      await navigator.clipboard.writeText(linkedInShareCaption());
-      setNotice("LinkedIn caption copied. Paste it, then retype @Twilio and select the official Page to make it a tag.");
+      await navigator.clipboard.writeText(linkedInShareCaption(comicUrl()));
+      setNotice("LinkedIn caption copied. Paste it into your post.");
     } catch {
-      setNotice("In LinkedIn, type @Twilio and select its official Page. Add #Twilio too.");
+      linkedInCaptionRef.current?.focus();
+      linkedInCaptionRef.current?.select();
+      setNotice("Clipboard unavailable. Copy the selected caption below.");
     }
   };
 
@@ -134,17 +137,6 @@ export function ChannelComicActions({
               <span className={styles.shareChoiceText}>X<small>Post with @twilio and #Twilio</small></span>
               <ArrowUpRight size={18} aria-hidden="true" />
             </a>
-            <a
-              className={styles.shareChoice}
-              href={linkedInShareIntent(comicUrl())}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={() => void copyLinkedInCaption()}
-            >
-              <span className={styles.shareChoiceMark}>in</span>
-              <span className={styles.shareChoiceText}>LinkedIn<small>Paste caption; retype @Twilio and select Twilio&apos;s Page</small></span>
-              <ArrowUpRight size={18} aria-hidden="true" />
-            </a>
             <button className={styles.shareChoice} onClick={() => void copyLink(true)} type="button">
               <Camera size={22} aria-hidden="true" />
               <span className={styles.shareChoiceText}>Instagram<small>Copy link; add #Twilio</small></span>
@@ -155,6 +147,41 @@ export function ChannelComicActions({
               <span className={styles.shareChoiceText}>More apps<small>Share sheet or copy link</small></span>
               <ArrowUpRight size={18} aria-hidden="true" />
             </button>
+          </div>
+          <div className={styles.linkedInShare}>
+            <div className={styles.linkedInHeading}>
+              <span className={styles.shareChoiceMark} aria-hidden="true">in</span>
+              <div>
+                <strong>LinkedIn</strong>
+                <p>Share the comic and tag Twilio&apos;s Page.</p>
+              </div>
+            </div>
+            <div className={styles.linkedInActions}>
+              <button className={styles.linkedInButton} onClick={() => void copyLinkedInCaption()} type="button">
+                <Copy size={18} aria-hidden="true" /> 1. Copy caption
+              </button>
+              <a
+                className={styles.linkedInButton}
+                href={linkedInShareIntent(comicUrl())}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                2. Open LinkedIn <ArrowUpRight size={18} aria-hidden="true" />
+              </a>
+            </div>
+            <p className={styles.linkedInInstructions}>
+              Paste the caption, start a new line, then type <strong>@Twilio</strong> in LinkedIn and select Twilio&apos;s official Page from the suggestions. That selection creates the tag.
+            </p>
+            <label className={styles.linkedInCaption}>
+              <span>Caption to copy manually if needed</span>
+              <textarea
+                ref={linkedInCaptionRef}
+                value={linkedInShareCaption(comicUrl())}
+                readOnly
+                rows={3}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </label>
           </div>
         </div>
       )}
