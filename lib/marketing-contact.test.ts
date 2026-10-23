@@ -4,6 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import Home from "@/app/page";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 
+vi.mock("qrcode.react", async () => {
+  const { createElement } = await import("react");
+  return {
+    QRCodeSVG: ({ value, title }: { value: string; title?: string }) =>
+      createElement("svg", { "data-test-qr-value": value, title }),
+  };
+});
+
 afterEach(() => vi.unstubAllEnvs());
 
 describe("getMarketingContact", () => {
@@ -91,30 +99,33 @@ describe("getEnabledChannels", () => {
 });
 
 describe("public comic invitation", () => {
-  it("shows a WhatsApp action and QR with no SMS or Voice number", () => {
+  it("sends visitors to the channel chooser even when only WhatsApp is enabled", () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com/");
     vi.stubEnv("TWILIO_PHONE_NUMBER", "");
     vi.stubEnv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+447700900123");
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "whatsapp");
 
     const html = renderToStaticMarkup(createElement(Home));
 
-    expect(html).toContain('href="https://wa.me/447700900123?text=Turn%20me%20into%20a%20comic!"');
-    expect(html).toContain("Scan to start a WhatsApp chat");
+    expect(html.match(/href="\/start"/g)).toHaveLength(1);
+    expect(html).toContain('data-test-qr-value="https://comics.example.com/start"');
     expect(html).not.toContain('href="sms:');
     expect(html).not.toContain('href="tel:');
-    expect(html).not.toContain("Opening soon");
+    expect(html).not.toContain('href="https://wa.me/');
   });
 
-  it("shows no phone actions or QR without a configured sender", () => {
+  it("keeps the chooser link and QR available without a configured sender", () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
     vi.stubEnv("TWILIO_PHONE_NUMBER", "");
     vi.stubEnv("TWILIO_WHATSAPP_NUMBER", "");
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "");
 
     const html = renderToStaticMarkup(createElement(Home));
 
-    expect(html).toContain("Opening soon");
+    expect(html.match(/href="\/start"/g)).toHaveLength(1);
+    expect(html).toContain('data-test-qr-value="https://comics.example.com/start"');
     expect(html).not.toContain('href="sms:');
     expect(html).not.toContain('href="tel:');
-    expect(html).not.toContain("https://wa.me/");
-    expect(html).not.toContain("Scan to start");
+    expect(html).not.toContain('href="https://wa.me/');
   });
 });
