@@ -151,7 +151,7 @@ jq -e --arg uri "$SECRET_URI" --arg identity "$IDENTITY_ID" --arg domain "$DOMAI
     | length == 0 or (length == 1 and .[0].keyVaultUrl == $uri
       and (.[0].identity | ascii_downcase) == ($identity | ascii_downcase)))
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_API_KEY")]
-    | length == 0 or (length == 1 and .[0].secretRef == "dub-api-key" and .[0].value == null))
+    | length == 0 or (length == 1 and .[0].secretRef == "dub-api-key" and ((.[0].value // "") == "")))
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_DOMAIN")]
     | length == 0 or (length == 1 and .[0].value == $domain))
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_FOLDER_ID")]
@@ -373,7 +373,7 @@ jq -e --arg uri "$SECRET_URI" --arg identity "$IDENTITY_ID" \
     | length == 1 and .[0].keyVaultUrl == $uri
       and (.[0].identity | ascii_downcase) == ($identity | ascii_downcase))
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_API_KEY")]
-    | length == 1 and .[0].secretRef == "dub-api-key" and .[0].value == null)
+    | length == 1 and .[0].secretRef == "dub-api-key" and ((.[0].value // "") == ""))
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_DOMAIN")]
     | length == 1 and .[0].value == $domain)
   and ([.properties.template.containers[0].env[]? | select(.name == "DUB_FOLDER_ID")]
