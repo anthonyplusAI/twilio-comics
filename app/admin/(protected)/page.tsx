@@ -5,7 +5,7 @@ import { TrendChart } from "@/components/admin/trend-chart";
 import { formatAdminDuration } from "@/components/admin/format";
 import { requireAdmin } from "@/lib/admin-access";
 import { getAdminDashboard } from "@/lib/admin-analytics";
-import { parseAdminDashboardRange } from "@/lib/admin-dashboard-range";
+import { parseAdminDashboardRange, type AdminDashboardRange } from "@/lib/admin-dashboard-range";
 import styles from "../admin.module.css";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +19,18 @@ interface DashboardSearchParams {
 
 function singleValue(value: string | string[] | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function activityHref(range: AdminDashboardRange, failedReplies = false): string {
+  const params = new URLSearchParams();
+  if (failedReplies) params.set("filter", "failed-agent-replies");
+  if (range.mode !== "all") params.set("range", range.mode);
+  if (range.mode === "custom" && range.from) {
+    params.set("from", range.from);
+    if (range.to) params.set("to", range.to);
+  }
+  const query = params.toString();
+  return `/admin/activity${query ? `?${query}` : ""}`;
 }
 
 export default async function AdminDashboardPage({
@@ -124,7 +136,7 @@ export default async function AdminDashboardPage({
             <div><dt>Comic links delivered</dt><dd>{counts.delivered.toLocaleString()}</dd></div>
             <div><dt>Unresolved delivery issues</dt><dd data-alert={counts.deliveryFailed > 0}>{counts.deliveryFailed.toLocaleString()}</dd></div>
             <div>
-              <dt>Agent reply delivery issues <Link className={styles.inlineLink} href="/admin/activity?filter=failed-agent-replies">View all dates</Link></dt>
+              <dt>Agent reply delivery issues <Link className={styles.inlineLink} href={activityHref(range, true)}>{range.mode === "all" ? "View all dates" : "View selected dates"}</Link></dt>
               <dd data-alert={counts.agentReplyDeliveryFailed > 0}>{counts.agentReplyDeliveryFailed.toLocaleString()}</dd>
             </div>
             <div><dt>Generation failures</dt><dd data-alert={counts.comicsFailed > 0}>{counts.comicsFailed.toLocaleString()}</dd></div>
@@ -146,7 +158,7 @@ export default async function AdminDashboardPage({
             <h2 id="recent-heading">Recent activity</h2>
             <p>Latest message, voice, generation, and delivery events in this period.</p>
           </div>
-          <Link className={styles.inlineLink} href="/admin/activity">View all dates</Link>
+          <Link className={styles.inlineLink} href={activityHref(range)}>{range.mode === "all" ? "View all dates" : "View selected dates"}</Link>
         </div>
         {range.mode !== "all" && recentActivity.length === 0 ? (
           <div className={styles.emptyState}>

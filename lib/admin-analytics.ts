@@ -335,10 +335,12 @@ export function buildAdminActivityHistoryQuery(input: {
   filter: AdminActivityFilter;
   cursor: ActivityCursor | null;
   limit: number;
+  range?: AdminDashboardRange;
 }): SQL {
   const filtered = input.filter === "failed-agent-replies"
     ? sql`AND ${failedAgentReplyEvent}`
     : sql``;
+  const window = input.range ? metricWindow(sql`occurred_at`, input.range) : sql``;
   const before = input.cursor
     ? sql`AND (occurred_at, id) < (${input.cursor.occurredAt.toISOString()}::timestamp, ${input.cursor.id}::uuid)`
     : sql``;
@@ -346,7 +348,7 @@ export function buildAdminActivityHistoryQuery(input: {
     SELECT id, occurred_at, user_id, channel, kind, direction, address,
       call_sid, message_sid, job_id, story_id, content, status, details
     FROM activity_events
-    WHERE TRUE ${filtered} ${before}
+    WHERE TRUE ${filtered} ${window} ${before}
     ORDER BY occurred_at DESC, id DESC
     LIMIT ${input.limit}
   `;
@@ -414,11 +416,13 @@ export function paginateActivityRows<T extends { id: string; occurred_at: Date |
 export async function getAdminActivityHistory(
   filter: AdminActivityFilter,
   cursorString: string | null | undefined,
+  range: AdminDashboardRange = parseAdminDashboardRange({}),
 ) {
   const result = await db.execute(buildAdminActivityHistoryQuery({
     filter,
     cursor: decodeActivityCursor(cursorString),
     limit: ACTIVITY_PAGE_SIZE + 1,
+    range,
   }));
   return paginateActivityRows(rowsOf<AdminActivityRow>(result), ACTIVITY_PAGE_SIZE);
 }
