@@ -183,6 +183,17 @@ describe("dashboard admin credential rotation", () => {
     }, requestFrom())).toMatchObject({ name: "new-admin" });
   });
 
+  it("rotates to a one-character punctuation password that can sign in", async () => {
+    expect(await rotateAdminCredentials({
+      currentPassword: oldPassword,
+      newUsername: "new-admin",
+      newPassword: "!",
+    })).toEqual({ ok: true });
+    expect(await authenticateAdminCredentials({
+      username: "new-admin", password: "!",
+    }, requestFrom())).toMatchObject({ name: "new-admin", role: "admin" });
+  });
+
   it("locks out repeated wrong current passwords across requests", async () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       expect(await rotateAdminCredentials({
@@ -202,7 +213,9 @@ describe("dashboard admin credential rotation", () => {
   it.each([
     ["a", newPassword],
     ["bad username", newPassword],
-    ["new-admin", "too-short"],
+    ["new-admin", ""],
+    ["new-admin", "  "],
+    ["new-admin", "a".repeat(1025)],
     ["new-admin", "a\npassword with a control character"],
     ["new-admin", "a\u2028password with a line separator"],
   ])("rejects an invalid new username or password before database access", async (newUsername, candidatePassword) => {

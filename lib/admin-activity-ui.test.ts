@@ -10,7 +10,7 @@ vi.mock("@/lib/admin-access", () => ({
 import AdminDashboardPage from "@/app/admin/(protected)/page";
 import AdminActivityPage from "@/app/admin/(protected)/activity/page";
 
-describe("administrator reply delivery visibility", () => {
+describe("administrator dashboard and activity visibility", () => {
   beforeEach(() => h.execute.mockReset());
 
   it("links a visible dashboard failure count to the filtered operations history", async () => {
@@ -19,11 +19,59 @@ describe("administrator reply delivery visibility", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
-    const html = renderToStaticMarkup(await AdminDashboardPage());
+    const html = renderToStaticMarkup(await AdminDashboardPage({ searchParams: Promise.resolve({}) }));
 
     expect(html).toMatch(/Agent reply delivery issues[\s\S]*?4/);
     expect(html).toContain('href="/admin/activity?filter=failed-agent-replies"');
     expect(html).toContain('href="/admin/activity"');
+  });
+
+  it("shows selected-period metrics and an active seven-day filter without weekly subcounts", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+
+    const html = renderToStaticMarkup(await AdminDashboardPage({
+      searchParams: Promise.resolve({ range: "7d" }),
+    }));
+
+    const activePreset = html.match(/<a[^>]*aria-current="page"[^>]*>/)?.[0];
+    expect(activePreset).toContain('href="/admin?range=7d"');
+    expect(html).toContain("New phone participants");
+    expect(html).toContain("Dates in UTC");
+    expect(html).not.toContain("Lifetime totals");
+    expect(html).not.toContain("this week");
+    expect(html).not.toContain("Message turns limited · 7 days");
+    const recentPanel = html.slice(html.indexOf('id="recent-heading"'));
+    expect(recentPanel).toContain("No activity in this period");
+    expect(recentPanel).not.toContain("No activity recorded yet");
+  });
+
+  it("keeps a custom start and end date in the filter form", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+
+    const html = renderToStaticMarkup(await AdminDashboardPage({
+      searchParams: Promise.resolve({ range: "custom", from: "2026-10-01", to: "2026-10-03" }),
+    }));
+
+    expect(html).toContain('name="range" value="custom"');
+    const fromInput = html.match(/<input[^>]*name="from"[^>]*>/)?.[0];
+    const toInput = html.match(/<input[^>]*name="to"[^>]*>/)?.[0];
+    expect(fromInput).toContain('type="date"');
+    expect(fromInput).toContain('value="2026-10-01"');
+    expect(toInput).toContain('type="date"');
+    expect(toInput).toContain('value="2026-10-03"');
+    expect(html).toContain("Custom dates (selected)");
+  });
+
+  it("explains an invalid custom date instead of silently showing unfiltered totals", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+
+    const html = renderToStaticMarkup(await AdminDashboardPage({
+      searchParams: Promise.resolve({ range: "custom", from: "2026-13-01", to: "2026-10-03" }),
+    }));
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Showing all time");
+    expect(html).not.toContain("Custom dates (selected)");
   });
 
   it("shows filtered agent reply failures with the Twilio receipt and participant lookup", async () => {

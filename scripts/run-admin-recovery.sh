@@ -113,8 +113,10 @@ if ! jq -e --arg id "$job_id" --arg job "$job_name" \
   and .properties.template.containers[0].args == ["run", "db:migrate:safe"]
   and .properties.template.containers[0].resources.cpu == 0.5
   and .properties.template.containers[0].resources.memory == "1Gi"
-  and (.identity.userAssignedIdentities | has($migration_identity))
-  and (.identity.userAssignedIdentities | has($pull_identity))
+  and ([.identity.userAssignedIdentities // {} | keys[]
+        | select(ascii_downcase == ($migration_identity | ascii_downcase))] | length) == 1
+  and ([.identity.userAssignedIdentities // {} | keys[]
+        | select(ascii_downcase == ($pull_identity | ascii_downcase))] | length) == 1
   and ([.properties.configuration.registries[]?
         | select(.server == $acr and ((.identity // "" | ascii_downcase) == ($pull_identity | ascii_downcase)))]
        | length) == 1

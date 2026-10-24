@@ -23,7 +23,7 @@ const credentialSchema = z.object({
 const rotationSchema = z.object({
   currentPassword: z.string().min(1).max(1024),
   newUsername: z.string().regex(/^[A-Za-z0-9._-]{3,64}$/),
-  newPassword: z.string().min(16).max(1024)
+  newPassword: z.string().min(1).max(1024)
     .refine((password) => password.trim().length > 0 &&
       !/[\p{C}\p{Zl}\p{Zp}]/u.test(password)),
 });
@@ -57,8 +57,8 @@ function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
 
 /** Create a salt per password. Persist only the encoded hash. */
 export async function hashAdminPassword(password: string): Promise<string> {
-  if (password.length < 16 || password.length > 1024) {
-    throw new Error("Administrator password must be 16 to 1024 characters");
+  if (password.length < 1 || password.length > 1024) {
+    throw new Error("Administrator password must be 1 to 1024 characters");
   }
   const salt = randomBytes(SALT_LENGTH);
   const key = await deriveKey(password, salt);

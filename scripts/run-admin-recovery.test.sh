@@ -79,6 +79,11 @@ case "${1:-} ${2:-} ${3:-}" in
         }
       }' |
       case "$MOCK_MODE" in
+        mixed-case-assigned-identities) jq '.identity.userAssignedIdentities |= with_entries(.key |= ascii_upcase)' ;;
+        wrong-migration-identity) jq --arg id "$migration_identity" \
+          'del(.identity.userAssignedIdentities[$id]) | .identity.userAssignedIdentities["/wrong/migration-identity"] = {}' ;;
+        wrong-pull-identity) jq --arg id "$pull_identity" \
+          'del(.identity.userAssignedIdentities[$id]) | .identity.userAssignedIdentities["/wrong/pull-identity"] = {}' ;;
         wrong-job-id) jq '.id = "/subscriptions/other/resourceGroups/other/providers/Microsoft.App/jobs/twilio-comics-migrate-v2"' ;;
         wrong-secret) jq '.properties.configuration.secrets[0].keyVaultUrl = "https://other.vault.azure.net/secrets/other"' ;;
         wrong-database-env) jq '.properties.template.containers[0].env[0].value = "plaintext" | del(.properties.template.containers[0].env[0].secretRef)' ;;
@@ -251,8 +256,17 @@ grep -Fq 'Admin username: anthony.admin' "$fixture/output"
 [[ -z "$(find "$fixture/tmp" -mindepth 1 -maxdepth 1 -print)" ]] ||
   { printf 'Custom-username recovery left a private key behind\n' >&2; exit 1; }
 
+if ! run_case mixed-case-assigned-identities; then
+  printf 'Azure identity resource IDs should match even when key capitalization differs\n' >&2
+  cat "$fixture/output" >&2
+  exit 1
+fi
+[[ "$(cat "$fixture/clipboard")" == "$password" ]]
+grep -Fq 'containerapp job start' "$fixture/calls"
+
 for mode in wrong-subscription wrong-subnet wrong-job-id wrong-secret \
-  wrong-database-env wrong-retry-limit wrong-acr-digest active-execution \
+  wrong-database-env wrong-retry-limit wrong-migration-identity \
+  wrong-pull-identity wrong-acr-digest active-execution \
   no-log-access; do
   if run_case "$mode"; then
     printf 'Expected %s to fail before recovery start\n' "$mode" >&2
