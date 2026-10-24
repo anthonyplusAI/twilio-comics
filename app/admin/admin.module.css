@@ -186,6 +186,67 @@
 .backAction { color: var(--navy); border: 1px solid #bfcce0; background: white; }
 .backAction:hover { border-color: var(--twilio-blue); }
 
+.dateRangePanel {
+  display: grid;
+  grid-template-columns: minmax(180px, .34fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-bottom: 20px;
+  padding: 23px 27px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--twilio-blue);
+  border-radius: 9px;
+  background: white;
+  box-shadow: 0 6px 28px rgba(16, 38, 74, .035);
+}
+
+.dateRangeSummary h2 {
+  margin: 0;
+  color: var(--navy);
+  font-family: var(--font-space-grotesk), Arial, sans-serif;
+  font-size: 1.14rem;
+  letter-spacing: -.03em;
+}
+
+.dateRangeSummary p { margin: 9px 0 4px; font-size: .87rem; font-weight: 750; line-height: 1.4; }
+.dateRangeSummary small { color: var(--muted); font-size: .75rem; }
+.dateRangeControls { min-width: 0; }
+.datePresets { display: flex; flex-wrap: wrap; gap: 8px; }
+.datePresets a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid #bfcbde;
+  border-radius: 5px;
+  color: var(--navy);
+  background: white;
+  font-size: .79rem;
+  font-weight: 750;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.datePresets a:hover { border-color: var(--twilio-blue); color: #1459cb; }
+.datePresets a[aria-current="page"] { border-color: var(--twilio-red); color: #a61e35; background: #ffe8ec; }
+
+.customDateForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(125px, 180px)) auto;
+  align-items: end;
+  gap: 8px 10px;
+  margin-top: 17px;
+  padding-top: 16px;
+  border-top: 1px solid #edf0f5;
+}
+.customDateHeading { grid-column: 1 / -1; color: var(--navy); font-size: .78rem; font-weight: 800; }
+.customDateField { display: flex; flex-direction: column; gap: 5px; min-width: 0; color: var(--ink); font-size: .74rem; font-weight: 750; }
+.customDateField span { color: var(--muted); font-weight: 500; }
+.customDateField input { width: 100%; min-width: 0; min-height: 40px; padding: 0 9px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font: inherit; font-size: .83rem; }
+.customDateForm button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 5px; color: white; background: var(--twilio-red); font-size: .8rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
+.customDateForm button:hover { background: #d81936; }
+.customDateForm > p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .72rem; }
+.dateRangeError { margin: 0 0 20px; padding: 12px 15px; border-left: 4px solid #be243a; border-radius: 4px; color: #842237; background: #ffe9ed; font-size: .84rem; }
+
 .heroMetrics {
   display: grid;
   grid-template-columns: minmax(290px, .9fr) minmax(420px, 1.5fr);
@@ -316,6 +377,7 @@
 .healthList { margin: 0; border-top: 1px solid #edf0f5; }
 .healthList div { display: flex; justify-content: space-between; gap: 15px; padding: 11px 0; border-bottom: 1px solid #edf0f5; }
 .healthList dt { color: var(--muted); font-size: .82rem; }
+.healthList dt .inlineLink { display: block; margin-top: 4px; font-size: .72rem; }
 .healthList dd { margin: 0; font-weight: 800; font-size: .9rem; text-align: right; }
 .healthList dd[data-alert="true"] { color: #b42438; }
 .healthFootnote { margin: 17px 0 0; color: var(--muted); font-size: .78rem; }
@@ -472,6 +534,7 @@
 .loginFooter { margin: 22px 0 0; color: var(--muted); font-size: .72rem; }
 
 @media (max-width: 1020px) {
+  .dateRangePanel { grid-template-columns: 1fr; gap: 17px; }
   .heroMetrics { grid-template-columns: 1fr; }
   .heroMetricPrimary { min-height: 230px; }
   .heroMetricGrid > div { min-height: 170px; }
@@ -492,6 +555,9 @@
   .adminMain { padding: 34px 17px 70px; }
   .adminFooter { padding: 22px 17px 30px; flex-direction: column; }
   .pageHeading { align-items: start; flex-direction: column; gap: 18px; }
+  .dateRangePanel { padding: 20px 17px; }
+  .customDateForm { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .customDateForm button { grid-column: 1 / -1; }
   .heroMetricGrid { grid-template-columns: repeat(3, 1fr); }
   .heroMetricGrid > div { padding: 19px 12px; }
   .heroMetricGrid span { font-size: .72rem; }
@@ -515,6 +581,8 @@
 }
 
 @media (max-width: 450px) {
+  .customDateForm { grid-template-columns: 1fr; }
+  .customDateForm button { grid-column: 1; }
   .heroMetricGrid { grid-template-columns: 1fr; }
   .heroMetricGrid > div { min-height: 105px; padding: 17px 22px; border-right: 0; border-bottom: 1px solid var(--line); }
   .heroMetricGrid > div:last-child { border-bottom: 0; }

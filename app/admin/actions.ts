@@ -63,7 +63,7 @@ export async function updateAdminCredentials(formData: FormData): Promise<void> 
   if (
     typeof currentPassword !== "string" || currentPassword.length < 1 || currentPassword.length > 1024 ||
     !/^[A-Za-z0-9._-]{3,64}$/.test(normalizedNewUsername) ||
-    typeof newPassword !== "string" || newPassword.length < 16 || newPassword.length > 1024 ||
+    typeof newPassword !== "string" || newPassword.length < 1 || newPassword.length > 1024 ||
     typeof confirmNewPassword !== "string"
   ) {
     redirect("/admin/settings?credentialError=invalid-input#change-login");

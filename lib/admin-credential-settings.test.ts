@@ -55,6 +55,8 @@ beforeEach(() => {
 describe("admin credential settings", () => {
   it("shows a short credential form alongside the existing photo settings", async () => {
     const html = renderToStaticMarkup(await AdminSettingsPage({ searchParams: Promise.resolve({}) }));
+    const newPasswordInput = html.match(/<input[^>]*name="newPassword"[^>]*>/)?.[0];
+    const confirmPasswordInput = html.match(/<input[^>]*name="confirmNewPassword"[^>]*>/)?.[0];
 
     expect(html).toContain("Change admin login");
     expect(html).toContain('name="currentPassword"');
@@ -62,7 +64,20 @@ describe("admin credential settings", () => {
     expect(html).toContain('value="current-operator"');
     expect(html).toContain('name="newPassword"');
     expect(html).toContain('name="confirmNewPassword"');
+    expect(newPasswordInput).toContain('minLength="1"');
+    expect(confirmPasswordInput).toContain('minLength="1"');
     expect(html).toContain("Offer camera and photo upload");
+  });
+
+  it("explains the allowed password length in the form and invalid-input error", async () => {
+    const form = renderToStaticMarkup(await AdminSettingsPage({ searchParams: Promise.resolve({}) }));
+    const invalidInput = renderToStaticMarkup(await AdminSettingsPage({
+      searchParams: Promise.resolve({ credentialError: "invalid-input" }),
+    }));
+
+    expect(form).toContain("1–1,024 characters. Include a non-space character; no control characters.");
+    expect(invalidInput).toContain("a password of 1–1,024 characters with a non-space character and no control characters.");
+    expect(invalidInput).not.toContain("at least 16 characters");
   });
 
   it("rejects mismatched passwords without attempting rotation", async () => {
@@ -74,8 +89,32 @@ describe("admin credential settings", () => {
     expect(h.signOut).not.toHaveBeenCalled();
   });
 
-  it("rejects short passwords server-side", async () => {
-    await expect(updateAdminCredentials(credentialForm({ newPassword: "short", confirmNewPassword: "short" })))
+  it("accepts a one-character new password", async () => {
+    await updateAdminCredentials(credentialForm({ newPassword: "x", confirmNewPassword: "x" }));
+
+    expect(h.rotate).toHaveBeenCalledWith({
+      currentPassword: "current-private-password",
+      newUsername: "new-operator",
+      newPassword: "x",
+    });
+    expect(h.signOut).toHaveBeenCalledWith({ redirectTo: "/admin/login?changed=1" });
+  });
+
+  it("accepts a 1,024-character new password", async () => {
+    const longestPassword = "p".repeat(1024);
+    await updateAdminCredentials(credentialForm({ newPassword: longestPassword, confirmNewPassword: longestPassword }));
+
+    expect(h.rotate).toHaveBeenCalledWith({
+      currentPassword: "current-private-password",
+      newUsername: "new-operator",
+      newPassword: longestPassword,
+    });
+  });
+
+  it("rejects an empty or overlong new password before rotation", async () => {
+    await expect(updateAdminCredentials(credentialForm({ newPassword: "", confirmNewPassword: "" })))
+      .rejects.toThrow("redirect:/admin/settings?credentialError=invalid-input#change-login");
+    await expect(updateAdminCredentials(credentialForm({ newPassword: "p".repeat(1025), confirmNewPassword: "p".repeat(1025) })))
       .rejects.toThrow("redirect:/admin/settings?credentialError=invalid-input#change-login");
     expect(h.rotate).not.toHaveBeenCalled();
   });

@@ -15,8 +15,18 @@ import {
   paginateActivityRows,
   summarizeAdminCounts,
 } from "@/lib/admin-analytics";
+import { parseAdminDashboardRange } from "@/lib/admin-dashboard-range";
 
 const dialect = new PgDialect();
+const now = new Date("2026-10-23T23:42:00.000Z");
+
+function countSubquery(sqlText: string, alias: string): string {
+  const end = sqlText.indexOf(`) AS ${alias}`);
+  expect(end).toBeGreaterThan(-1);
+  const start = sqlText.lastIndexOf("(SELECT", end);
+  expect(start).toBeGreaterThan(-1);
+  return sqlText.slice(start, end);
+}
 
 describe("administrator analytics", () => {
   beforeEach(() => {
@@ -70,35 +80,29 @@ describe("administrator analytics", () => {
   });
 
   it("maps empty and populated counts to stable numeric metrics", () => {
-    expect(summarizeAdminCounts({
+    const counts = summarizeAdminCounts({
       phone_users: "17",
       sms_inbound: "42",
-      sms_inbound_7d: "9",
       message_agent_turns_denied: "6",
-      message_agent_turns_denied_7d: "2",
       voice_calls: "8",
-      voice_calls_7d: "2",
       voice_calls_rate_limited: "3",
       voice_verifications: "14",
       voice_verifications_denied: "2",
       voice_duration_seconds: "312",
       voice_turns: "31",
       comic_requests: "12",
-      comic_requests_7d: "3",
       comics_completed: "10",
       comics_failed: "2",
       delivered: "9",
       delivery_failed: "1",
       agent_reply_delivery_failed: "4",
       outbound_messages: "34",
-      outbound_messages_7d: "7",
       event_count: "120",
-    })).toMatchObject({
+    });
+    expect(counts).toMatchObject({
       phoneUsers: 17,
       smsInbound: 42,
-      smsInbound7d: 9,
       messageAgentTurnsDenied: 6,
-      messageAgentTurnsDenied7d: 2,
       voiceCalls: 8,
       voiceCallsRateLimited: 3,
       voiceVerifications: 14,
@@ -109,6 +113,11 @@ describe("administrator analytics", () => {
       deliveryFailed: 1,
       agentReplyDeliveryFailed: 4,
     });
+    expect(counts).not.toHaveProperty("smsInbound7d");
+    expect(counts).not.toHaveProperty("voiceCalls7d");
+    expect(counts).not.toHaveProperty("messageAgentTurnsDenied7d");
+    expect(counts).not.toHaveProperty("comicRequests7d");
+    expect(counts).not.toHaveProperty("outboundMessages7d");
     expect(summarizeAdminCounts({}).voiceCallsRateLimited).toBe(0);
     expect(summarizeAdminCounts({})).toMatchObject({ agentReplyDeliveryFailed: 0 });
   });
@@ -127,6 +136,95 @@ describe("administrator analytics", () => {
     expect(countsSql).toContain("kind = 'message.delivery'");
     expect(countsSql).toContain("status IN ('failed', 'undelivered')");
     expect(countsSql).toContain("details->>'purpose' = 'agent_reply'");
+  });
+
+  it("applies half-open UTC bounds to every dashboard metric family", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+    const range = parseAdminDashboardRange({
+      range: "custom", from: "2026-10-22", to: "2026-10-23",
+    }, now);
+
+    await getAdminDashboard(range);
+
+    const countQuery = dialect.sqlToQuery(h.execute.mock.calls[0][0]);
+    expect(countQuery.params).toContain("2026-10-22 00:00:00.000");
+    expect(countQuery.params).toContain("2026-10-24 00:00:00.000");
+    expect(countQuery.sql).not.toMatch(/(?:created_at|started_at|completed_at|occurred_at)::date\s*(?:>=|<)/);
+    for (const [alias, table, column] of [
+      ["phone_users", "channel_identities", "created_at"],
+      ["sms_inbound", "twilio_inbound_messages", "created_at"],
+      ["message_agent_turns_denied", "activity_events", "occurred_at"],
+      ["voice_calls", "voice_calls", "started_at"],
+      ["voice_calls_rate_limited", "voice_calls", "started_at"],
+      ["voice_verifications", "activity_events", "occurred_at"],
+      ["voice_verifications_denied", "activity_events", "occurred_at"],
+      ["voice_duration_seconds", "voice_calls", "started_at"],
+      ["voice_turns", "voice_calls", "started_at"],
+      ["comic_requests", "generation_jobs", "created_at"],
+      ["comics_completed", "generation_jobs", "completed_at"],
+      ["comics_failed", "generation_jobs", "completed_at"],
+      ["agent_reply_delivery_failed", "activity_events", "occurred_at"],
+      ["outbound_messages", "activity_events", "occurred_at"],
+      ["event_count", "activity_events", "occurred_at"],
+    ] as const) {
+      const subquery = countSubquery(countQuery.sql, alias);
+      expect(subquery, alias).toContain(`FROM ${table}`);
+      expect(subquery, alias).toMatch(new RegExp(`${column} >= \\$\\d+::timestamp`));
+      expect(subquery, alias).toMatch(new RegExp(`${column} < \\$\\d+::timestamp`));
+    }
+
+    const delivered = countSubquery(countQuery.sql, "delivered");
+    const deliveryFailed = countSubquery(countQuery.sql, "delivery_failed");
+    for (const column of ["delivery_updated_at", "delivery_fallback_updated_at"]) {
+      expect(delivered).toMatch(new RegExp(`${column} >= \\$\\d+::timestamp`));
+      expect(delivered).toMatch(new RegExp(`${column} < \\$\\d+::timestamp`));
+      expect(deliveryFailed).toMatch(new RegExp(`${column} >= \\$\\d+::timestamp`));
+      expect(deliveryFailed).toMatch(new RegExp(`${column} < \\$\\d+::timestamp`));
+    }
+    expect(delivered).toMatch(/delivery_status IN \('delivered', 'read'\)\s+AND delivery_updated_at >= \$\d+::timestamp\s+AND delivery_updated_at < \$\d+::timestamp/);
+    expect(delivered).toMatch(/delivery_fallback_status IN \('delivered', 'read'\)\s+AND delivery_fallback_updated_at >= \$\d+::timestamp\s+AND delivery_fallback_updated_at < \$\d+::timestamp/);
+    expect(deliveryFailed).toMatch(/delivery_fallback_status IN \('failed', 'undelivered'\)\s+AND delivery_fallback_updated_at >= \$\d+::timestamp\s+AND delivery_fallback_updated_at < \$\d+::timestamp/);
+  });
+
+  it("limits the chart to the final 14 selected days and bounds recent activity", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+    const range = parseAdminDashboardRange({
+      range: "custom", from: "2021-01-01", to: "2026-10-03",
+    }, now);
+
+    await getAdminDashboard(range);
+
+    const trendQuery = dialect.sqlToQuery(h.execute.mock.calls[1][0]);
+    const activityQuery = dialect.sqlToQuery(h.execute.mock.calls[2][0]);
+    expect(trendQuery.sql).toMatch(/generate_series\(\$\d+::timestamp, \$\d+::timestamp, INTERVAL '1 day'\)/);
+    expect(trendQuery.sql).toContain("TO_CHAR(days.day, 'YYYY-MM-DD') AS day");
+    expect(trendQuery.params).toContain("2026-09-20 00:00:00.000");
+    expect(trendQuery.params).toContain("2026-10-03 00:00:00.000");
+    expect(trendQuery.params).toContain("2026-10-04 00:00:00.000");
+    expect(trendQuery.params).not.toContain("2021-01-01 00:00:00.000");
+    for (const column of ["created_at", "started_at", "completed_at"]) {
+      expect(trendQuery.sql).toMatch(new RegExp(`${column} >= \\$\\d+::timestamp`));
+      expect(trendQuery.sql).toMatch(new RegExp(`${column} < \\$\\d+::timestamp`));
+    }
+    expect(activityQuery.sql).toMatch(/FROM activity_events\s+WHERE occurred_at >= \$\d+::timestamp\s+AND occurred_at < \$\d+::timestamp\s+ORDER BY occurred_at DESC, id DESC\s+LIMIT 12/);
+    expect(activityQuery.params).toContain("2021-01-01 00:00:00.000");
+    expect(activityQuery.params).toContain("2026-10-04 00:00:00.000");
+  });
+
+  it("keeps the default dashboard totals and recent activity unbounded", async () => {
+    h.execute.mockResolvedValue({ rows: [] });
+
+    await getAdminDashboard();
+
+    const countQuery = dialect.sqlToQuery(h.execute.mock.calls[0][0]);
+    const trendQuery = dialect.sqlToQuery(h.execute.mock.calls[1][0]);
+    const activityQuery = dialect.sqlToQuery(h.execute.mock.calls[2][0]);
+    expect(countQuery.params).toEqual([]);
+    expect(countQuery.sql).not.toContain("INTERVAL '7 days'");
+    expect(countQuery.sql).not.toContain("NOW() -");
+    expect(activityQuery.sql).not.toContain("WHERE occurred_at >=");
+    expect(trendQuery.sql).toContain("generate_series(");
+    expect(trendQuery.params).toHaveLength(8);
   });
 
   it("filters paged operations history to failed agent replies without including comic delivery", () => {
@@ -172,41 +270,39 @@ describe("administrator analytics", () => {
     expect(query.params).toContain(41);
   });
 
-  it("counts durable messaging agent denials for lifetime and trailing week", async () => {
+  it("counts durable messaging agent denials only inside the selected window", async () => {
     h.execute
       .mockResolvedValueOnce({ rows: [{
         message_agent_turns_denied: "6",
-        message_agent_turns_denied_7d: "2",
       }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
-    const dashboard = await getAdminDashboard();
+    const dashboard = await getAdminDashboard(parseAdminDashboardRange({ range: "7d" }, now));
 
-    expect(dashboard.counts).toMatchObject({
-      messageAgentTurnsDenied: 6,
-      messageAgentTurnsDenied7d: 2,
-    });
-    const countsSql = dialect.sqlToQuery(h.execute.mock.calls[0][0]).sql;
-    expect(countsSql).toMatch(/kind = 'message\.agent_turn\.denied'\) AS message_agent_turns_denied/);
-    expect(countsSql).toMatch(/kind = 'message\.agent_turn\.denied' AND occurred_at >= NOW\(\) - INTERVAL '7 days'\) AS message_agent_turns_denied_7d/);
+    expect(dashboard.counts.messageAgentTurnsDenied).toBe(6);
+    const countQuery = dialect.sqlToQuery(h.execute.mock.calls[0][0]);
+    expect(countSubquery(countQuery.sql, "message_agent_turns_denied"))
+      .toMatch(/kind = 'message\.agent_turn\.denied'\s+AND occurred_at >= \$\d+::timestamp\s+AND occurred_at < \$\d+::timestamp/);
+    expect(countQuery.params).toContain("2026-10-17 00:00:00.000");
+    expect(countQuery.params).toContain("2026-10-24 00:00:00.000");
   });
 
   it("separates rate-limited calls from answered calls and the call trend", async () => {
     h.execute
-      .mockResolvedValueOnce({ rows: [{ voice_calls: "8", voice_calls_7d: "2", voice_calls_rate_limited: "3" }] })
+      .mockResolvedValueOnce({ rows: [{ voice_calls: "8", voice_calls_rate_limited: "3" }] })
       .mockResolvedValueOnce({ rows: [{ day: "2026-10-21", sms_inbound: "1", voice_calls: "2", comics_completed: "1" }] })
       .mockResolvedValueOnce({ rows: [] });
 
-    const dashboard = await getAdminDashboard();
-    expect(dashboard.counts).toMatchObject({ voiceCalls: 8, voiceCalls7d: 2, voiceCallsRateLimited: 3 });
+    const dashboard = await getAdminDashboard(parseAdminDashboardRange({ range: "7d" }, now));
+    expect(dashboard.counts).toMatchObject({ voiceCalls: 8, voiceCallsRateLimited: 3 });
     expect(dashboard.trend).toMatchObject([{ day: "2026-10-21", voiceCalls: 2 }]);
 
-    const countsSql = dialect.sqlToQuery(h.execute.mock.calls[0][0]).sql;
+    const answered = countSubquery(dialect.sqlToQuery(h.execute.mock.calls[0][0]).sql, "voice_calls");
+    const limited = countSubquery(dialect.sqlToQuery(h.execute.mock.calls[0][0]).sql, "voice_calls_rate_limited");
     const trendSql = dialect.sqlToQuery(h.execute.mock.calls[1][0]).sql;
-    expect(countsSql).toMatch(/COUNT\(\*\) FROM voice_calls\s+WHERE status <> 'rate_limited'\) AS voice_calls/);
-    expect(countsSql).toMatch(/COUNT\(\*\) FROM voice_calls\s+WHERE status <> 'rate_limited'\s+AND started_at >= .*\) AS voice_calls_7d/);
-    expect(countsSql).toMatch(/COUNT\(\*\) FROM voice_calls\s+WHERE status = 'rate_limited'\) AS voice_calls_rate_limited/);
-    expect(trendSql).toMatch(/FROM voice_calls\s+WHERE started_at >= CURRENT_DATE - 13\s+AND status <> 'rate_limited'/);
+    expect(answered).toMatch(/status <> 'rate_limited'\s+AND started_at >= \$\d+::timestamp\s+AND started_at < \$\d+::timestamp/);
+    expect(limited).toMatch(/status = 'rate_limited'\s+AND started_at >= \$\d+::timestamp\s+AND started_at < \$\d+::timestamp/);
+    expect(trendSql).toMatch(/FROM voice_calls\s+WHERE started_at >= \$\d+::timestamp\s+AND started_at < \$\d+::timestamp\s+AND status <> 'rate_limited'/);
   });
 });

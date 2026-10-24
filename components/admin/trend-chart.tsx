@@ -1,7 +1,7 @@
 import type { AdminTrendDay } from "@/lib/admin-analytics";
 import styles from "@/app/admin/admin.module.css";
 
-export function TrendChart({ days }: { days: AdminTrendDay[] }) {
+export function TrendChart({ days, periodLabel }: { days: AdminTrendDay[]; periodLabel: string }) {
   const max = Math.max(1, ...days.map((day) =>
     Math.max(day.smsInbound, day.voiceCalls, day.comicsCompleted)));
   const hasActivity = days.some((day) =>
@@ -10,8 +10,8 @@ export function TrendChart({ days }: { days: AdminTrendDay[] }) {
   if (!hasActivity) {
     return (
       <div className={styles.trendEmpty}>
-        <strong>Waiting for the first story.</strong>
-        <p>The last 14 days of SMS, calls, and finished comics will chart here.</p>
+        <strong>No activity in this period.</strong>
+        <p>No SMS, calls, or finished comics for {periodLabel}.</p>
       </div>
     );
   }

@@ -50,7 +50,7 @@ function credentialErrorMessage(error: string | undefined): string | null {
     case "conflict":
       return "The admin login changed in another session. Sign in again before retrying.";
     case "invalid-input":
-      return "Use a 3–64 character username with letters, numbers, dots, underscores, or hyphens, and a password of at least 16 characters.";
+      return "Use a 3–64 character username with letters, numbers, dots, underscores, or hyphens, and a password of 1–1,024 characters with a non-space character and no control characters.";
     case "mismatch":
       return "The new passwords do not match.";
     default:
@@ -141,11 +141,11 @@ export default async function AdminSettingsPage({
                 type="password"
                 autoComplete="new-password"
                 aria-describedby="new-admin-password-hint"
-                minLength={16}
+                minLength={1}
                 maxLength={1024}
                 required
               />
-              <small id="new-admin-password-hint">At least 16 characters.</small>
+              <small id="new-admin-password-hint">1–1,024 characters. Include a non-space character; no control characters.</small>
             </label>
             <label className={styles.credentialField} htmlFor="confirm-admin-password">
               <span>Confirm new password</span>
@@ -154,7 +154,7 @@ export default async function AdminSettingsPage({
                 name="confirmNewPassword"
                 type="password"
                 autoComplete="new-password"
-                minLength={16}
+                minLength={1}
                 maxLength={1024}
                 required
               />
