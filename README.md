@@ -1,14 +1,42 @@
-<img src="public/images/twilio-bug.svg" alt="Twilio bug logo" width="56" height="56" />
+<p align="center">
+  <img src="public/images/twilio-bug.svg" alt="Twilio Comics logo" width="64" height="64" />
+</p>
 
-# Twilio Comics
+<h1 align="center">Twilio Comics</h1>
 
-Create AI-generated comic pages by texting an idea or up to two character photos to a Twilio number, or by calling a Twilio ConversationRelay voice agent. The **SMS and Voice production pilot** is available at [Twilio Comics](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io) on **+1 866 901 2028**. The Twilio CLI confirms that this toll-free verified number supports SMS, MMS, and Voice; its SMS and Voice POST webhooks are configured, and the public app advertises `sms,voice`. WhatsApp is disabled. The agent helps shape the idea, asks for approval, and sends the finished comic after an Azure worker generates it. The public website shows how to start and displays finished stories; its browser comic studio is retained for testing.
+<p align="center"><strong>Turn a text or phone call into a comic you can read and share.</strong></p>
+<p align="center">Bring an idea, add optional character photos, approve the direction, and get a link to your finished comic.</p>
 
-**Pilot verification still pending:** A live inbound SMS reached the worker and its agent reply was delivered after the October 22 repair. A real handset must still complete an SMS comic and a Voice ConversationRelay comic through generation and result delivery. Production admin credentials passed the actual login form, authenticated `/admin`, `/admin/activity`, and `/admin/users` requests returned HTTP 200, and the operator confirmed browser sign-in at the [admin dashboard](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login). The signed `/relay` WebSocket handshake passed, while an unsigned one was denied; these checks do not prove the full user flows. Treat the number as a controlled pilot until those checks pass.
+<p align="center">
+  <img src="https://img.shields.io/badge/Twilio-SMS%20%2B%20Voice-EF223A?logo=twilio&amp;logoColor=white" alt="Twilio SMS and Voice" />
+  <img src="https://img.shields.io/badge/OpenAI-image%20generation-000D25?logo=openai&amp;logoColor=white" alt="OpenAI image generation" />
+</p>
 
-Twilio Comics is a fork of [Make Comics](https://github.com/Nutlope/make-comics). Thanks to its original creators and contributors for the foundation.
+<p align="center">
+  <a href="https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io">Explore the pilot</a> ·
+  <a href="#sample-pages">See sample pages</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#installation">Run locally</a>
+</p>
 
-## Architecture
+> **Controlled pilot:** SMS and Voice are configured on **+1 866 901 2028**. A live inbound text and agent reply were delivered, but a real handset still needs to complete comic generation and result delivery on both channels. WhatsApp is disabled. Treat the number as a controlled pilot until those checks pass.
+
+<details>
+<summary>Pilot verification details</summary>
+
+The Twilio CLI confirmed that the toll-free verified number supports SMS, MMS, and Voice, and that its SMS and Voice POST webhooks are configured. The public app advertises `sms,voice`. After the October 22 repair, a live inbound SMS reached the worker and its agent reply was delivered. Production admin credentials passed the login form; authenticated `/admin`, `/admin/activity`, and `/admin/users` requests returned HTTP 200, and the operator confirmed browser sign-in at the [admin dashboard](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login). A signed `/relay` WebSocket handshake passed while an unsigned one was denied. These checks do not prove the full handset flows.
+
+</details>
+
+## Sample pages
+
+<p align="center">
+  <a href="public/noir.jpg"><img src="public/noir.jpg" alt="Sample noir comic page with a detective across several panels" width="320" /></a>
+  <a href="public/comic-book-next-scene-continuation.jpg"><img src="public/comic-book-next-scene-continuation.jpg" alt="Sample continued comic page with a character across several panels" width="320" /></a>
+</p>
+<p align="center"><sub>Sample art included in this repository. Generated pages vary by idea, style, and reference photos.</sub></p>
+
+## How it works
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{
@@ -16,23 +44,45 @@ Twilio Comics is a fork of [Make Comics](https://github.com/Nutlope/make-comics)
   'primaryBorderColor':'#000D25','lineColor':'#000D25',
   'fontFamily':'Inter, system-ui, sans-serif'}}}%%
 flowchart LR
-  Web[Marketing page, channel chooser, studio, and story viewer] --> App[East US 2 Container App: Next.js + voice server]
-  Text["Twilio SMS (WhatsApp when enabled)"] -->|signed HTTP webhooks| App
-  Voice[Twilio Voice] -->|signed HTTP webhook| App
-  Voice <-->|ConversationRelay WebSocket| App
-  App -->|global VNet peering| DB[(Private Azure PostgreSQL, Central US)]
-  Admin[Password-protected admin dashboard] --> DB
-  App --> Queue[Azure Queue Storage]
-  Queue --> Job[Event-driven Container Apps Job]
-  Recovery[Scheduled recovery Job: every 5 minutes] --> DB
-  Recovery --> Queue
+  Start["Text or call"] --> Agent["Shape the idea with the agent"]
+  Photos["Optional character photos"] --> Agent
+  Agent --> Approve["Approve the comic"]
+  Approve --> Read["Open the story link"]
+```
+
+- **Start on your phone.** Text an idea or call from the [start page](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/start). Phone flows do not require Google sign-in.
+- **Make it yours.** Add up to two character photos by MMS, or use the optional browser camera path when an admin enables it.
+- **Keep going.** Use `CONTINUE` within the 14-day conversation window to add another page to the story.
+- **Share the result.** The story reader shows finished pages and offers PDF download and sharing controls.
+
+If this project is useful, [star the repository](https://github.com/anthonyplusAI/twilio-comics).
+
+Twilio Comics builds on [Make Comics](https://github.com/Nutlope/make-comics). Thanks to its original creators and contributors for the foundation.
+
+---
+
+**Developer guide:** [Architecture](#architecture) · [Detailed usage](#usage) · [Installation](#installation) · [Twilio setup](#twilio-setup) · [Deployment](#deployment)
+
+## Architecture
+
+This is the main path from a phone conversation to a finished comic. Recovery, migrations, admin tools, and optional short links are described below.
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'primaryColor':'#EF223A','primaryTextColor':'#FFFFFF',
+  'primaryBorderColor':'#000D25','lineColor':'#000D25',
+  'fontFamily':'Inter, system-ui, sans-serif'}}}%%
+flowchart LR
+  Phone["Phone: SMS or Voice"] <-->|messages and calls| Twilio[Twilio]
+  Twilio <-->|webhooks and voice relay| App["Next.js app and voice server"]
+  Web["Start page and story reader"] <-->|page requests| App
+  App --> DB[(PostgreSQL)]
+  App -->|queues work| Queue["Azure Queue Storage"]
+  Queue --> Job["Generation job"]
   Job --> OpenAI[OpenAI]
-  Job --> Blob[Private Azure Blob Storage]
+  Job --> Blob["Private Blob Storage"]
   Job --> DB
-  Job --> Dub[Dub short links, when configured]
-  Dub -->|redirect| Web
-  Migration[Manual ACA migration Job] --> DB
-  Job --> Text
+  Job -->|sends story link| Twilio
 ```
 
 The production Azure Container App hosts Next.js, signed Twilio webhooks, and the `/relay` ConversationRelay WebSocket. The warm web app handles the prefilled SMS opener and simple commands inline within an eight-second budget; slow attempts fall back to the durable queue. The event-driven Job handles other text turns and image generation from Azure Queue. A second, scheduled Job republishes work left pending after a temporary failure. The three runtime workloads use one image; a separate migration image runs inside the private Azure network before a release. The V2 app network is in East US 2 and peers privately with a Central US PostgreSQL network; the database's private DNS zone is linked to both VNets. PostgreSQL and Blob Storage retain history across app revisions. `/api/healthz` reports the deployed commit and `/api/readyz` checks the migrated database.
