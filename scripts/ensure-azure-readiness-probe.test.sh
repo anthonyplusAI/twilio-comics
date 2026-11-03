@@ -8,8 +8,8 @@ mkdir -p "$TEST_ROOT/bin"
 
 cat > "$TEST_ROOT/app.json" <<'JSON'
 {
-  "id": "/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics-v2",
-  "name": "twilio-comics-v2",
+  "id": "/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics",
+  "name": "twilio-comics",
   "type": "Microsoft.App/containerApps",
   "location": "eastus2",
   "properties": {
@@ -21,7 +21,7 @@ cat > "$TEST_ROOT/app.json" <<'JSON'
     "template": {
       "scale": {"minReplicas": 0, "maxReplicas": 2},
       "containers": [{
-        "name": "twilio-comics-v2",
+        "name": "twilio-comics",
         "image": "mcr.microsoft.com/dotnet/samples:aspnetapp",
         "resources": {"cpu": 0.5, "memory": "1Gi"},
         "env": [{"name": "DATABASE_URL", "secretRef": "runtime-database-url"}],
@@ -60,7 +60,7 @@ case "$1 $2" in
   'rest --method')
     method="$(after --method "$@")"
     url="$(after --url "$@")"
-    [[ "$url" == 'https://management.azure.com/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics-v2?api-version=2025-07-01' ]]
+    [[ "$url" == 'https://management.azure.com/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics?api-version=2025-07-01' ]]
     case "$method" in
       get) cat "$AZ_TEST_STATE" ;;
       patch)
@@ -89,7 +89,7 @@ export AZ_TEST_PATCH_COUNT="$TEST_ROOT/patch-count"
 
 run_ensure() {
   PATH="$TEST_ROOT/bin:$PATH" \
-  ACA_NAME=twilio-comics-v2 \
+  ACA_NAME=twilio-comics \
   ACA_RESOURCE_GROUP=rg-twilio-comics \
   READY_PROBE_MAX_POLLS=2 \
   READY_PROBE_POLL_SECONDS=0 \

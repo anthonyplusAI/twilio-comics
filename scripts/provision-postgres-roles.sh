@@ -23,7 +23,7 @@ EXPECTED_SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
 
 RESOURCE_GROUP='rg-twilio-comics'
 ACA_ENVIRONMENT='cae-twilio-comics-v2'
-WEB_APP='twilio-comics-v2'
+WEB_APP='twilio-comics'
 GENERATION_JOB='twilio-comics-generation-v2'
 RECOVERY_JOB='twilio-comics-recovery-v2'
 MIGRATION_JOB='twilio-comics-migrate-v2'

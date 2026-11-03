@@ -61,11 +61,11 @@ PY
   'containerapp show --name')
     username="$(cat "$AZ_TEST_ROOT/admin-username")"
     jq -n --arg username "$username" '{
-      id:"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics-v2",
+      id:"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/containerApps/twilio-comics",
       identity:{userAssignedIdentities:{"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-twilio-comics-v2-web":{}}},
       properties:{
-        configuration:{activeRevisionsMode:"Single",ingress:{fqdn:"twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io"},secrets:[{name:"admin-password-hash",keyVaultUrl:"https://kv-twilio-comics-1a1d98.vault.azure.net/secrets/admin-password-hash",identity:"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-twilio-comics-v2-web"}]},
-        latestRevisionName:"twilio-comics-v2--test",
+        configuration:{activeRevisionsMode:"Single",ingress:{fqdn:"twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io"},secrets:[{name:"admin-password-hash",keyVaultUrl:"https://kv-twilio-comics-1a1d98.vault.azure.net/secrets/admin-password-hash",identity:"/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-twilio-comics-v2-web"}]},
+        latestRevisionName:"twilio-comics--test",
         template:{containers:[{env:[{name:"ADMIN_USERNAME",value:$username},{name:"ADMIN_PASSWORD_HASH",secretRef:"admin-password-hash"},{name:"OTHER_SETTING",value:"preserved"}]}]}
       }
     }' ;;
@@ -82,7 +82,7 @@ chmod +x "$TEST_ROOT/bin/az"
 cat > "$TEST_ROOT/bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "$*" == *'https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/readyz'* ]]; then
+if [[ "$*" == *'https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/readyz'* ]]; then
   touch "$AZ_TEST_ROOT/readiness-checked"
   printf '200'
 else

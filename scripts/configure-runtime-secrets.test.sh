@@ -174,7 +174,7 @@ import sys
 state = Path(sys.argv[1])
 env_id = "/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.App/managedEnvironments/cae-twilio-comics-v2"
 db_uri = "https://kv-twilio-comics-1a1d98.vault.azure.net/secrets/postgres-comics-runtime-url"
-for name, identity in [("twilio-comics-v2", "/identity/web"), ("twilio-comics-generation-v2", "/identity/worker"), ("twilio-comics-recovery-v2", "/identity/worker")]:
+for name, identity in [("twilio-comics", "/identity/web"), ("twilio-comics-generation-v2", "/identity/worker"), ("twilio-comics-recovery-v2", "/identity/worker")]:
     data = {
         "identity": {"userAssignedIdentities": {identity: {}}},
         "properties": {
@@ -217,11 +217,11 @@ fi
 grep -Fq 'Set TWILIO_ACCOUNT_SID' "$test_root/invalid-sid.out"
 [[ ! -s "$AZ_MOCK_LOG" ]]
 
-AZ_MOCK_TRANSPORT_ONCE_SECRET_APP='twilio-comics-v2' \
+AZ_MOCK_TRANSPORT_ONCE_SECRET_APP='twilio-comics' \
 AZ_MOCK_TRANSPORT_ONCE_JOB='twilio-comics-generation-v2' \
   bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/first.out" 2>&1
 grep -Fq 'Channels remain closed; web app remains internal' "$test_root/first.out"
-grep -Fq 'transport error during secret binding for twilio-comics-v2/auth-secret; retrying (1/3)' "$test_root/first.out"
+grep -Fq 'transport error during secret binding for twilio-comics/auth-secret; retrying (1/3)' "$test_root/first.out"
 grep -Fq 'transport error during environment update for twilio-comics-generation-v2; retrying (1/3)' "$test_root/first.out"
 [[ "$(grep -F 'containerapp secret set' "$AZ_MOCK_LOG" | grep -Fc 'auth-secret=keyvaultref')" == 2 ]]
 [[ "$(grep -Fc 'containerapp job update --name twilio-comics-generation-v2' "$AZ_MOCK_LOG")" == 2 ]]
@@ -239,7 +239,7 @@ jq --exit-status '
   and ([.properties.template.containers[0].env[] | select(.name == "ADMIN_PASSWORD_HASH")][0].secretRef == "admin-password-hash")
   and ([.properties.template.containers[0].env[] | select(.name == "TWILIO_ENABLED_CHANNELS")][0].value == "")
   and ([.properties.template.containers[0].env[] | select(.name == "TWILIO_VERIFY_SERVICE_SID")][0].value == "VA9fae12b38cb0a91645f514842476e647")
-' "$AZ_MOCK_STATE/twilio-comics-v2.json" >/dev/null
+' "$AZ_MOCK_STATE/twilio-comics.json" >/dev/null
 for job in twilio-comics-generation-v2 twilio-comics-recovery-v2; do
   jq --exit-status '
     [.properties.template.containers[0].env[] | select(.name == "DATABASE_URL")][0].secretRef == "runtime-database-url"
@@ -316,7 +316,7 @@ for name, value in rows:
     remaining = expires - now
     assert timedelta(days=364, hours=23) < remaining < timedelta(days=365, hours=1), name
 PY
-for workload in twilio-comics-v2 twilio-comics-generation-v2 twilio-comics-recovery-v2; do
+for workload in twilio-comics twilio-comics-generation-v2 twilio-comics-recovery-v2; do
   jq --exit-status '
     [.properties.template.containers[0].env[] | select(.name == "OPENAI_API_KEY")][0].secretRef == "openai-api-key"
     and [.properties.template.containers[0].env[] | select(.name == "TWILIO_AUTH_TOKEN")][0].secretRef == "twilio-auth-token"
@@ -338,16 +338,16 @@ grep -Fq 'no value was rotated' "$test_root/mismatch.out"
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 6 ]]
 
 jq '.properties.configuration.ingress.external = true' \
-  "$AZ_MOCK_STATE/twilio-comics-v2.json" > "$test_root/external.json"
-cp "$AZ_MOCK_STATE/twilio-comics-v2.json" "$test_root/internal.json"
-cp "$test_root/external.json" "$AZ_MOCK_STATE/twilio-comics-v2.json"
+  "$AZ_MOCK_STATE/twilio-comics.json" > "$test_root/external.json"
+cp "$AZ_MOCK_STATE/twilio-comics.json" "$test_root/internal.json"
+cp "$test_root/external.json" "$AZ_MOCK_STATE/twilio-comics.json"
 if bash "$project_root/scripts/configure-runtime-secrets.sh" > "$test_root/external.out" 2>&1; then
   printf 'Prelaunch setup accepted an external web app\n' >&2
   exit 1
 fi
 grep -Fq 'must remain internal' "$test_root/external.out"
 [[ "$(wc -l < "$AZ_MOCK_STATE/secret-set.log" | tr -d ' ')" == 6 ]]
-cp "$test_root/internal.json" "$AZ_MOCK_STATE/twilio-comics-v2.json"
+cp "$test_root/internal.json" "$AZ_MOCK_STATE/twilio-comics.json"
 
 cp "$AZ_MOCK_STATE/twilio-comics-generation-v2.json" "$test_root/generation-good.json"
 jq '(.properties.template.containers[0].env[] | select(.name == "DATABASE_URL")).secretRef = "wrong-secret"' \

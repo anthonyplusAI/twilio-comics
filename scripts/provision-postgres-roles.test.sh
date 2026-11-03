@@ -274,7 +274,7 @@ for line in Path(sys.argv[1]).read_text().splitlines():
         secret_file = Path(arguments[arguments.index("--file") + 1])
         assert not secret_file.exists(), "Temporary PostgreSQL URL file remained after bootstrap"
 PY
-grep -Fq 'containerapp secret set --name twilio-comics-v2' "$AZ_MOCK_LOG"
+grep -Fq 'containerapp secret set --name twilio-comics' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job secret set --name twilio-comics-generation-v2' "$AZ_MOCK_LOG"
 grep -Fq 'containerapp job secret set --name twilio-comics-recovery-v2' "$AZ_MOCK_LOG"
 grep -Fq 'postgres-comics-runtime-url' "$AZ_MOCK_LOG"

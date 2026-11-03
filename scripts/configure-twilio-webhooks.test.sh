@@ -162,6 +162,47 @@ bash "$script" > "$test_root/repeat.out" 2>&1
 [[ "$(grep -Fc 'api:core:incoming-phone-numbers:update' "$TWILIO_MOCK_LOG")" == 1 ]]
 grep -Fq 'already configured' "$test_root/repeat.out"
 
+# The one-time production name cutover accepts only the exact old V2 hooks
+# when targeting the new unversioned app in the same private environment.
+legacy_origin='https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io'
+new_origin='https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io'
+legacy_sms="${legacy_origin}/api/twilio/sms#rc=3&rp=5xx,ct,rt"
+legacy_voice="${legacy_origin}/api/twilio/voice#rc=3&rp=5xx,ct,rt"
+new_sms="${new_origin}/api/twilio/sms#rc=3&rp=5xx,ct,rt"
+new_voice="${new_origin}/api/twilio/voice#rc=3&rp=5xx,ct,rt"
+reset_state
+jq --arg sms "$legacy_sms" --arg voice "$legacy_voice" \
+  '.smsUrl = $sms | .voiceUrl = $voice' "$TWILIO_MOCK_STATE" > "$test_root/modified.json"
+mv "$test_root/modified.json" "$TWILIO_MOCK_STATE"
+PUBLIC_BASE_URL="$new_origin" bash "$script" > "$test_root/name-cutover.out" 2>&1
+jq --arg sms "$new_sms" --arg voice "$new_voice" --exit-status \
+  '.smsUrl == $sms and .voiceUrl == $voice' "$TWILIO_MOCK_STATE" >/dev/null
+[[ "$(grep -Fc 'api:core:incoming-phone-numbers:update' "$TWILIO_MOCK_LOG")" == 1 ]]
+
+# A failed half-cutover is safe to retry when one hook already moved.
+reset_state
+jq --arg sms "$new_sms" --arg voice "$legacy_voice" \
+  '.smsUrl = $sms | .voiceUrl = $voice' "$TWILIO_MOCK_STATE" > "$test_root/modified.json"
+mv "$test_root/modified.json" "$TWILIO_MOCK_STATE"
+PUBLIC_BASE_URL="$new_origin" bash "$script" > "$test_root/partial-cutover.out" 2>&1
+jq --arg sms "$new_sms" --arg voice "$new_voice" --exit-status \
+  '.smsUrl == $sms and .voiceUrl == $voice' "$TWILIO_MOCK_STATE" >/dev/null
+
+# No other destination, altered retry fragment, or unrelated target may
+# inherit the production migration exception.
+for scenario in altered-sms altered-voice unrelated-target; do
+  reset_state
+  case "$scenario" in
+    altered-sms) sms="${legacy_origin}/api/twilio/sms#rc=2&rp=5xx,ct,rt"; voice="$legacy_voice"; target="$new_origin" ;;
+    altered-voice) sms="$legacy_sms"; voice="${legacy_origin}/api/twilio/voice#rc=2&rp=5xx,ct,rt"; target="$new_origin" ;;
+    unrelated-target) sms="$legacy_sms"; voice="$legacy_voice"; target='https://comics.test-demo.org' ;;
+  esac
+  jq --arg sms "$sms" --arg voice "$voice" \
+    '.smsUrl = $sms | .voiceUrl = $voice' "$TWILIO_MOCK_STATE" > "$test_root/modified.json"
+  mv "$test_root/modified.json" "$TWILIO_MOCK_STATE"
+  PUBLIC_BASE_URL="$target" expect_rejected_without_update "$scenario"
+done
+
 reset_state
 TWILIO_MOCK_FETCH_SHAPE=object TWILIO_MOCK_VERIFY_SHAPE=array \
   bash "$script" > "$test_root/legacy-object.out" 2>&1

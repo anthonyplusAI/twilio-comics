@@ -61,6 +61,28 @@ describe("browser comic PDF", () => {
     expect(progress).toEqual(["1/2", "2/2"]);
   });
 
+  it("downloads an old V2 media URL from the current origin without a cross-origin redirect", async () => {
+    const currentOrigin = "https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    const legacyOrigin = "https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    const signedQuery = `key=pages%2Fstory-1.png&token=${"a".repeat(64)}`;
+    const png = await samplePng();
+    const fetcher = vi.fn(async () => new Response(new Uint8Array(png).buffer, {
+      headers: { "Content-Type": "image/png" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+
+    await buildComicPdf({
+      title: "Old comic",
+      imageUrls: [`${legacyOrigin}/api/media?${signedQuery}`],
+      siteUrl: currentOrigin,
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      `${currentOrigin}/api/media?${signedQuery}`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
   it("rejects comics over the page cap before fetching any images", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);
