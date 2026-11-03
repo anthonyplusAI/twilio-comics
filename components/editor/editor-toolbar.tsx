@@ -7,6 +7,7 @@ import {
   Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { GitHubStarLink } from "@/components/github-star-link";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useRef, useEffect } from "react";
@@ -104,8 +105,8 @@ export function EditorToolbar({
   };
 
   return (
-    <header className="h-14 border-b border-border/50 bg-background/80 backdrop-blur-md flex items-center justify-between px-3 sm:px-4">
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+    <header className="h-14 max-[419px]:h-auto border-b border-border/50 bg-background/80 backdrop-blur-md flex max-[419px]:flex-wrap items-center justify-between max-[419px]:gap-y-1 px-3 sm:px-4 max-[419px]:py-2">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 max-[419px]:basis-full">
         <Button
           variant="ghost"
           size="icon"
@@ -140,7 +141,11 @@ export function EditorToolbar({
         )}
       </div>
 
-      <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+      <div className="flex items-center gap-1 sm:gap-2 shrink-0 max-[419px]:w-full max-[419px]:justify-end">
+        <GitHubStarLink
+          compactLabel={null}
+          className="h-8 sm:h-9 rounded-md px-2 sm:px-3 glass-panel glass-panel-hover text-xs text-muted-foreground hover:text-white whitespace-nowrap transition-colors"
+        />
         <Button
           variant="ghost"
           className="hover:bg-secondary text-muted-foreground hover:text-white gap-1.5 sm:gap-2 text-xs h-8 sm:h-9 px-2 sm:px-3 hidden md:flex"

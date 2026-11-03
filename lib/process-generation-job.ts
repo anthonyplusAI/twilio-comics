@@ -7,6 +7,7 @@ import {
   ComicServiceError,
 } from "@/lib/comic-service";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
+import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import {
   GenerationJobLeaseLostError,
   checkpointGenerationDelivery,
@@ -571,7 +572,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const continuationInstruction = claimed.source === "voice"
       ? `Call again from this number within ${CONVERSATION_RESUME_DAYS} days; say CONTINUE for another page or NEW for a new comic.`
       : `Reply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`;
-    const body = `${readyMessage}\n\n${continuationInstruction}`;
+    const body = `${readyMessage}\n\n${continuationInstruction}\n\n${GITHUB_STAR_MESSAGE}`;
     const statusCallback = `${publicBaseUrl}/api/twilio/status?jobId=${encodeURIComponent(claimed.id)}#rc=3&rp=5xx,ct,rt`;
     const current = await getGenerationJob(claimed.id);
     let deliverySid = current?.deliverySid || claimed.deliverySid;

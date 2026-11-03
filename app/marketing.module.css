@@ -66,6 +66,43 @@
   text-underline-offset: 5px;
 }
 
+.navCompact {
+  display: none;
+}
+
+.githubStar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: none;
+  min-height: 40px;
+  border: 2px solid var(--ink);
+  padding: 7px 11px;
+  background: var(--paper);
+  box-shadow: 3px 3px 0 var(--ink);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.githubStar:hover,
+.headerNav .githubStar:hover {
+  box-shadow: 1px 1px 0 var(--ink);
+  text-decoration: none;
+  transform: translate(2px, 2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .githubStar {
+    transition: none;
+  }
+}
+
 .hero {
   max-width: 1680px;
   margin: 0 auto;
@@ -542,6 +579,7 @@
 @media (max-width: 640px) {
   .siteHeader {
     height: 72px;
+    gap: 10px;
     padding: 0 20px;
   }
 
@@ -563,7 +601,24 @@
   }
 
   .headerNav {
+    gap: 9px;
     font-size: 14px;
+  }
+
+  .navText,
+  .navFull {
+    display: none;
+  }
+
+  .navCompact {
+    display: inline;
+  }
+
+  .githubStar {
+    min-height: 38px;
+    padding: 6px 8px;
+    box-shadow: 2px 2px 0 var(--ink);
+    font-size: 13px;
   }
 
   .heroCopy {
@@ -689,6 +744,31 @@
   .footerLinks {
     flex: none;
     max-width: none;
+  }
+}
+
+@media (max-width: 380px) {
+  .siteHeader {
+    gap: 6px;
+    padding: 0 14px;
+  }
+
+  .brand {
+    gap: 6px;
+    font-size: 23px;
+  }
+
+  .brand img {
+    width: 32px;
+    height: 32px;
+  }
+
+  .headerNav {
+    gap: 6px;
+  }
+
+  .githubStar {
+    padding: 6px 7px;
   }
 }
 

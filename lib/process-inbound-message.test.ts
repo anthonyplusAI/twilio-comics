@@ -65,6 +65,7 @@ vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityE
 vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserveMessageAgentTurn }));
 
 import { processInboundMessage } from "@/lib/process-inbound-message";
+import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 
 type Receipt = {
   messageSid: string;
@@ -228,7 +229,7 @@ describe("ordered inbound messaging processor", () => {
       storyId, channel: "sms", address: FROM,
     });
     expect(sends[0].body).toBe(
-      `Your comic is ready:\n${link}\n\nReply CONTINUE within 14 days for another page, or NEW for a new comic.`,
+      `Your comic is ready:\n${link}\n\nReply CONTINUE within 14 days for another page, or NEW for a new comic.\n\n${GITHUB_STAR_MESSAGE}`,
     );
     expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
     expect(receipts.SM1.status).toBe("completed");
@@ -255,10 +256,47 @@ describe("ordered inbound messaging processor", () => {
     });
     expect(h.channelStoryLink).not.toHaveBeenCalled();
     expect(sends[0].body).toBe(
-      `Your latest comic from your call is ready:\n${link}\n\nSend a new idea to start another by text.`,
+      `Your latest comic from your call is ready:\n${link}\n\nSend a new idea to start another by text.\n\n${GITHUB_STAR_MESSAGE}`,
     );
     expect(conversation).toMatchObject({ state: "collecting", activeStoryId: null });
     expect(receipts.SM1.status).toBe("completed");
+  });
+
+  it("includes the GitHub invitation when STATUS finds the active SMS comic", async () => {
+    const storyId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    const link = "https://comics.example.com/story/robot-detective";
+    conversation.state = "done";
+    conversation.activeStoryId = storyId;
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "done", collected: {}, activeStoryId: storyId,
+      reply: "Your comic is ready.", action: "none",
+    });
+    h.latestStoryLinkForSms.mockResolvedValue({ storyId, source: "sms", link });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toBe(
+      `Your comic is ready:\n${link}\n\nReply CONTINUE within 14 days for another page, or NEW for a new comic.\n\n${GITHUB_STAR_MESSAGE}`,
+    );
+    expect(h.channelStoryLink).not.toHaveBeenCalled();
+  });
+
+  it("includes the GitHub invitation after a completed comic shown during a new draft", async () => {
+    const storyId = "eb2aeaf7-5b1e-4a43-b8df-ea42f851cb80";
+    const link = "https://comics.example.com/story/phone-call-hero";
+    receipts.SM1.body = "STATUS";
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming", collected: { prompt: "A new idea" }, activeStoryId: null,
+      reply: "Ready to make your new comic? Reply CREATE.", action: "none",
+    });
+    h.latestStoryLinkForSms.mockResolvedValue({ storyId, source: "voice", link });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toBe(
+      `Ready to make your new comic? Reply CREATE.\n\nYour latest completed comic:\n${link}\n\n${GITHUB_STAR_MESSAGE}`,
+    );
   });
 
   it("does not disclose an old SMS comic from an empty reset conversation", async () => {
@@ -376,6 +414,7 @@ describe("ordered inbound messaging processor", () => {
     expect(h.channelStoryLink).toHaveBeenCalledOnce();
     expect(sends[0].body).toMatch(/can't show that comic link[\s\S]*\n\nReply STATUS[\s\S]*NEW/i);
     expect(sends[0].body).not.toMatch(/comic is ready/i);
+    expect(sends[0].body).not.toContain(GITHUB_STAR_MESSAGE);
     expect(conversation).toMatchObject({ state: "done", activeStoryId: storyId });
   });
 
@@ -744,6 +783,7 @@ describe("ordered inbound messaging processor", () => {
 
     expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
     expect(conversation.state).toBe("generating");
+    expect(sends[0].body).not.toContain(GITHUB_STAR_MESSAGE);
   });
 
   it("preserves a new kiosk photo uploaded while a reset is being processed", async () => {
