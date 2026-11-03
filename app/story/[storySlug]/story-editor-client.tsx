@@ -171,7 +171,7 @@ export function StoryEditorClient() {
       setShowApiModal(true);
       toast({
         title: "No credits remaining",
-        description: "You get 3 credits weekly. Add an API key for unlimited generation.",
+        description: "You have no app-funded credits remaining. Add an API key for unlimited generation.",
         variant: "destructive",
       });
       return false;

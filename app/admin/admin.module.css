@@ -451,6 +451,24 @@
 .profileIdentityList span { color: #ba263c; font-size: .69rem; font-weight: 800; }
 .profileIdentityList strong { font-size: .85rem; overflow-wrap: anywhere; }
 .profileIdentityList small { color: var(--muted); font-size: .68rem; }
+.quotaPanel { margin-bottom: 24px; }
+.quotaPanelBody { padding: 24px 30px 30px; }
+.quotaUsage { margin-bottom: 23px; padding: 16px 18px; border: 1px solid #c5d5f1; border-radius: 6px; background: #f4f8ff; }
+.quotaUsage strong { color: var(--navy); font-size: 1rem; }
+.quotaUsage p { margin: 5px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.quotaForm fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.quotaChoices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.quotaChoice { display: flex; align-items: start; gap: 10px; min-height: 92px; padding: 16px; border: 1px solid #bfcce0; border-radius: 6px; background: white; cursor: pointer; }
+.quotaChoice:hover { border-color: var(--twilio-blue); background: #f9fbff; }
+.quotaChoice:has(input:checked) { border-color: var(--twilio-blue); box-shadow: inset 0 0 0 2px var(--twilio-blue); background: #f5f9ff; }
+.quotaChoice:has(input:focus-visible) { outline: 3px solid var(--twilio-blue); outline-offset: 3px; }
+.quotaChoice input { flex: 0 0 auto; width: 17px; height: 17px; margin: 2px 0 0; accent-color: var(--twilio-blue); cursor: pointer; }
+.quotaChoice span { display: flex; flex-direction: column; gap: 5px; }
+.quotaChoice strong { color: var(--navy); font-size: .87rem; }
+.quotaChoice small { color: var(--muted); font-size: .75rem; line-height: 1.4; }
+.quotaCustomField { display: flex; flex-direction: column; gap: 7px; max-width: 290px; margin-top: 21px; color: var(--navy); font-size: .8rem; font-weight: 750; }
+.quotaCustomField input { width: 100%; min-height: 43px; padding: 0 11px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font: inherit; }
+.quotaCustomField small { color: var(--muted); font-size: .72rem; font-weight: 500; line-height: 1.4; }
 .profileGrid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(290px, .85fr); align-items: start; gap: 20px; }
 .historyPagination { padding-bottom: 0; }
 .rawRecords { min-width: 0; }
@@ -541,6 +559,8 @@
   .heroMetricGrid span { margin-top: 17px; }
   .analyticsGrid,
   .profileGrid { grid-template-columns: 1fr; }
+  .quotaChoices { grid-template-columns: 1fr; }
+  .quotaChoice { min-height: 0; }
   .settingsChoices { grid-template-columns: 1fr; }
   .settingsChoice { min-height: 0; }
 }
@@ -574,6 +594,7 @@
   .personDate { justify-content: flex-start; }
   .profileHeader { flex-direction: column; }
   .profileIdentityList { min-width: 0; }
+  .quotaPanelBody { padding: 22px 19px 25px; }
   .settingsPanelHeading { flex-direction: column; gap: 8px; padding: 23px 19px; }
   .settingsForm { padding: 22px 19px 25px; }
   .credentialFields { grid-template-columns: 1fr; }

@@ -183,7 +183,7 @@ async function suppressOptedOutResult(
   workerId: string,
   storyId: string | null,
 ): Promise<void> {
-  // A saved story and page count against both the weekly and daily limits,
+  // A saved story and page count against the player's generation allowance,
   // even when Twilio blocks the outbound result after generation.
   if (storyId) {
     await markGenerationJobSuppressed(job.id, workerId, OPTED_OUT_DELIVERY_REASON, storyId);

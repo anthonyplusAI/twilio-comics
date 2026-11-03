@@ -50,7 +50,7 @@ export function ComicCreationForm({
   const [previews, setPreviews] = useState<string[]>([]);
   const [showPreview, setShowPreview] = useState<number | null>(null);
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
-  const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null);
+  const [creditsRemaining, setCreditsRemaining] = useState<number | "unlimited" | null>(null);
   const [showApiModal, setShowApiModal] = useState(false);
 
   // Initialize style with initial value, load from localStorage after mount
@@ -508,7 +508,7 @@ export function ComicCreationForm({
               {hasApiKey ? (
                 <>Using your API key (~$0.01 per comic)</>
               ) : (
-                <>{creditsRemaining !== null ? `${creditsRemaining} credit${creditsRemaining === 1 ? '' : 's'} remaining` : 'Checking credits...'}</>
+                <>{creditsRemaining === "unlimited" ? "Unlimited generations" : creditsRemaining !== null ? `${creditsRemaining} credit${creditsRemaining === 1 ? '' : 's'} remaining` : 'Checking credits...'}</>
               )}
             </div>
           </div>

@@ -5,25 +5,13 @@ import { activityEvents } from "@/lib/schema";
 
 export type CameraBudgetKind = "verification_start" | "verification_check" | "upload";
 
-const DEFAULT_VERIFY_GLOBAL_HOURLY_LIMIT = 30;
-const MAX_VERIFY_GLOBAL_HOURLY_LIMIT = 100;
-const DEFAULT_VERIFY_GLOBAL_DAILY_LIMIT = 50;
-const MAX_VERIFY_GLOBAL_DAILY_LIMIT = 500;
-
 const LIMITS: Record<CameraBudgetKind, {
   phoneHour: number;
   phoneDay: number;
-  globalHour: number;
-  globalDay: number;
 }> = {
-  verification_start: {
-    phoneHour: 3,
-    phoneDay: 5,
-    globalHour: DEFAULT_VERIFY_GLOBAL_HOURLY_LIMIT,
-    globalDay: DEFAULT_VERIFY_GLOBAL_DAILY_LIMIT,
-  },
-  verification_check: { phoneHour: 8, phoneDay: 16, globalHour: 80, globalDay: 200 },
-  upload: { phoneHour: 6, phoneDay: 12, globalHour: 40, globalDay: 100 },
+  verification_start: { phoneHour: 3, phoneDay: 5 },
+  verification_check: { phoneHour: 8, phoneDay: 16 },
+  upload: { phoneHour: 6, phoneDay: 12 },
 };
 
 function rowsOf<T>(result: unknown): T[] {
@@ -43,19 +31,9 @@ function eventKind(kind: CameraBudgetKind): string {
   return `camera.${kind}.requested`;
 }
 
-function configuredVerifyLimit(name: string, defaultLimit: number, maxLimit: number): number {
-  const value = process.env[name]?.trim();
-  if (!value || !/^[1-9]\d*$/.test(value)) return defaultLimit;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed)
-    ? Math.min(parsed, maxLimit)
-    : defaultLimit;
-}
-
 /**
- * Reserve before a paid Verify SMS, verification check, or Blob write. One
- * short PostgreSQL advisory lock serializes the global pilot budget across
- * Container App replicas, so parallel browsers cannot exceed it.
+ * Reserve before a paid Verify SMS, verification check, or Blob write. A
+ * phone-scoped PostgreSQL advisory lock serializes its requests across replicas.
  */
 export async function reserveCameraBudget(
   kind: CameraBudgetKind,
@@ -63,53 +41,31 @@ export async function reserveCameraBudget(
 ): Promise<{ allowed: true; eventKey: string } | { allowed: false; reason: "rate_limit" | "unavailable" }> {
   if (!/^\+[1-9]\d{6,14}$/.test(phone)) return { allowed: false, reason: "unavailable" };
   const limits = LIMITS[kind];
-  const globalHourLimit = kind === "verification_start"
-    ? configuredVerifyLimit(
-        "CAMERA_VERIFY_GLOBAL_HOURLY_LIMIT",
-        DEFAULT_VERIFY_GLOBAL_HOURLY_LIMIT,
-        MAX_VERIFY_GLOBAL_HOURLY_LIMIT,
-      )
-    : limits.globalHour;
-  const globalDayLimit = kind === "verification_start"
-    ? configuredVerifyLimit(
-        "CAMERA_VERIFY_GLOBAL_DAILY_LIMIT",
-        DEFAULT_VERIFY_GLOBAL_DAILY_LIMIT,
-        MAX_VERIFY_GLOBAL_DAILY_LIMIT,
-      )
-    : limits.globalDay;
   const key = eventKind(kind);
   try {
     return await db.transaction(async (tx) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
-          hashtext('twilio-comics:camera-budget'), hashtext(${key})
+          hashtext(${key}), hashtext(${phone})
         )
       `);
       const [usage] = rowsOf<{
         phone_hour: number | string;
         phone_day: number | string;
-        global_hour: number | string;
-        global_day: number | string;
       }>(await tx.execute(sql`
         SELECT
           COUNT(*) FILTER (
-            WHERE address = ${phone}
-              AND occurred_at >= statement_timestamp() - INTERVAL '1 hour'
-          )::integer AS phone_hour,
-          COUNT(*) FILTER (WHERE address = ${phone})::integer AS phone_day,
-          COUNT(*) FILTER (
             WHERE occurred_at >= statement_timestamp() - INTERVAL '1 hour'
-          )::integer AS global_hour,
-          COUNT(*)::integer AS global_day
+          )::integer AS phone_hour,
+          COUNT(*)::integer AS phone_day
         FROM activity_events
         WHERE kind = ${key}
+          AND address = ${phone}
           AND occurred_at >= statement_timestamp() - INTERVAL '24 hours'
       `));
       if (!usage) throw new Error("Missing camera budget counts");
       if (count(usage.phone_hour) >= limits.phoneHour ||
-          count(usage.phone_day) >= limits.phoneDay ||
-          count(usage.global_hour) >= globalHourLimit ||
-          count(usage.global_day) >= globalDayLimit) {
+          count(usage.phone_day) >= limits.phoneDay) {
         return { allowed: false as const, reason: "rate_limit" as const };
       }
 

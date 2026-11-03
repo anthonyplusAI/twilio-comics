@@ -42,7 +42,7 @@ const DAILY_LIMIT_REPLY =
 const AGENT_TURN_LIMIT_REPLY =
   `You've reached the message limit for now. Your comic draft is saved for ${CONVERSATION_RESUME_DAYS} days; try again later.`;
 const QUOTA_REPLY =
-  `You've reached the free limit of 3 comics this week. Your draft is saved for ${CONVERSATION_RESUME_DAYS} days; try again after your quota resets.`;
+  `You've reached your comic generation limit. Your draft is saved for ${CONVERSATION_RESUME_DAYS} days; please try again later.`;
 const CAPACITY_REPLY =
   `Today's comic studio is full. Your draft is saved for ${CONVERSATION_RESUME_DAYS} days; please try again tomorrow.`;
 const GENERATION_CHECKING_REPLY =

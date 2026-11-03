@@ -12,7 +12,7 @@ import {
   reserveVoiceVerificationStart,
 } from "@/lib/voice-verification-budget";
 
-const callSid = `CA${"a".repeat(32)}`;
+const callSid = "CA" + "a".repeat(32);
 const request = {
   callSid,
   fromAddress: "+15551112222",
@@ -20,208 +20,98 @@ const request = {
 };
 const dialect = new PgDialect();
 
-interface Usage {
-  caller_hour_count: number;
-  caller_day_count: number;
-  number_hour_count: number;
-  number_day_count: number;
-}
-
-function mockFreshReservation(usage: Usage, id = "event-id") {
-  h.execute
-    .mockResolvedValueOnce({ rows: [] }) // number lock
-    .mockResolvedValueOnce({ rows: [] }) // caller lock
-    .mockResolvedValueOnce({ rows: [] }) // CallSid lookup
-    .mockResolvedValueOnce({ rows: [usage] })
-    .mockResolvedValueOnce({ rows: [{ id }] });
-}
-
 function queries(): Array<{ sql: string; params: unknown[] }> {
   return h.execute.mock.calls.map((call: unknown[]) => dialect.sqlToQuery(call[0] as SQL));
 }
 
+function mockFreshReservation(
+  usage: { caller_hour_count: number | null; caller_day_count: number | null },
+  id = "event-id",
+) {
+  h.execute
+    .mockResolvedValueOnce({ rows: [] }) // Caller lock.
+    .mockResolvedValueOnce({ rows: [] }) // New CallSid.
+    .mockResolvedValueOnce({ rows: [usage] })
+    .mockResolvedValueOnce({ rows: [{ id }] });
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", undefined);
   h.transaction.mockImplementation(async (run) => run({ execute: h.execute }));
 });
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Voice Verify SMS start budget", () => {
-  it("reserves the fourth caller start with recipient and caller locks and durable CallSid", async () => {
-    mockFreshReservation({
-      caller_hour_count: 3,
-      caller_day_count: 9,
-      number_hour_count: 11,
-      number_day_count: 39,
-    });
+  it("reserves the fourth hourly and tenth daily caller start", async () => {
+    mockFreshReservation({ caller_hour_count: 3, caller_day_count: 9 });
 
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: true, sendCode: true,
     });
-    expect(queries()).toHaveLength(5);
-    expect(queries()[0].sql).toContain("pg_advisory_xact_lock");
-    expect(queries()[0].sql).toContain("twilio-comics:voice-verify:recipient");
-    expect(queries()[0].params).toContain(request.toAddress);
-    expect(queries()[0].params).not.toContain(request.fromAddress);
-    expect(queries()[1].sql).toContain("twilio-comics:voice-verify:caller");
-    expect(queries()[1].params).toContain(request.fromAddress);
-    expect(queries()[3].sql).toContain("INTERVAL '24 hours'");
-    expect(queries()[3].sql).toContain("INTERVAL '1 hour'");
-    expect(queries()[3].sql).toContain("details->>'toAddress'");
-    expect(queries()[3].params).toContain(request.toAddress);
-    expect(queries()[4].sql).toContain("ON CONFLICT (event_key) DO NOTHING");
-    expect(queries()[4].params).toEqual(expect.arrayContaining([
+
+    const issued = queries();
+    expect(issued).toHaveLength(4);
+    expect(issued[0].sql).toContain("pg_advisory_xact_lock");
+    expect(issued[0].sql).toContain("twilio-comics:voice-verify:caller");
+    expect(issued[0].params).toContain(request.fromAddress);
+    expect(issued[2].sql).toContain("INTERVAL '24 hours'");
+    expect(issued[2].sql).toContain("INTERVAL '1 hour'");
+    expect(issued[2].params).toContain(request.fromAddress);
+    expect(issued[2].sql).not.toContain("number_hour_count");
+    expect(issued[3].sql).toContain("ON CONFLICT (event_key) DO NOTHING");
+    expect(issued[3].params).toEqual(expect.arrayContaining([
       request.fromAddress, request.toAddress, "voice.verification.requested", "reserved",
     ]));
-    const insert = queries()[4];
-    expect(insert.params.slice(-2)).toEqual([request.toAddress, null]);
-    expect(insert.sql).toMatch(/'toAddress', \$\d+::text, 'budgetLimit', \$\d+::text/);
+    expect(issued[3].params.slice(-2)).toEqual([request.toAddress, null]);
+    expect(issued[3].sql).toMatch(/'toAddress', \$\d+::text, 'budgetLimit', \$\d+::text/);
   });
 
-  it("denies a fifth start in the hour and records that denial", async () => {
-    mockFreshReservation({
-      caller_hour_count: 4,
-      caller_day_count: 4,
-      number_hour_count: 4,
-      number_day_count: 4,
-    }, "denied-event");
+  it("denies a fifth start in the hour and records the caller reason", async () => {
+    mockFreshReservation({ caller_hour_count: 4, caller_day_count: 4 }, "denied-event");
 
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: false, reason: "rate_limit",
     });
-    expect(queries()[4].params).toContain("voice.verification.denied");
-  });
-
-  it("keeps the caller's daily cap even when the number has room", async () => {
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 10,
-      number_hour_count: 0,
-      number_day_count: 10,
-    }, "caller-daily-denial");
-
-    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
-      allowed: false, reason: "rate_limit",
-    });
-    expect(queries()[4].params).toContain("caller_day");
-  });
-
-  it("denies a new caller at the number's hourly cap and records the denial", async () => {
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 12,
-      number_day_count: 12,
-    }, "hourly-denial");
-
-    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
-      allowed: false, reason: "rate_limit",
-    });
-    expect(queries()[4].params).toEqual(expect.arrayContaining([
-      request.toAddress, "voice.verification.denied", "denied", "number_hour",
+    expect(queries()[3].params).toEqual(expect.arrayContaining([
+      "voice.verification.denied", "caller_hour",
     ]));
   });
 
-  it("denies a new caller at the number's daily cap", async () => {
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 0,
-      number_day_count: 40,
-    }, "daily-denial");
+  it("denies an eleventh start in 24 hours", async () => {
+    mockFreshReservation({ caller_hour_count: 0, caller_day_count: 10 }, "denied-event");
 
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: false, reason: "rate_limit",
     });
-    expect(queries()[4].params).toEqual(expect.arrayContaining([
-      "voice.verification.denied", "number_day",
-    ]));
+    expect(queries()[3].params).toContain("caller_day");
   });
 
-  it("allows a pilot number's fourth start in 24 hours", async () => {
-    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "4");
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 3,
-      number_day_count: 3,
-    });
+  it("allows another caller regardless of the old recipient-wide setting", async () => {
+    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "0");
+    mockFreshReservation({ caller_hour_count: 0, caller_day_count: 0 }, "first");
+    mockFreshReservation({ caller_hour_count: 0, caller_day_count: 0 }, "second");
 
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: true, sendCode: true,
     });
-  });
+    const secondCaller = "+15553334444";
+    await expect(reserveVoiceVerificationStart({
+      ...request, callSid: "CA" + "b".repeat(32), fromAddress: secondCaller,
+    })).resolves.toEqual({ allowed: true, sendCode: true });
 
-  it("denies the next pilot start once the number reaches four in 24 hours", async () => {
-    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "4");
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 4,
-      number_day_count: 4,
-    });
-
-    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
-      allowed: false, reason: "rate_limit",
-    });
-    expect(queries()[4].params).toContain("number_day");
-  });
-
-  it("pauses new Verify starts when the number's daily limit is zero", async () => {
-    vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", "0");
-    mockFreshReservation({
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 0,
-      number_day_count: 0,
-    });
-
-    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
-      allowed: false, reason: "rate_limit",
-    });
-    expect(queries()[0].sql).toContain("pg_advisory_xact_lock");
-    expect(queries()[4].params).toContain("number_day");
-  });
-
-  it.each(["", "-1", "4.5", "abc", "9007199254740992"])(
-    "fails closed for invalid daily number limit %j",
-    async (configuredLimit) => {
-      vi.stubEnv("VOICE_VERIFY_NUMBER_DAILY_LIMIT", configuredLimit);
-
-      await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
-        allowed: false, reason: "unavailable",
-      });
-      expect(h.transaction).not.toHaveBeenCalled();
-    },
-  );
-
-  it("takes the same number lock for different caller IDs", async () => {
-    const secondCaller = {
-      ...request,
-      callSid: `CA${"b".repeat(32)}`,
-      fromAddress: "+15553334444",
-    };
-    const counts = {
-      caller_hour_count: 0,
-      caller_day_count: 0,
-      number_hour_count: 0,
-      number_day_count: 0,
-    };
-    mockFreshReservation(counts);
-    await reserveVoiceVerificationStart(request);
-    mockFreshReservation(counts);
-    await reserveVoiceVerificationStart(secondCaller);
-
-    const statements = queries();
-    expect(statements[0].params).toEqual(statements[5].params);
-    expect(statements[1].params).not.toEqual(statements[6].params);
+    const issued = queries();
+    expect(issued).toHaveLength(8);
+    expect(issued[0].params).toContain(request.fromAddress);
+    expect(issued[4].params).toContain(secondCaller);
+    expect(issued[2].params).not.toContain(secondCaller);
+    expect(issued[6].params).not.toContain(request.fromAddress);
+    expect(issued.map((query) => query.sql).join("\n"))
+      .not.toContain("twilio-comics:voice-verify:recipient");
   });
 
   it("reuses a code already sent for a retried Twilio webhook", async () => {
     h.execute
-      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{
         address: request.fromAddress,
@@ -232,12 +122,11 @@ describe("Voice Verify SMS start budget", () => {
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: true, sendCode: false,
     });
-    expect(queries()).toHaveLength(3);
+    expect(queries()).toHaveLength(2);
   });
 
   it("does not send a second code while the first request is in progress", async () => {
     h.execute
-      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{
         address: request.fromAddress,
@@ -250,33 +139,34 @@ describe("Voice Verify SMS start budget", () => {
     });
   });
 
-  it("fails closed on a database outage or invalid caller ID", async () => {
+  it("rejects a retried CallSid belonging to another caller", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        address: "+15559990000",
+        status: "sent",
+        details: { toAddress: request.toAddress },
+      }] });
+
+    await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
+      allowed: false, reason: "invalid",
+    });
+  });
+
+  it("fails closed on database outage, invalid caller, or malformed usage", async () => {
     h.transaction.mockRejectedValueOnce(new Error("offline"));
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: false, reason: "unavailable",
     });
-    await expect(reserveVoiceVerificationStart({ ...request, fromAddress: "anonymous" })).resolves.toEqual({
-      allowed: false, reason: "invalid",
-    });
-    expect(h.transaction).toHaveBeenCalledOnce();
-  });
+    await expect(reserveVoiceVerificationStart({
+      ...request, fromAddress: "anonymous",
+    })).resolves.toEqual({ allowed: false, reason: "invalid" });
 
-  it("fails closed when the number usage count is unavailable", async () => {
-    h.execute
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{
-        caller_hour_count: 0,
-        caller_day_count: 0,
-        number_hour_count: null,
-        number_day_count: 0,
-      }] });
-
+    mockFreshReservation({ caller_hour_count: null, caller_day_count: 0 });
     await expect(reserveVoiceVerificationStart(request)).resolves.toEqual({
       allowed: false, reason: "unavailable",
     });
-    expect(queries()).toHaveLength(4);
+    expect(queries()).toHaveLength(3);
   });
 
   it("marks a reservation sent only after the provider accepts it", async () => {

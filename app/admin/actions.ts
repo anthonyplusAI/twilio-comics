@@ -1,12 +1,16 @@
 "use server";
 
 import { AuthError } from "next-auth";
+import { eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { signIn, signOut } from "@/auth";
 import { requireAdmin } from "@/lib/admin-access";
 import { rotateAdminCredentials } from "@/lib/admin-auth";
+import { db } from "@/lib/db";
 import { isVoicePhotoMode, setExperienceSettings } from "@/lib/photo-experience-settings";
+import { MAX_GENERATION_QUOTA_OVERRIDE, UNLIMITED_GENERATION_QUOTA_OVERRIDE } from "@/lib/quota";
+import { users } from "@/lib/schema";
 
 export async function adminSignIn(formData: FormData): Promise<void> {
   const username = formData.get("username");
@@ -49,6 +53,43 @@ export async function updatePhotoExperienceSettings(formData: FormData): Promise
   revalidatePath("/start/camera");
   revalidatePath("/admin/settings");
   redirect("/admin/settings?saved=1");
+}
+
+export async function updateUserGenerationQuota(formData: FormData): Promise<void> {
+  await requireAdmin();
+
+  const userIds = formData.getAll("userId");
+  const userId = userIds.length === 1 && typeof userIds[0] === "string"
+    ? userIds[0] : "";
+  if (!userId || userId.length > 200) redirect("/admin/users");
+
+  const path = `/admin/users/${encodeURIComponent(userId)}`;
+  const modes = formData.getAll("quotaMode");
+  const customLimits = formData.getAll("customLimit");
+  const mode = modes.length === 1 ? modes[0] : null;
+  const customLimit = customLimits.length === 1 ? customLimits[0] : null;
+
+  let generationQuotaLimit: number | null;
+  if (mode === "default") {
+    generationQuotaLimit = null;
+  } else if (mode === "unlimited") {
+    generationQuotaLimit = UNLIMITED_GENERATION_QUOTA_OVERRIDE;
+  } else if (mode === "custom" && typeof customLimit === "string" &&
+      /^\d+$/.test(customLimit) && Number(customLimit) <= MAX_GENERATION_QUOTA_OVERRIDE) {
+    generationQuotaLimit = Number(customLimit);
+  } else {
+    redirect(`${path}?quotaError=invalid#quota-settings`);
+  }
+
+  const [updated] = await db.update(users)
+    .set({ generationQuotaLimit, updatedAt: new Date() })
+    .where(eq(users.id, userId))
+    .returning({ id: users.id });
+  if (!updated) redirect("/admin/users?quotaError=missing-user");
+
+  revalidatePath(path);
+  revalidatePath("/admin/users");
+  redirect(`${path}?quotaSaved=1#quota-settings`);
 }
 
 export async function updateAdminCredentials(formData: FormData): Promise<void> {

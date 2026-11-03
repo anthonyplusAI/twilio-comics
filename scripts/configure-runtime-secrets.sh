@@ -371,7 +371,6 @@ check_existing_value "$WEB_JSON" APP_CONTACT_EMAIL 'adellavecchia@twilio.com'
 for current in "$WEB_JSON" "$GENERATION_JSON" "$RECOVERY_JSON"; do
   check_existing_value "$current" TWILIO_ACCOUNT_SID "$ACCOUNT_SID"
   check_existing_value "$current" TWILIO_PHONE_NUMBER "$PHONE_NUMBER"
-  check_existing_value "$current" DAILY_GENERATION_JOB_LIMIT 25
 done
 
 for kind in web generation recovery; do
@@ -638,7 +637,6 @@ WEB_ENV=(
   "TWILIO_PHONE_NUMBER=$PHONE_NUMBER"
   "TWILIO_VERIFY_SERVICE_SID=$VERIFY_SERVICE_SID"
   'TWILIO_ENABLED_CHANNELS='
-  'DAILY_GENERATION_JOB_LIMIT=25'
   'APP_OPERATOR_NAME=Anthony Dellavecchia'
   'APP_CONTACT_EMAIL=adellavecchia@twilio.com'
 )
@@ -646,7 +644,6 @@ JOB_ENV=(
   'MEDIA_SIGNING_SECRET=secretref:media-signing-secret'
   "TWILIO_ACCOUNT_SID=$ACCOUNT_SID"
   "TWILIO_PHONE_NUMBER=$PHONE_NUMBER"
-  'DAILY_GENERATION_JOB_LIMIT=25'
 )
 if [[ "$openai_configured" == true ]]; then
   WEB_ENV+=('OPENAI_API_KEY=secretref:openai-api-key')
@@ -724,7 +721,6 @@ for kind in web generation recovery; do
   fi
   require_env_value "$current" TWILIO_ACCOUNT_SID "$ACCOUNT_SID"
   require_env_value "$current" TWILIO_PHONE_NUMBER "$PHONE_NUMBER"
-  require_env_value "$current" DAILY_GENERATION_JOB_LIMIT 25
 done
 
 printf 'V2 runtime secrets and settings are configured. Admin username: %s. OpenAI key: %s. Twilio Auth Token: %s. Channels remain closed; web app remains internal.\n' \

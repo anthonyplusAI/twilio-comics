@@ -119,19 +119,9 @@ export async function POST(request: NextRequest) {
       const admission = await reserveBrowserGenerationCapacity(userId, quotaClaimKey);
       if (admission.reason !== "accepted") {
         quotaClaimKey = null;
-        if (admission.reason === "daily_capacity") {
-          return NextResponse.json(
-            {
-              error: "Comic generation is at today's capacity. Please try again tomorrow.",
-              errorType: "daily_capacity",
-              isRateLimited: true,
-            },
-            { status: 429 },
-          );
-        }
         return NextResponse.json(
           {
-            error: "You've reached the free limit of 3 comics this week.",
+            error: "You've reached your comic generation limit.",
             errorType: "quota_limit",
             isRateLimited: true,
             creditsRemaining: admission.quota.remaining,
