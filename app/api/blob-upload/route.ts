@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { uploadBufferToBlob } from "@/lib/blob-storage";
+import { reserveBrowserUpload } from "@/lib/browser-upload-budget";
 
 export const runtime = "nodejs";
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const MAX_REQUEST_SIZE = MAX_FILE_SIZE + 64 * 1024;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 function detectImageType(bytes: Uint8Array) {
@@ -43,18 +45,58 @@ export async function POST(request: Request) {
     );
   }
   const contentLength = Number(request.headers.get("content-length") || 0);
-  if (contentLength > MAX_FILE_SIZE + 64 * 1024) {
+  if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+    return NextResponse.json({ error: "Invalid Content-Length" }, { status: 400 });
+  }
+  if (contentLength > MAX_REQUEST_SIZE) {
     return NextResponse.json(
       { error: "Image must be 5 MiB or smaller" },
       { status: 413 },
     );
   }
 
+  const uploadBudget = await reserveBrowserUpload(userId);
+  if (!uploadBudget.allowed) {
+    return uploadBudget.reason === "rate_limit"
+      ? NextResponse.json(
+          { error: "Upload limit reached. Please try again later." },
+          { status: 429 },
+        )
+      : NextResponse.json(
+          { error: "Uploads are temporarily unavailable. Please try again later." },
+          { status: 503 },
+        );
+  }
+
+  if (!request.body) {
+    return NextResponse.json({ error: "Invalid multipart form" }, { status: 400 });
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
   let formData: FormData;
   try {
-    formData = await request.formData();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_REQUEST_SIZE) {
+        await reader.cancel();
+        return NextResponse.json(
+          { error: "Image must be 5 MiB or smaller" },
+          { status: 413 },
+        );
+      }
+      chunks.push(value);
+    }
+    formData = await new Response(Buffer.concat(chunks), {
+      headers: { "content-type": request.headers.get("content-type") || "" },
+    }).formData();
   } catch {
     return NextResponse.json({ error: "Invalid multipart form" }, { status: 400 });
+  } finally {
+    reader.releaseLock();
   }
 
   const file = formData.get("file");
