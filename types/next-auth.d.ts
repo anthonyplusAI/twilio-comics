@@ -19,7 +19,11 @@ declare module "next-auth/jwt" {
   interface JWT {
     id?: string;
     role?: "admin" | "user";
+    studioEmail?: string | null;
     adminIssuedAt?: number;
+    adminAuthMethod?: "password" | "google";
     adminCredentialVersion?: string;
+    adminGoogleEmail?: string;
+    adminGoogleHostedDomain?: string;
   }
 }

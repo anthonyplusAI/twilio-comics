@@ -544,12 +544,20 @@
 .loginIntro { margin: 9px 0 25px; color: var(--muted); font-size: .88rem; line-height: 1.55; }
 .loginError { padding: 11px 13px; border-left: 4px solid #be243a; border-radius: 4px; color: #842237; background: #ffe9ed; font-size: .8rem; line-height: 1.4; }
 .loginSuccess { padding: 11px 13px; border-left: 4px solid #147958; border-radius: 4px; color: #0d6047; background: #e8f8f1; font-size: .8rem; line-height: 1.4; }
+.loginGoogleForm { margin: 0; }
+.loginGoogleButton { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 49px; padding: 0 15px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font: inherit; font-size: .9rem; font-weight: 800; cursor: pointer; }
+.loginGoogleButton:hover { border-color: var(--twilio-blue); background: #f5f9ff; }
+.loginGoogleButton svg { margin-left: auto; }
+.loginGoogleMark { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; color: #4285f4; background: #f1f6ff; font-family: Arial, sans-serif; font-size: 1rem; font-weight: 800; }
+.loginGoogleHint { margin: 10px 0 0; color: var(--muted); font-size: .77rem; line-height: 1.5; }
+.loginDivider { display: flex; align-items: center; gap: 10px; margin: 24px 0 20px; color: var(--muted); font-size: .72rem; font-weight: 700; }
+.loginDivider::before, .loginDivider::after { content: ""; flex: 1; height: 1px; background: #dbe2ec; }
 .loginForm { display: flex; flex-direction: column; }
 .loginForm label { margin: 0 0 7px; color: var(--navy); font-size: .78rem; font-weight: 800; }
 .loginForm input { height: 46px; margin-bottom: 19px; padding: 0 12px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font-size: .9rem; }
 .loginForm button { display: flex; align-items: center; justify-content: space-between; height: 47px; padding: 0 16px; border: 0; border-radius: 5px; color: white; background: var(--twilio-red); font-weight: 800; cursor: pointer; }
 .loginForm button:hover { background: #d81936; }
-.loginFooter { margin: 22px 0 0; color: var(--muted); font-size: .72rem; }
+.loginFooter { margin: 22px 0 0; color: var(--muted); font-size: .72rem; line-height: 1.5; }
 
 @media (max-width: 1020px) {
   .dateRangePanel { grid-template-columns: 1fr; gap: 17px; }

@@ -1,16 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   auth: vi.fn(),
   requireAdmin: vi.fn(),
   getSettings: vi.fn(),
   rotate: vi.fn(),
+  signIn: vi.fn(),
   signOut: vi.fn(),
   redirect: vi.fn(),
 }));
 
-vi.mock("@/auth", () => ({ auth: h.auth, signIn: vi.fn(), signOut: h.signOut }));
+vi.mock("@/auth", () => ({ auth: h.auth, signIn: h.signIn, signOut: h.signOut }));
 vi.mock("next-auth", () => ({ AuthError: class AuthError extends Error {} }));
 vi.mock("@/lib/admin-access", () => ({ requireAdmin: h.requireAdmin }));
 vi.mock("@/lib/admin-auth", () => ({
@@ -25,7 +26,7 @@ vi.mock("@/lib/photo-experience-settings", () => ({
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("next/navigation", () => ({ redirect: h.redirect }));
 
-import { updateAdminCredentials } from "@/app/admin/actions";
+import { adminGoogleSignIn, updateAdminCredentials } from "@/app/admin/actions";
 import AdminSettingsPage from "@/app/admin/(protected)/settings/page";
 import AdminLoginPage from "@/app/admin/login/page";
 
@@ -52,7 +53,42 @@ beforeEach(() => {
   h.redirect.mockImplementation((path: string) => { throw new Error(`redirect:${path}`); });
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("admin credential settings", () => {
+  it("starts admin Google sign-in with the Twilio account chooser and admin destination", async () => {
+    await adminGoogleSignIn();
+
+    expect(h.signIn).toHaveBeenCalledWith(
+      "google",
+      { redirectTo: "/admin" },
+      { hd: "twilio.com", prompt: "select_account" },
+    );
+  });
+
+  it("offers Google admin sign-in for a configured Twilio Workspace and keeps the password fallback", async () => {
+    vi.stubEnv("AUTH_GOOGLE_ID", "google-client-id");
+    vi.stubEnv("AUTH_GOOGLE_SECRET", "google-client-secret");
+
+    const html = renderToStaticMarkup(await AdminLoginPage({ searchParams: Promise.resolve({}) }));
+
+    expect(html).toContain("Continue with Google");
+    expect(html).toContain("verified @twilio.com Google Workspace account");
+    expect(html).toContain('name="username"');
+    expect(html).toContain('name="password"');
+  });
+
+  it("hides Google admin sign-in until both OAuth credentials are configured", async () => {
+    vi.stubEnv("AUTH_GOOGLE_ID", "google-client-id");
+    vi.stubEnv("AUTH_GOOGLE_SECRET", undefined);
+
+    const html = renderToStaticMarkup(await AdminLoginPage({ searchParams: Promise.resolve({}) }));
+
+    expect(html).not.toContain("Continue with Google");
+    expect(html).toContain('name="username"');
+    expect(html).toContain('name="password"');
+  });
+
   it("shows a short credential form alongside the existing photo settings", async () => {
     const html = renderToStaticMarkup(await AdminSettingsPage({ searchParams: Promise.resolve({}) }));
     const newPasswordInput = html.match(/<input[^>]*name="newPassword"[^>]*>/)?.[0];
@@ -61,12 +97,23 @@ describe("admin credential settings", () => {
     expect(html).toContain("Change admin login");
     expect(html).toContain('name="currentPassword"');
     expect(html).toContain('name="newUsername"');
-    expect(html).toContain('value="current-operator"');
+    expect(html).not.toContain('value="current-operator"');
     expect(html).toContain('name="newPassword"');
     expect(html).toContain('name="confirmNewPassword"');
     expect(newPasswordInput).toContain('minLength="1"');
     expect(confirmPasswordInput).toContain('minLength="1"');
     expect(html).toContain("Offer camera and photo upload");
+  });
+
+  it("does not use a Google admin's display name as the shared password username", async () => {
+    h.requireAdmin.mockResolvedValueOnce({ user: { role: "admin", name: "Jane Smith" } });
+
+    const html = renderToStaticMarkup(await AdminSettingsPage({ searchParams: Promise.resolve({}) }));
+    const usernameInput = html.match(/<input[^>]*name="newUsername"[^>]*>/)?.[0];
+
+    expect(usernameInput).toBeDefined();
+    expect(usernameInput).not.toContain('value="Jane Smith"');
+    expect(html).toContain("Enter the current password even if you signed in with Google.");
   });
 
   it("explains the allowed password length in the form and invalid-input error", async () => {

@@ -63,7 +63,7 @@ export default async function AdminSettingsPage({
 }: {
   searchParams: Promise<{ saved?: string; error?: string; credentialError?: string }>;
 }) {
-  const session = await requireAdmin();
+  await requireAdmin();
   const [{ voicePhotoMode, cameraEnabled }, params] = await Promise.all([
     getExperienceSettings(),
     searchParams,
@@ -97,7 +97,7 @@ export default async function AdminSettingsPage({
         <div className={styles.settingsPanelHeading}>
           <div>
             <h2 id="change-login-heading">Change admin login</h2>
-            <p>Choose a new username and password. You will sign in again after saving.</p>
+            <p>Update the shared operator username and password. Enter the current password even if you signed in with Google. You will sign in again after saving.</p>
           </div>
         </div>
         <form action={updateAdminCredentials} className={styles.settingsForm}>
@@ -121,7 +121,6 @@ export default async function AdminSettingsPage({
                 id="new-admin-username"
                 name="newUsername"
                 type="text"
-                defaultValue={session.user?.name ?? ""}
                 autoComplete="username"
                 autoCapitalize="none"
                 spellCheck={false}

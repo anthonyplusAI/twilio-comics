@@ -81,6 +81,96 @@ describe("administrator Auth.js role", () => {
     expect(token).toMatchObject({ role: "user", id: "google-user" });
   });
 
+  it("issues a two-hour admin session for a verified Twilio Workspace account without requiring the admin password", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STUDIO_TESTER_EMAILS", undefined);
+    vi.stubEnv("ADMIN_PASSWORD_HASH", undefined);
+    const cb = callbacks();
+    const now = new Date("2026-10-21T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    const token = await cb.jwt({
+      token: { sub: "db-google-user" },
+      user: { id: "db-google-user", email: "alice@twilio.com" },
+      account: { provider: "google" },
+      profile: { email: "Alice@Twilio.com", email_verified: true, hd: "twilio.com", sub: "google-sub" },
+    });
+
+    expect(token).toMatchObject({
+      role: "admin",
+      adminAuthMethod: "google",
+      adminGoogleEmail: "alice@twilio.com",
+      adminGoogleHostedDomain: "twilio.com",
+      adminIssuedAt: now.getTime(),
+    });
+    expect(await cb.jwt({ token })).toMatchObject({ role: "admin" });
+    const session = await cb.session({
+      session: { user: { id: "prior", name: "Alice" }, expires: "tomorrow" },
+      token,
+    });
+    expect(session.user).toMatchObject({ role: "admin", id: "" });
+
+    vi.setSystemTime(now.getTime() + ADMIN_SESSION_MAX_AGE_MS);
+    expect(await cb.jwt({ token })).toBeNull();
+  });
+
+  it("does not promote Google profiles that lack verified Twilio Workspace claims", async () => {
+    const cb = callbacks();
+    for (const profile of [
+      { email: "alice@twilio.com", email_verified: false, hd: "twilio.com" },
+      { email: "alice@twilio.com", email_verified: true },
+      { email: "alice@twilio.com", email_verified: true, hd: "other.com" },
+      { email: "alice@twilio.com.evil.com", email_verified: true, hd: "twilio.com" },
+    ]) {
+      const token = await cb.jwt({
+        token: { sub: "db-google-user" },
+        user: { id: "db-google-user", role: "admin" },
+        account: { provider: "google" },
+        profile,
+      });
+      expect(token).toMatchObject({ role: "user" });
+    }
+  });
+
+  it("rejects altered Google admin claims and leaves password rotation independent", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STUDIO_TESTER_EMAILS", undefined);
+    const cb = callbacks();
+    const issued = await cb.jwt({
+      token: { sub: "db-google-user" },
+      user: { id: "db-google-user" },
+      account: { provider: "google" },
+      profile: { email: "alice@twilio.com", email_verified: true, hd: "twilio.com" },
+    });
+    expect(issued).toMatchObject({ role: "admin" });
+    expect(await cb.jwt({ token: { ...issued, adminGoogleHostedDomain: "other.com" } })).toBeNull();
+    expect(await cb.jwt({ token: { ...issued, adminGoogleEmail: "alice@twilio.com.evil.com" } })).toBeNull();
+
+    h.execute.mockRejectedValue(new Error("password database unavailable"));
+    expect(await cb.jwt({ token: issued })).toMatchObject({ role: "admin" });
+  });
+
+  it("preserves Studio access only for a Twilio admin who is also allowlisted as a Studio tester", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STUDIO_TESTER_EMAILS", "alice@twilio.com");
+    const cb = callbacks();
+    const token = await cb.jwt({
+      token: { sub: "db-google-user" },
+      user: { id: "db-google-user" },
+      account: { provider: "google" },
+      profile: { email: "alice@twilio.com", email_verified: true, hd: "twilio.com" },
+    });
+    const sessionFor = () => cb.session({
+      session: { user: { id: "prior" }, expires: "tomorrow" },
+      token,
+    });
+
+    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "db-google-user" });
+    vi.stubEnv("STUDIO_TESTER_EMAILS", "someone-else@example.com");
+    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "" });
+  });
+
   it("rejects expired admin claims and claims signed before password rotation", async () => {
     vi.stubEnv("ADMIN_PASSWORD_HASH", "new-password-hash");
     const now = new Date("2026-10-21T12:00:00.000Z");
@@ -100,7 +190,7 @@ describe("administrator Auth.js role", () => {
     } })).toBeNull();
   });
 
-  it("invalidates every replica's existing admin session after a dashboard rotation", async () => {
+  it("invalidates every replica's existing password admin session after a dashboard rotation", async () => {
     const firstHash = "scrypt$initial-version";
     const rotatedHash = "scrypt$database-version";
     vi.stubEnv("ADMIN_PASSWORD_HASH", firstHash);
@@ -191,6 +281,36 @@ describe("administrator Auth.js role", () => {
       account: { provider: "admin" },
       user: { id: "admin:operator", role: "admin" },
     })).toBe(true);
+  });
+
+  it("admits only verified Twilio Workspace identities to admin Google sign-in", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STUDIO_TESTER_EMAILS", undefined);
+    const cb = callbacks();
+    const googleSignIn = (profile: Record<string, unknown>) => cb.signIn({
+      account: { provider: "google" },
+      profile,
+      user: { id: "google-user" },
+    });
+
+    expect(await googleSignIn({
+      email: "Alice@Twilio.com", email_verified: true, hd: "twilio.com",
+    })).toBe(true);
+    expect(await googleSignIn({
+      email: "alice@twilio.com", email_verified: false, hd: "twilio.com",
+    })).toBe(false);
+    expect(await googleSignIn({
+      email: "alice@twilio.com", email_verified: true,
+    })).toBe(false);
+    expect(await googleSignIn({
+      email: "alice@twilio.com", email_verified: true, hd: "other.com",
+    })).toBe(false);
+    expect(await googleSignIn({
+      email: "alice@twilio.com.evil.com", email_verified: true, hd: "twilio.com",
+    })).toBe(false);
+    expect(await googleSignIn({
+      email: "@twilio.com", email_verified: true, hd: "twilio.com",
+    })).toBe(false);
   });
 
   it("invalidates production Google sessions when the tester allowlist changes", async () => {

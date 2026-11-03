@@ -27,6 +27,13 @@ export async function adminSignIn(formData: FormData): Promise<void> {
   }
 }
 
+export async function adminGoogleSignIn(): Promise<void> {
+  await signIn("google", { redirectTo: "/admin" }, {
+    hd: "twilio.com",
+    prompt: "select_account",
+  });
+}
+
 export async function adminSignOut(): Promise<void> {
   await signOut({ redirectTo: "/admin/login" });
 }

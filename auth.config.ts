@@ -10,6 +10,16 @@ export function verifiedGoogleEmail(
   return profile.email.trim().toLowerCase() || null;
 }
 
+/** A verified address alone does not prove that Google manages its domain. */
+export function verifiedTwilioGoogleEmail(
+  profile: { email?: unknown; email_verified?: unknown; hd?: unknown } | undefined,
+): string | null {
+  const email = verifiedGoogleEmail(profile);
+  return email && /^[^@\s]+@twilio\.com$/.test(email) && profile?.hd === "twilio.com"
+    ? email
+    : null;
+}
+
 export function isStudioTesterEmailAllowed(
   email: string | null,
   rawAllowlist: string | undefined,
@@ -44,6 +54,7 @@ export default {
       const email = verifiedGoogleEmail(profile);
       return email !== null && (
         process.env.NODE_ENV !== "production"
+        || verifiedTwilioGoogleEmail(profile) !== null
         || isStudioTesterEmailAllowed(email, process.env.STUDIO_TESTER_EMAILS)
       );
     },
