@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io">Explore the pilot</a> ·
+  <a href="https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io">Explore the pilot</a> ·
   <a href="#sample-pages">See sample pages</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#installation">Run locally</a>
@@ -24,7 +24,7 @@
 <details>
 <summary>Pilot verification details</summary>
 
-The Twilio CLI confirmed that the toll-free verified number supports SMS, MMS, and Voice, and that its SMS and Voice POST webhooks are configured. The public app advertises `sms,voice`. After the October 22 repair, a live inbound SMS reached the worker and its agent reply was delivered. Production admin credentials passed the login form; authenticated `/admin`, `/admin/activity`, and `/admin/users` requests returned HTTP 200, and the operator confirmed browser sign-in at the [admin dashboard](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login). A signed `/relay` WebSocket handshake passed while an unsigned one was denied. These checks do not prove the full handset flows.
+The Twilio CLI confirmed that the toll-free verified number supports SMS, MMS, and Voice, and that its SMS and Voice POST webhooks are configured. The public app advertises `sms,voice`. After the October 22 repair, a live inbound SMS reached the worker and its agent reply was delivered. On the earlier release, production admin credentials passed the login form; authenticated `/admin`, `/admin/activity`, and `/admin/users` requests returned HTTP 200, and the operator confirmed browser sign-in. The [admin dashboard](https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login) now uses the unversioned address. A signed `/relay` WebSocket handshake passed while an unsigned one was denied. These checks do not prove the full handset flows.
 
 </details>
 
@@ -50,7 +50,7 @@ flowchart LR
   Approve --> Read["Open the story link"]
 ```
 
-- **Start on your phone.** Text an idea or call from the [start page](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/start). Phone flows do not require Google sign-in.
+- **Start on your phone.** Text an idea or call from the [start page](https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/start). Phone flows do not require Google sign-in.
 - **Make it yours.** Add up to two character photos by MMS, or use the optional browser camera path when an admin enables it.
 - **Keep going.** Use `CONTINUE` within the 14-day conversation window to add another page to the story.
 - **Share the result.** The story reader shows finished pages and offers PDF download and sharing controls.
@@ -85,7 +85,7 @@ flowchart LR
   Job -->|sends story link| Twilio
 ```
 
-The production Azure Container App hosts Next.js, signed Twilio webhooks, and the `/relay` ConversationRelay WebSocket. The warm web app handles the prefilled SMS opener and simple commands inline within an eight-second budget; slow attempts fall back to the durable queue. The event-driven Job handles other text turns and image generation from Azure Queue. A second, scheduled Job republishes work left pending after a temporary failure. The three runtime workloads use one image; a separate migration image runs inside the private Azure network before a release. The V2 app network is in East US 2 and peers privately with a Central US PostgreSQL network; the database's private DNS zone is linked to both VNets. PostgreSQL and Blob Storage retain history across app revisions. `/api/healthz` reports the deployed commit and `/api/readyz` checks the migrated database.
+The production Azure Container App hosts Next.js, signed Twilio webhooks, and the `/relay` ConversationRelay WebSocket. The warm web app handles the prefilled SMS opener and simple commands inline within an eight-second budget; slow attempts fall back to the durable queue. The event-driven Job handles other text turns and image generation from Azure Queue. A second, scheduled Job republishes work left pending after a temporary failure. The three runtime workloads use one image; a separate migration image runs inside the private Azure network before a release. The private app network is in East US 2 and peers privately with a Central US PostgreSQL network; the database's private DNS zone is linked to both VNets. PostgreSQL and Blob Storage retain history across app revisions. `/api/healthz` reports the deployed commit and `/api/readyz` checks the migrated database.
 
 ## Usage
 
@@ -192,7 +192,7 @@ Studio creation and browser-owned story editing use Auth.js with Google OAuth. `
 
 ```text
 http://localhost:3000/api/auth/callback/google
-https://YOUR_DOMAIN/api/auth/callback/google
+https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/auth/callback/google
 ```
 
 Required variables:
@@ -212,8 +212,8 @@ In production, `STUDIO_TESTER_EMAILS` is a comma-separated allowlist checked at 
 The pilot number uses these **HTTP POST** webhooks at the exact public HTTPS origin in `PUBLIC_BASE_URL`:
 
 ```text
-SMS/MMS:  https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/sms#rc=3&rp=5xx,ct,rt
-Voice:    https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/voice#rc=3&rp=5xx,ct,rt
+SMS/MMS:  https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/sms#rc=3&rp=5xx,ct,rt
+Voice:    https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/api/twilio/voice#rc=3&rp=5xx,ct,rt
 ```
 
 If WhatsApp is enabled later, its sender uses `https://YOUR_DOMAIN/api/twilio/whatsapp#rc=3&rp=5xx,ct,rt` as the HTTP POST webhook.
@@ -223,7 +223,7 @@ The fragment is Twilio's optional [HTTP webhook retry configuration](https://www
 ConversationRelay is configured to connect to this WebSocket URL, **without** the HTTP retry fragment:
 
 ```text
-wss://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/relay
+wss://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/relay
 ```
 
 Voice first sends a six-digit SMS code through a configured [Twilio Verify service](https://www.twilio.com/docs/verify/api). The caller enters it through Twilio `<Gather input="dtmf">`; only an approved code opens ConversationRelay. The code never enters speech transcription or the comic prompt. Set `TWILIO_VERIFY_SERVICE_SID` on the public app and configure that service's SMS sender. The app limits code starts to four per hour and ten per rolling 24 hours per caller number. It allows six verified AI calls per caller in a rolling 24 hours. Each Relay call lasts at most ten minutes and twenty caller turns. This app uses ConversationRelay directly for speech and keeps the agent logic in the shared application. Twilio Agent Connect can be added later if the product needs its additional routing and agent services.
@@ -255,13 +255,15 @@ An admin signs in at `/admin/login` with the shared operator username/password o
 
 At `/admin/users`, open a participant record to set **Comic generation allowance**. The default is three app-funded generations per rolling seven days. An admin can choose a custom whole-number limit from 0 to 10,000 or **Unlimited**; 0 pauses app-funded generation for that player. Changes apply immediately to the current quota window. A phone identity shares its allowance across SMS, WhatsApp, and Voice, while a Google Studio account has a separate record.
 
-There is no default login. For V2, [`scripts/configure-runtime-secrets.sh`](scripts/configure-runtime-secrets.sh) generated `AUTH_SECRET`, `MEDIA_SIGNING_SECRET`, and an initial admin password, then stored them in Azure Key Vault without printing the raw values. It stores the operator's initial password copy in Key Vault and wires only its scrypt hash to the web app as `ADMIN_PASSWORD_HASH`; the initial `ADMIN_USERNAME` is `comics-admin`. The production OpenAI API key and Twilio Auth Token are also bound through Key Vault secret references. To set a new admin username and password, sign in and use **Change admin login** in `/admin/settings`; the [short guide](docs/ADMIN_CREDENTIALS.md) explains the steps and how to recover a lost login without the old password. The new salted password hash is stored in private Azure PostgreSQL and immediately invalidates password-authenticated admin sessions. Google admin sessions remain valid until their two-hour expiry. The old Key Vault password copy remains the initial password and will no longer sign in after a dashboard change. See [runtime setup](docs/INFRA_SETUP.md#configure-v2-runtime-before-the-first-release) for initial credential retrieval. The production login form accepted the initial credential in an automated check, the three protected dashboard routes returned HTTP 200, and the operator confirmed browser sign-in. For manual development setup, `pnpm exec tsx scripts/hash-admin-password.ts` accepts a hidden password entry and prints its encoded hash. The raw password must not be stored in the repository. `AUTH_SECRET` signs short-lived admin sessions. The dashboard reads PostgreSQL tables rather than container files, so a new Azure image or revision does not erase history. Stored history has no automatic expiry. A verified user deletion request must be handled explicitly across database records and associated images; do not assume deleting an account row removes the append-only event content.
+There is no default login. [`scripts/configure-runtime-secrets.sh`](scripts/configure-runtime-secrets.sh) generated `AUTH_SECRET`, `MEDIA_SIGNING_SECRET`, and an initial admin password, then stored them in Azure Key Vault without printing the raw values. It stores the operator's initial password copy in Key Vault and wires only its scrypt hash to the web app as `ADMIN_PASSWORD_HASH`; the initial `ADMIN_USERNAME` is `comics-admin`. The production OpenAI API key and Twilio Auth Token are also bound through Key Vault secret references. To set a new admin username and password, sign in and use **Change admin login** in `/admin/settings`; the [short guide](docs/ADMIN_CREDENTIALS.md) explains the steps and how to recover a lost login without the old password. The new salted password hash is stored in private Azure PostgreSQL and immediately invalidates password-authenticated admin sessions. Google admin sessions remain valid until their two-hour expiry. The old Key Vault password copy remains the initial password and will no longer sign in after a dashboard change. See [runtime setup](docs/INFRA_SETUP.md#configure-runtime-before-the-first-release) for initial credential retrieval. The production login form accepted the initial credential in an automated check, the three protected dashboard routes returned HTTP 200, and the operator confirmed browser sign-in. For manual development setup, `pnpm exec tsx scripts/hash-admin-password.ts` accepts a hidden password entry and prints its encoded hash. The raw password must not be stored in the repository. `AUTH_SECRET` signs short-lived admin sessions. The dashboard reads PostgreSQL tables rather than container files, so a new Azure image or revision does not erase history. Stored history has no automatic expiry. A verified user deletion request must be handled explicitly across database records and associated images; do not assume deleting an account row removes the append-only event content.
 
 Admin password attempts are throttled by the client address appended by Azure Container Apps ingress. The public app must stay behind ACA HTTP ingress for production sign-in; a different ingress needs an equivalent trusted client-address integration. Use the [data deletion runbook](docs/DATA_DELETION.md) to inventory a verified phone participant before removing retained database and Blob records.
 
 ## Deployment
 
-Azure deployment is gated by the reusable `Validate` CI check and the explicit `PRODUCTION_RELEASE_READY=true` repository variable, which is currently set. CI builds both the runtime and migration Dockerfiles. A successful release runs the private database migration Job, updates the web Container App and both runtime Jobs, and checks public `/api/healthz` and database-backed `/api/readyz`. The V2 app has external HTTPS ingress at [the pilot site](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io); its Twilio SMS and Voice POST webhooks are verified and `TWILIO_ENABLED_CHANNELS=sms,voice`. WhatsApp remains disabled. The operator has signed in to the admin dashboard. One inbound SMS and the delivered agent reply were confirmed after the October 22 repair; full SMS comic generation/delivery and the Voice handset flow remain launch checks. The setup script's initial empty channel list is a bootstrap state, not the current pilot setting.
+Azure deployment is gated by the reusable `Validate` CI check and the explicit `PRODUCTION_RELEASE_READY=true` repository variable, which is currently set. CI builds both the runtime and migration Dockerfiles. A successful release runs the private database migration Job, updates the web Container App and both runtime Jobs, and checks public `/api/healthz` and database-backed `/api/readyz`. The full public app has external HTTPS ingress at [the pilot site](https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io); its Twilio SMS and Voice POST webhooks are verified and `TWILIO_ENABLED_CHANNELS=sms,voice`. WhatsApp remains disabled. The operator has signed in to the admin dashboard. One inbound SMS and the delivered agent reply were confirmed after the October 22 repair; full SMS comic generation/delivery and the Voice handset flow remain launch checks. The setup script's initial empty channel list is a bootstrap state, not the current pilot setting.
+
+The former `twilio-comics-v2` web address remains available only to redirect previously shared links. Private Azure resources retain historical `-v2` names, while the full app runs at the unversioned address.
 
 - One-time Azure and GitHub setup: [`docs/INFRA_SETUP.md`](docs/INFRA_SETUP.md)
 - Private PostgreSQL network and migration setup: [`docs/AZURE_POSTGRES.md`](docs/AZURE_POSTGRES.md)

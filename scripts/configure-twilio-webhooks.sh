@@ -66,6 +66,16 @@ PY
 sms_url="${origin}/api/twilio/sms#rc=3&rp=5xx,ct,rt"
 voice_url="${origin}/api/twilio/voice#rc=3&rp=5xx,ct,rt"
 
+# During the production app rename, accept only the exact webhook URLs from
+# the existing V2 app. This also permits a retry after a partial cutover.
+legacy_sms_url=''
+legacy_voice_url=''
+if [[ "$origin" == 'https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io' ]]; then
+  legacy_origin='https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io'
+  legacy_sms_url="${legacy_origin}/api/twilio/sms#rc=3&rp=5xx,ct,rt"
+  legacy_voice_url="${legacy_origin}/api/twilio/voice#rc=3&rp=5xx,ct,rt"
+fi
+
 umask 077
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/twilio-comics-webhooks.XXXXXXXX")"
 trap 'rm -rf -- "$temp_dir"' EXIT
@@ -115,10 +125,11 @@ validate_existing_hooks() {
       ][]; . as $field | $number | has($field))
   ' "$1" >/dev/null \
     || die 'Twilio returned incomplete number settings; no webhook was changed.'
-  unexpected="$(jq -r --arg sms "$sms_url" --arg voice "$voice_url" '
+  unexpected="$(jq -r --arg sms "$sms_url" --arg voice "$voice_url" \
+      --arg legacy_sms "$legacy_sms_url" --arg legacy_voice "$legacy_voice_url" '
     [
-      (if (.smsUrl // "") != "" and .smsUrl != $sms then "SMS URL" else empty end),
-      (if (.voiceUrl // "") != "" and .voiceUrl != $voice then "Voice URL" else empty end),
+      (if (.smsUrl // "") != "" and .smsUrl != $sms and .smsUrl != $legacy_sms then "SMS URL" else empty end),
+      (if (.voiceUrl // "") != "" and .voiceUrl != $voice and .voiceUrl != $legacy_voice then "Voice URL" else empty end),
       (if (.smsApplicationSid // "") != "" then "SMS TwiML app" else empty end),
       (if (.voiceApplicationSid // "") != "" then "Voice TwiML app" else empty end),
       (if (.trunkSid // "") != "" then "SIP trunk" else empty end),

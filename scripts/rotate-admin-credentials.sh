@@ -12,7 +12,7 @@ for command in az jq python3 node curl cmp; do require "$command"; done
 
 EXPECTED_SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
 RESOURCE_GROUP='rg-twilio-comics'
-WEB_APP='twilio-comics-v2'
+WEB_APP='twilio-comics'
 WEB_IDENTITY="/subscriptions/$EXPECTED_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-twilio-comics-v2-web"
 VAULT='kv-twilio-comics-1a1d98'
 VAULT_ID="/subscriptions/$EXPECTED_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.KeyVault/vaults/$VAULT"
@@ -78,7 +78,7 @@ old_non_admin_env="$(jq -cS '
     | sort_by(.name)
 ' <<< "$app_json")"
 fqdn="$(jq -r '.properties.configuration.ingress.fqdn // ""' <<< "$app_json")"
-[[ "$fqdn" == twilio-comics-v2.*.azurecontainerapps.io ]] \
+[[ "$fqdn" == 'twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io' ]] \
   || die 'The Container App has an unexpected public hostname. No credentials changed.'
 
 umask 077

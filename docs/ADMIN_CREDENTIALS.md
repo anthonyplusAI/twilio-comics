@@ -1,6 +1,6 @@
 # Change the admin login
 
-Sign in at [Twilio Comics Admin](https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login), open **Settings**, and use **Change admin login** to update the shared operator password login. Enter the current password, choose a new username, and enter the new password twice. This form also requires the current password if you signed in with Google. Saving signs out your current session; sign in again with the new shared credentials or your verified Twilio Workspace Google account.
+Sign in at [Twilio Comics Admin](https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io/admin/login), open **Settings**, and use **Change admin login** to update the shared operator password login. Enter the current password, choose a new username, and enter the new password twice. This form also requires the current password if you signed in with Google. Saving signs out your current session; sign in again with the new shared credentials or your verified Twilio Workspace Google account.
 
 The username must contain 3–64 letters, numbers, dots, underscores, or hyphens. The new password can be 1–1024 characters, including a single symbol. It cannot be blank, consist only of whitespace, contain control characters, or match the current password. Save the new login in a password manager. Never send a password through chat or put one in a Git commit. Routine changes require no Terminal command, Azure CLI login, or deployment.
 

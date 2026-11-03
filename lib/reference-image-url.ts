@@ -1,9 +1,10 @@
 import { BlobServiceClient } from "@azure/storage-blob";
 import { isValidMediaToken } from "@/lib/blob-storage";
+import { canonicalizeLegacyMediaUrl } from "@/lib/legacy-media-url";
 
 /** Keep browser admission and image fetching on the same reference allowlist. */
-export function isAllowedReferenceUrl(url: URL): boolean {
-  if (url.username || url.password) return false;
+export function allowedReferenceFetchUrl(url: URL): URL | null {
+  if (url.username || url.password) return null;
 
   const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING?.trim();
   const configuredEndpoint = process.env.AZURE_STORAGE_BLOB_ENDPOINT?.trim();
@@ -16,17 +17,23 @@ export function isAllowedReferenceUrl(url: URL): boolean {
   if (blobEndpoint && container) {
     const containerPath = `${blobEndpoint.pathname.replace(/\/+$/, "")}/${container}/`;
     if (url.origin === blobEndpoint.origin && url.pathname.startsWith(containerPath)) {
-      return true;
+      return url;
     }
   }
 
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
-  if (!publicBaseUrl) return false;
+  if (!publicBaseUrl) return null;
   const mediaUrl = new URL(`${publicBaseUrl.replace(/\/+$/, "")}/api/media`);
-  if (url.origin !== mediaUrl.origin || url.pathname !== mediaUrl.pathname) return false;
+  const currentMediaUrl = url.origin === mediaUrl.origin && url.pathname === mediaUrl.pathname;
+  const legacyMediaUrl = canonicalizeLegacyMediaUrl(url, mediaUrl);
+  if (!currentMediaUrl && !legacyMediaUrl) return null;
   const key = url.searchParams.get("key");
   const token = url.searchParams.get("token");
-  return Boolean(key && token && isValidMediaToken(key, token));
+  return key && token && isValidMediaToken(key, token) ? legacyMediaUrl ?? url : null;
+}
+
+export function isAllowedReferenceUrl(url: URL): boolean {
+  return allowedReferenceFetchUrl(url) !== null;
 }
 
 export function isAllowedReferenceImageUrl(value: string): boolean {

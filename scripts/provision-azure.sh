@@ -15,24 +15,32 @@ for command in az gh git jq; do require "$command"; done
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-twilio-comics}"
 LOCATION="${LOCATION:-eastus2}"
 LOG_ANALYTICS_WORKSPACE="${LOG_ANALYTICS_WORKSPACE:-law-twilio-comics}"
-ACA_ENVIRONMENT="${ACA_ENVIRONMENT:-cae-twilio-comics}"
+# The unversioned public app runs in the existing private-network environment.
+# Its Jobs and managed identities retain their historical Azure resource names.
+ACA_ENVIRONMENT="${ACA_ENVIRONMENT:-cae-twilio-comics-v2}"
 ACA_NAME="${ACA_NAME:-twilio-comics}"
-ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation}"
-ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery}"
+ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation-v2}"
+ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery-v2}"
 GENERATION_JOB_POLLING_INTERVAL=5
 # The migration Job is created later by provision-postgres-roles.sh. A second
 # foundation run gives the deployment principal access once that Job exists.
-ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-}"
-if [[ -z "$ACA_MIGRATION_JOB_NAME" && "$ACA_NAME" == *-v2 ]]; then
-  ACA_MIGRATION_JOB_NAME="${ACA_NAME%-v2}-migrate-v2"
-fi
+ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-twilio-comics-migrate-v2}"
 BLOB_CONTAINER="${BLOB_CONTAINER:-comics}"
 QUEUE_NAME="${QUEUE_NAME:-comic-generation}"
 POISON_QUEUE_NAME="${POISON_QUEUE_NAME:-comic-generation-poison}"
-WEB_IDENTITY_NAME="${WEB_IDENTITY_NAME:-id-${ACA_NAME}-web}"
-WORKER_IDENTITY_NAME="${WORKER_IDENTITY_NAME:-id-${ACA_NAME}-worker}"
-PULL_IDENTITY_NAME="${PULL_IDENTITY_NAME:-id-${ACA_NAME}-acr-pull}"
-DEPLOY_APP_NAME="${DEPLOY_APP_NAME:-${ACA_NAME}-gha-deploy}"
+WEB_IDENTITY_NAME="${WEB_IDENTITY_NAME:-id-twilio-comics-v2-web}"
+WORKER_IDENTITY_NAME="${WORKER_IDENTITY_NAME:-id-twilio-comics-v2-worker}"
+PULL_IDENTITY_NAME="${PULL_IDENTITY_NAME:-id-twilio-comics-v2-acr-pull}"
+DEPLOY_APP_NAME="${DEPLOY_APP_NAME:-twilio-comics-v2-gha-deploy}"
+# The retired sample environment, Jobs, and identities must never be rebuilt.
+[[ "$ACA_ENVIRONMENT" != cae-twilio-comics
+  && "$ACA_NAME" != twilio-comics-v2
+  && "$ACA_JOB_NAME" != twilio-comics-generation
+  && "$ACA_RECOVERY_JOB_NAME" != twilio-comics-recovery
+  && "$WEB_IDENTITY_NAME" != id-twilio-comics-web
+  && "$WORKER_IDENTITY_NAME" != id-twilio-comics-worker
+  && "$PULL_IDENTITY_NAME" != id-twilio-comics-acr-pull ]] \
+  || die 'The V1 sample resources are retired and the V2 web name is reserved for redirects; use the unversioned app in the private environment.'
 GITHUB_ENVIRONMENT=production # Must match both Azure-login jobs in deploy.yml.
 # The ASP.NET sample serves HTTP on 8080 behind internal ingress. The release
 # workflow publishes ingress only after migrations and the real image are ready.
@@ -84,6 +92,16 @@ if ! az group show --name "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --tags "${TAGS[@]}" --output none
 fi
 RESOURCE_GROUP_ID="$(az group show --name "$RESOURCE_GROUP" --query id --output tsv)"
+EXPECTED_ENVIRONMENT_ID="$RESOURCE_GROUP_ID/providers/Microsoft.App/managedEnvironments/$ACA_ENVIRONMENT"
+
+require_expected_environment() {
+  local kind="$1" name="$2" workload_json="$3"
+  jq -e --arg expected "$EXPECTED_ENVIRONMENT_ID" '
+    ((.properties.managedEnvironmentId // .properties.environmentId // "") | ascii_downcase)
+      == ($expected | ascii_downcase)
+  ' <<< "$workload_json" >/dev/null \
+    || die "$kind '$name' is in a different Container Apps environment; refusing to adopt it."
+}
 
 if ! az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az acr create --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" \
@@ -93,6 +111,8 @@ ACR_ID="$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --qu
 ACR_SERVER="$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query loginServer --output tsv)"
 
 if ! az containerapp env show --name "$ACA_ENVIRONMENT" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
+  [[ "$ACA_ENVIRONMENT" != cae-twilio-comics-v2 ]] \
+    || die 'The private Container Apps environment is missing. Run provision-private-platform.sh before provisioning workloads.'
   # ACA would otherwise auto-create an untagged workspace, which tenant policy rejects.
   if ! az monitor log-analytics workspace show --name "$LOG_ANALYTICS_WORKSPACE" \
       --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
@@ -342,6 +362,7 @@ else
   ' <<< "$existing_app" >/dev/null; then
     die "Existing Container App '$ACA_NAME' exposes the sample placeholder. Make its ingress internal and scale it to zero before rerunning, or choose a new ACA_NAME."
   fi
+  require_expected_environment 'Container App' "$ACA_NAME" "$existing_app"
 fi
 ensure_workload_identity app "$ACA_NAME" "$WEB_ID"
 ensure_workload_identity app "$ACA_NAME" "$PULL_ID"
@@ -370,6 +391,7 @@ else
   jq -e '.properties.configuration.triggerType == "Event"' \
     <<< "$existing_generation_job" >/dev/null \
     || die "Existing generation Job '$ACA_JOB_NAME' is not event-triggered. Inspect its configuration before rerunning."
+  require_expected_environment 'Generation Job' "$ACA_JOB_NAME" "$existing_generation_job"
   current_polling_interval="$(jq -r \
     '.properties.configuration.eventTriggerConfig.scale.pollingInterval // empty' \
     <<< "$existing_generation_job")"
@@ -399,6 +421,10 @@ if ! az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "
     --command pnpm --args start:worker \
     --mi-user-assigned "$WORKER_ID" "$PULL_ID" --env-vars "${RECOVERY_ENV[@]}" \
     --tags "${TAGS[@]}" --output none
+else
+  existing_recovery_job="$(az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" --output json)"
+  require_expected_environment 'Recovery Job' "$ACA_RECOVERY_JOB_NAME" "$existing_recovery_job"
 fi
 ensure_workload_identity job "$ACA_RECOVERY_JOB_NAME" "$WORKER_ID"
 ensure_workload_identity job "$ACA_RECOVERY_JOB_NAME" "$PULL_ID"

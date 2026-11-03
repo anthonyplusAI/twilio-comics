@@ -15,6 +15,7 @@ vi.mock("openai", () => {
 
 import { generateComicImage, IMAGE_SIZE } from "@/lib/image-generation";
 import { getBlobPublicUrl } from "@/lib/blob-storage";
+import { isAllowedReferenceImageUrl } from "@/lib/reference-image-url";
 
 const B64 = Buffer.from("fake-png-bytes").toString("base64");
 
@@ -102,6 +103,46 @@ describe("generateComicImage", () => {
     await generateComicImage({ apiKey: "k", prompt: "hero", referenceImageUrls: [referenceUrl] });
     expect(editMock).toHaveBeenCalledOnce();
     expect(vi.mocked(fetch).mock.calls[0][0].toString()).toBe(referenceUrl);
+  });
+
+  it("reuses a signed V2 media URL through the current app without following a redirect", async () => {
+    const currentOrigin = "https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    const legacyOrigin = "https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    vi.stubEnv("PUBLIC_BASE_URL", currentOrigin);
+    const currentUrl = getBlobPublicUrl("references/user-1/face.png");
+    const legacyUrl = currentUrl.replace(currentOrigin, legacyOrigin);
+
+    expect(isAllowedReferenceImageUrl(legacyUrl)).toBe(true);
+    await generateComicImage({ apiKey: "k", prompt: "hero", referenceImageUrls: [legacyUrl] });
+
+    expect(editMock).toHaveBeenCalledOnce();
+    expect(vi.mocked(fetch).mock.calls[0][0].toString()).toBe(currentUrl);
+    expect(vi.mocked(fetch).mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("rejects unsigned, tampered, and lookalike V2 media URLs", async () => {
+    const currentOrigin = "https://twilio-comics.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    const legacyOrigin = "https://twilio-comics-v2.kindriver-a0456aa8.eastus2.azurecontainerapps.io";
+    vi.stubEnv("PUBLIC_BASE_URL", currentOrigin);
+    const signed = getBlobPublicUrl("references/user-1/face.png").replace(currentOrigin, legacyOrigin);
+    const tampered = new URL(signed);
+    tampered.searchParams.set("key", "references/another-user/face.png");
+    for (const url of [
+      `${legacyOrigin}/api/media?key=references/user-1/face.png`,
+      tampered.toString(),
+      signed.replace(legacyOrigin, `${legacyOrigin}.evil.example`),
+      signed.replace("/api/media?", "/api/other?"),
+      signed.replace("https://", "http://"),
+      signed.replace("https://", "https://user:pass@"),
+      `${signed}&token=${"a".repeat(64)}`,
+      `${signed}&extra=1`,
+      `${signed}#fragment`,
+    ]) {
+      expect(isAllowedReferenceImageUrl(url)).toBe(false);
+      await expect(generateComicImage({ apiKey: "k", prompt: "hero", referenceImageUrls: [url] }))
+        .rejects.toThrow(/reference image/i);
+    }
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("rejects other hosts, containers, and protocol downgrades before fetching", async () => {

@@ -19,7 +19,7 @@ EXPECTED_SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
 
 RESOURCE_GROUP='rg-twilio-comics'
 ACA_ENVIRONMENT='cae-twilio-comics-v2'
-WEB_APP='twilio-comics-v2'
+WEB_APP='twilio-comics'
 GENERATION_JOB='twilio-comics-generation-v2'
 RECOVERY_JOB='twilio-comics-recovery-v2'
 WEB_IDENTITY='id-twilio-comics-v2-web'
@@ -344,7 +344,7 @@ check_existing_value() {
   fi
 }
 
-WEB_JSON="$(workload_json app "$WEB_APP")" || die "V2 web app '$WEB_APP' is missing."
+WEB_JSON="$(workload_json app "$WEB_APP")" || die "Public web app '$WEB_APP' is missing."
 GENERATION_JSON="$(workload_json job "$GENERATION_JOB")" || die "V2 generation Job '$GENERATION_JOB' is missing."
 RECOVERY_JSON="$(workload_json job "$RECOVERY_JOB")" || die "V2 recovery Job '$RECOVERY_JOB' is missing."
 validate_workload app "$WEB_APP" "$WEB_ID" "$WEB_JSON"

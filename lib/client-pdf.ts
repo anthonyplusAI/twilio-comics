@@ -1,3 +1,5 @@
+import { canonicalizeLegacyMediaUrl } from "@/lib/legacy-media-url";
+
 const DEFAULT_LIMITS = {
   maxPages: 24,
   maxImageBytes: 8 * 1024 * 1024,
@@ -57,15 +59,26 @@ function imageFormat(bytes: Uint8Array): "PNG" | "JPEG" | null {
   return null;
 }
 
+function mediaDownloadUrl(url: string, siteOrigin: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  return canonicalizeLegacyMediaUrl(parsed, new URL("/api/media", siteOrigin))?.toString() ?? url;
+}
+
 async function readImage(
   url: string,
+  siteOrigin: string,
   page: number,
   byteLimit: number,
   limitError: string,
 ): Promise<{ bytes: Uint8Array; format: "PNG" | "JPEG" }> {
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetch(mediaDownloadUrl(url, siteOrigin), {
       cache: "no-store",
       credentials: "same-origin",
       referrerPolicy: "no-referrer",
@@ -154,6 +167,7 @@ export async function buildComicPdf({
     const isTotalLimit = remainingBytes < limits.maxImageBytes;
     const { bytes, format } = await readImage(
       images[index],
+      site.origin,
       page,
       Math.min(limits.maxImageBytes, remainingBytes),
       isTotalLimit

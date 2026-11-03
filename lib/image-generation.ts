@@ -1,5 +1,5 @@
 import OpenAI, { toFile } from "openai";
-import { isAllowedReferenceUrl } from "@/lib/reference-image-url";
+import { allowedReferenceFetchUrl } from "@/lib/reference-image-url";
 
 export const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 export const IMAGE_SIZE = "1024x1536"; // portrait 2:3 comic page
@@ -13,10 +13,11 @@ export interface GenerateComicImageArgs {
 
 async function urlToFile(url: string, index: number) {
   const parsedUrl = new URL(url);
-  if (!isAllowedReferenceUrl(parsedUrl)) {
+  const fetchUrl = allowedReferenceFetchUrl(parsedUrl);
+  if (!fetchUrl) {
     throw new Error("Reference image must be a configured Azure Blob or signed media URL");
   }
-  const res = await fetch(parsedUrl, {
+  const res = await fetch(fetchUrl, {
     signal: AbortSignal.timeout(30_000),
     redirect: "manual",
   });

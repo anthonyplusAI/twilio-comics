@@ -46,6 +46,27 @@ assert_subject 'git@github.com:current-owner/twilio-comics.git' 'current-owner/t
 assert_subject 'https://github.com/new-owner/twilio-comics.git' 'new-owner/twilio-comics'
 assert_subject 'ssh://git@github.com/third-owner/twilio-comics.git' 'third-owner/twilio-comics'
 
+# A mistaken rerun must not recreate any resource from the retired V1 sample.
+for obsolete in \
+    'ACA_ENVIRONMENT=cae-twilio-comics' \
+    'ACA_NAME=twilio-comics-v2' \
+    'ACA_JOB_NAME=twilio-comics-generation' \
+    'ACA_RECOVERY_JOB_NAME=twilio-comics-recovery' \
+    'WEB_IDENTITY_NAME=id-twilio-comics-web' \
+    'WORKER_IDENTITY_NAME=id-twilio-comics-worker' \
+    'PULL_IDENTITY_NAME=id-twilio-comics-acr-pull'; do
+  set +e
+  output="$(env PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+    ACR_NAME=testacr STORAGE_ACCOUNT=teststorage "$obsolete" \
+    bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+  status=$?
+  set -e
+  [[ "$status" == 1 && "$output" == *'V1 sample resources are retired'* ]] || {
+    printf '%s\n' "$output" >&2
+    exit 1
+  }
+done
+
 # Reuse mocked foundation resources and stop at each Job's create call. This
 # verifies the Azure CLI requests without touching Azure.
 cat > "$TEST_ROOT/bin/az" <<'AZ_RECOVERY'
@@ -62,8 +83,12 @@ after() {
 }
 workload_json() {
   local id="$1" identity="$2" client="$3"
+  local environment_id='/resource-group/providers/Microsoft.App/managedEnvironments/cae-twilio-comics-v2'
+  if [[ "${AZURE_TEST_WRONG_APP_ENV:-}" == 1 && "$id" == *'/containerApps/'* ]]; then
+    environment_id='/resource-group/providers/Microsoft.App/managedEnvironments/cae-twilio-comics'
+  fi
   cat <<EOF
-{"id":"$id","identity":{"userAssignedIdentities":{"$identity":{},"/identity/pull":{}}},"properties":{"configuration":{"ingress":{"external":${AZURE_TEST_INGRESS_EXTERNAL:-true},"targetPort":${AZURE_TEST_INGRESS_PORT:-8080},"transport":"auto"},"registries":[{"server":"testacr.azurecr.io","identity":"/identity/pull"}]},"template":{"containers":[{"image":"${AZURE_TEST_APP_IMAGE:-testacr.azurecr.io/twilio-comics@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}","env":[{"name":"AZURE_CLIENT_ID","value":"$client"},{"name":"AZURE_STORAGE_BLOB_ENDPOINT","value":"https://teststorage.blob.core.windows.net"},{"name":"AZURE_STORAGE_QUEUE_ENDPOINT","value":"https://teststorage.queue.core.windows.net"},{"name":"AZURE_STORAGE_CONTAINER_NAME","value":"comics"},{"name":"AZURE_STORAGE_QUEUE_NAME","value":"comic-generation"},{"name":"AZURE_STORAGE_POISON_QUEUE_NAME","value":"comic-generation-poison"}]}]}}}
+{"id":"$id","identity":{"userAssignedIdentities":{"$identity":{},"/identity/pull":{}}},"properties":{"managedEnvironmentId":"$environment_id","environmentId":"$environment_id","configuration":{"ingress":{"external":${AZURE_TEST_INGRESS_EXTERNAL:-true},"targetPort":${AZURE_TEST_INGRESS_PORT:-8080},"transport":"auto"},"registries":[{"server":"testacr.azurecr.io","identity":"/identity/pull"}]},"template":{"containers":[{"image":"${AZURE_TEST_APP_IMAGE:-testacr.azurecr.io/twilio-comics@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}","env":[{"name":"AZURE_CLIENT_ID","value":"$client"},{"name":"AZURE_STORAGE_BLOB_ENDPOINT","value":"https://teststorage.blob.core.windows.net"},{"name":"AZURE_STORAGE_QUEUE_ENDPOINT","value":"https://teststorage.queue.core.windows.net"},{"name":"AZURE_STORAGE_CONTAINER_NAME","value":"comics"},{"name":"AZURE_STORAGE_QUEUE_NAME","value":"comic-generation"},{"name":"AZURE_STORAGE_POISON_QUEUE_NAME","value":"comic-generation-poison"}]}]}}}
 EOF
 }
 
@@ -102,6 +127,7 @@ case "$1 $2 ${3:-}" in
     esac
     exit 0 ;;
   'containerapp env show')
+    [[ "${AZURE_TEST_MISSING_ENV:-}" != 1 ]] || exit 1
     if [[ "${*}" == *'--query properties.provisioningState'* ]]; then
       if [[ "${AZURE_TEST_ENV_READ_FAIL_ONCE:-}" == 1 && ! -e "${AZURE_TEST_ENV_READ_FILE:-/dev/null}" ]]; then
         : > "$AZURE_TEST_ENV_READ_FILE"
@@ -187,8 +213,8 @@ case "$1 $2 ${3:-}" in
     exit 0 ;;
   'containerapp job show')
     name="$(after --name "$@")"
-    [[ "$name" == twilio-comics-generation && "${AZURE_TEST_MISSING_EVENT_JOB:-}" == 1 ]] && exit 1
-    [[ "$name" == twilio-comics-recovery && "${AZURE_TEST_ALL_JOBS_EXIST:-}" != 1 ]] && exit 1
+    [[ "$name" == twilio-comics-generation-v2 && "${AZURE_TEST_MISSING_EVENT_JOB:-}" == 1 ]] && exit 1
+    [[ "$name" == twilio-comics-recovery-v2 && "${AZURE_TEST_MISSING_RECOVERY_JOB:-}" == 1 ]] && exit 1
     [[ "$name" == twilio-comics-migrate-v2 && "${AZURE_TEST_MIGRATION_EXISTS:-}" != 1 ]] && exit 1
     [[ "${*}" == *'--query id'* ]] && printf '/resource-group/providers/Microsoft.App/jobs/%s\n' "$name"
     if [[ "${*}" == *'--output json'* ]]; then
@@ -216,6 +242,18 @@ chmod +x "$TEST_ROOT/bin/az"
 
 AZURE_TEST_LOG="$TEST_ROOT/recovery-create-args"
 export AZURE_TEST_LOG
+# The private environment must be provisioned with its network first.
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_MISSING_ENV=1 bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'private Container Apps environment is missing'* ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
@@ -224,7 +262,7 @@ status=$?
 set -e
 [[ "$status" == 77 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_LOG"; }
-[[ "$(arg_after --name)" == twilio-comics-generation ]]
+[[ "$(arg_after --name)" == twilio-comics-generation-v2 ]]
 [[ "$(arg_after --trigger-type)" == Event ]]
 [[ "$(arg_after --polling-interval)" == 5 ]]
 [[ "$(arg_after --scale-rule-type)" == azure-queue ]]
@@ -232,12 +270,14 @@ arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_MISSING_RECOVERY_JOB=1 \
   bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
 status=$?
 set -e
 [[ "$status" == 77 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 
-[[ "$(arg_after --name)" == twilio-comics-recovery ]]
+[[ "$(arg_after --name)" == twilio-comics-recovery-v2 ]]
+[[ "$(arg_after --environment)" == cae-twilio-comics-v2 ]]
 [[ "$(arg_after --trigger-type)" == Schedule ]]
 [[ "$(arg_after --cron-expression)" == '0 0 1 1 *' ]] || {
   printf 'Recovery placeholder must remain dormant until first deploy.\n' >&2
@@ -309,11 +349,25 @@ set -e
 [[ "$output" == *"must have HTTP ingress on port 8080"* ]] \
   || { printf '%s\n' "$output" >&2; exit 1; }
 
+# A same-named app in the retired environment must not be adopted as the
+# production app, even if it has a real image and valid ingress.
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_WRONG_APP_ENV=1 bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'different Container Apps environment'* ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
 # Internal ingress is valid for an existing app and remains private on rerun.
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  AZURE_TEST_INGRESS_EXTERNAL=false bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+  AZURE_TEST_INGRESS_EXTERNAL=false AZURE_TEST_MISSING_RECOVERY_JOB=1 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
 status=$?
 set -e
 [[ "$status" == 77 ]] || { printf '%s\n' "$output" >&2; exit 1; }
@@ -342,8 +396,8 @@ set -e
 [[ "$output" == *"az provider register --namespace Microsoft.App --wait"* ]] \
   || { printf '%s\n' "$output" >&2; exit 1; }
 
-# Complete a V2 foundation run with scoped deployment grants. The migration
-# Job does not exist yet, so it receives no assignment on this run.
+# Complete the unversioned web foundation with its private V2 dependencies.
+# The migration Job does not exist yet, so it receives no assignment here.
 cat > "$TEST_ROOT/bin/gh" <<'GH_FULL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -462,7 +516,7 @@ export AZURE_TEST_ACTION_LOG AZURE_TEST_FEDERATED_LOG AZURE_TEST_GH_LOG AZURE_TE
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_LEGACY_ASSIGNMENT=1 AZURE_DEPLOY_RBAC_POLL_SECONDS=0 \
@@ -477,16 +531,13 @@ set -e
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
-  ACA_JOB_NAME=twilio-comics-generation-v2 \
-  ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_DEPLOY_RBAC_POLL_SECONDS=0 \
   bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
 status=$?
 set -e
 [[ "$status" == 0 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /acr --role AcrPush' "$AZURE_TEST_ACTION_LOG"
-grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/containerApps/twilio-comics-v2 --role Container Apps Contributor' "$AZURE_TEST_ACTION_LOG"
+grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/containerApps/twilio-comics --role Container Apps Contributor' "$AZURE_TEST_ACTION_LOG"
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/jobs/twilio-comics-generation-v2 --role Container Apps Jobs Contributor' "$AZURE_TEST_ACTION_LOG"
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/jobs/twilio-comics-recovery-v2 --role Container Apps Jobs Contributor' "$AZURE_TEST_ACTION_LOG"
 for forbidden in 'role assignment delete' ' --scope /resource-group --role Contributor' 'twilio-comics-migrate-v2 --role'; do
@@ -507,7 +558,7 @@ grep -Fq 'api POST repos/third-owner/twilio-comics/environments/production/deplo
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -529,7 +580,7 @@ fi
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -554,7 +605,7 @@ printf '15\n' > "$AZURE_TEST_EVENT_POLLING_FILE"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
@@ -573,7 +624,7 @@ set -e
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
@@ -591,7 +642,7 @@ printf '15\n' > "$AZURE_TEST_EVENT_POLLING_FILE"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_EVENT_POLLING_FILE="$AZURE_TEST_EVENT_POLLING_FILE" \
@@ -613,7 +664,7 @@ id_subject='repo:third-owner@26190505/twilio-comics@1286817910:environment:produ
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -635,7 +686,7 @@ set -e
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -653,7 +704,7 @@ replacement_subject='repo:third-owner@99999999/twilio-comics@88888888:environmen
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -674,7 +725,7 @@ rm -rf "$AZURE_TEST_GH_STATE_DIR"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -698,7 +749,7 @@ rm -rf "$AZURE_TEST_GH_STATE_DIR"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -720,7 +771,7 @@ rm -rf "$AZURE_TEST_GH_STATE_DIR"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
@@ -739,7 +790,7 @@ rm -rf "$AZURE_TEST_GH_STATE_DIR"
 set +e
 output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
   ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
-  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics-v2 \
+  ACA_ENVIRONMENT=cae-twilio-comics-v2 ACA_NAME=twilio-comics \
   ACA_JOB_NAME=twilio-comics-generation-v2 \
   ACA_RECOVERY_JOB_NAME=twilio-comics-recovery-v2 \
   AZURE_TEST_MIGRATION_EXISTS=1 AZURE_TEST_DEPLOY_ROLE_COUNT=1 \
