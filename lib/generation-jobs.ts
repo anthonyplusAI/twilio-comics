@@ -4,9 +4,7 @@ import { recordActivityEvent } from "@/lib/activity-events";
 import { db } from "@/lib/db";
 import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { sendGenerationJob } from "@/lib/generation-queue";
-import { releaseFreeTierQuota, reserveFreeTierQuota } from "@/lib/quota";
-import { DAILY_GENERATION_CAPACITY_REASON } from "@/lib/generation-policy";
-import { reserveDailyGenerationCapacity } from "@/lib/generation-capacity";
+import { reserveFreeTierQuota, type QuotaRemaining } from "@/lib/quota";
 import type { MessagingChannel } from "@/lib/channel-identities";
 
 export interface SubmitGenerationJobInput {
@@ -81,7 +79,7 @@ export async function getGenerationJob(
 
 export async function submitGenerationJob(
   input: SubmitGenerationJobInput,
-): Promise<{ job: GenerationJob; accepted: boolean; remaining: number }> {
+): Promise<{ job: GenerationJob; accepted: boolean; remaining: QuotaRemaining }> {
   const jobId = randomUUID();
   const publisherId = randomUUID();
   const quotaClaimKey = `generation-job:${jobId}`;
@@ -188,28 +186,17 @@ export async function submitGenerationJob(
     job = retryable;
   }
 
-  // The user reservation, app-wide admission, and terminal rejection share a
-  // transaction. A capacity denial releases the user's weekly slot before the
-  // transaction commits. Any database error rolls all three changes back.
+  // The user's quota reservation and job state transition share a transaction.
+  // Any database error rolls both changes back.
   const admission = await db.transaction(async (tx) => {
     const reservation = await reserveFreeTierQuota(job.userId, job.quotaClaimKey, tx);
-    let rejectionReason: "free_tier_quota" | typeof DAILY_GENERATION_CAPACITY_REASON | null = null;
-    if (!reservation.allowed) {
-      rejectionReason = "free_tier_quota";
-    } else if (!(await reserveDailyGenerationCapacity(job.id, tx))) {
-      if (reservation.status !== "reserved") {
-        throw new Error("Cannot release a consumed quota claim after capacity denial");
-      }
-      await releaseFreeTierQuota(job.quotaClaimKey, tx);
-      rejectionReason = DAILY_GENERATION_CAPACITY_REASON;
-    }
+    const rejectionReason = reservation.allowed ? null : "free_tier_quota";
     if (rejectionReason) {
       const [rejected] = await tx
         .update(generationJobs)
         .set({
           status: "quota_rejected",
-          lastError: rejectionReason === DAILY_GENERATION_CAPACITY_REASON
-            ? DAILY_GENERATION_CAPACITY_REASON : null,
+          lastError: null,
           leaseOwner: null,
           leaseExpiresAt: null,
           updatedAt: new Date(),

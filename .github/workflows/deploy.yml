@@ -139,7 +139,8 @@ jobs:
             --name "$ACA_JOB_NAME" \
             --resource-group "$ACA_RESOURCE_GROUP" \
             --image "$APP_IMAGE" \
-            --set-env-vars "RELEASE_SHA=$GITHUB_SHA"
+            --set-env-vars "RELEASE_SHA=$GITHUB_SHA" \
+            --remove-env-vars DAILY_GENERATION_JOB_LIMIT MESSAGE_AGENT_GLOBAL_DAILY_LIMIT
       - name: Deploy scheduled recovery job
         run: |
           az containerapp job update \
@@ -149,7 +150,8 @@ jobs:
             --command pnpm \
             --args start:worker \
             --cron-expression '*/5 * * * *' \
-            --set-env-vars "RELEASE_SHA=$GITHUB_SHA" 'RECOVERY_MODE=1'
+            --set-env-vars "RELEASE_SHA=$GITHUB_SHA" 'RECOVERY_MODE=1' \
+            --remove-env-vars DAILY_GENERATION_JOB_LIMIT
       - name: Ensure web readiness probe
         run: bash scripts/ensure-azure-readiness-probe.sh
       - name: Deploy web and voice app
@@ -159,6 +161,7 @@ jobs:
             --resource-group "$ACA_RESOURCE_GROUP" \
             --image "$APP_IMAGE" \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" \
+            --remove-env-vars DAILY_GENERATION_JOB_LIMIT VOICE_VERIFY_NUMBER_DAILY_LIMIT CAMERA_VERIFY_GLOBAL_HOURLY_LIMIT CAMERA_VERIFY_GLOBAL_DAILY_LIMIT \
             --termination-grace-period 240 \
             --min-replicas 1 \
             --max-replicas 2

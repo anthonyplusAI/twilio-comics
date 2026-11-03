@@ -941,7 +941,7 @@ describe("ordered inbound messaging processor", () => {
     expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
     expect(conversation.state).toBe("confirming");
     expect(conversation.collected.characterImageUrls).toEqual([cameraPhoto]);
-    expect(sends[0].body).toMatch(/free limit/i);
+    expect(sends[0].body).toMatch(/comic generation limit/i);
   });
 
   it("sends the creating reply even if accepted camera-stage cleanup fails", async () => {

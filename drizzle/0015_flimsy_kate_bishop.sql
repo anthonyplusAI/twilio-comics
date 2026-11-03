@@ -1,0 +1,2 @@
+ALTER TABLE "users" ADD COLUMN "generation_quota_limit" integer;--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_generation_quota_limit_check" CHECK ("users"."generation_quota_limit" BETWEEN -1 AND 10000);

@@ -1,13 +1,17 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-const LIMIT = 3;
+export const DEFAULT_GENERATION_QUOTA_LIMIT = 3;
+export const MAX_GENERATION_QUOTA_OVERRIDE = 10_000;
+export const UNLIMITED_GENERATION_QUOTA_OVERRIDE = -1;
 const WINDOW_DAYS = 7;
+export type QuotaRemaining = number | "unlimited";
 
 interface QuotaRow {
   status: "reserved" | "consumed" | "released" | "rejected";
   used: number | null;
   window_started_at: Date | string | null;
+  generation_limit: number | string;
 }
 
 interface ReservationRow {
@@ -15,11 +19,12 @@ interface ReservationRow {
   status: QuotaRow["status"] | "pending";
   used: number | null;
   window_started_at: Date | string | null;
+  generation_limit: number | string;
 }
 
 export interface QuotaResult {
   allowed: boolean;
-  remaining: number;
+  remaining: QuotaRemaining;
   reset: number | null;
   status: QuotaRow["status"];
 }
@@ -28,7 +33,24 @@ function rowsOf<T>(result: unknown): T[] {
   return (result as { rows?: T[] }).rows ?? (result as T[]);
 }
 
+function effectiveLimit(value: number | string): number {
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) ||
+      limit < UNLIMITED_GENERATION_QUOTA_OVERRIDE ||
+      limit > MAX_GENERATION_QUOTA_OVERRIDE) {
+    throw new Error("Invalid generation quota limit");
+  }
+  return limit;
+}
+
+function remainingFor(limit: number, used: number): QuotaRemaining {
+  return limit === UNLIMITED_GENERATION_QUOTA_OVERRIDE
+    ? "unlimited"
+    : Math.max(0, limit - used);
+}
+
 function resultFromRow(row: QuotaRow): QuotaResult {
+  const limit = effectiveLimit(row.generation_limit);
   const start = row.window_started_at
     ? new Date(row.window_started_at).getTime()
     : null;
@@ -36,30 +58,43 @@ function resultFromRow(row: QuotaRow): QuotaResult {
   const used = active ? Number(row.used ?? 0) : 0;
   return {
     allowed: row.status === "reserved" || row.status === "consumed",
-    remaining: Math.max(0, LIMIT - used),
-    reset: active ? start + WINDOW_DAYS * 86_400_000 : null,
+    remaining: remainingFor(limit, used),
+    reset: active && limit !== UNLIMITED_GENERATION_QUOTA_OVERRIDE
+      ? start + WINDOW_DAYS * 86_400_000 : null,
     status: row.status,
   };
 }
 
 export async function getFreeTierQuota(subject: string, executor: Pick<typeof db, "execute"> = db): Promise<{
-  remaining: number;
+  remaining: QuotaRemaining;
   reset: number | null;
 }> {
   const result = await executor.execute(sql`
-    SELECT used, window_started_at
-    FROM free_tier_quotas
-    WHERE subject = ${subject}
+    SELECT quota.used, quota.window_started_at,
+      COALESCE((
+        SELECT generation_quota_limit FROM users WHERE id = ${subject}
+      ), ${DEFAULT_GENERATION_QUOTA_LIMIT}) AS generation_limit
+    FROM (SELECT 1) AS singleton
+    LEFT JOIN free_tier_quotas AS quota ON quota.subject = ${subject}
   `);
-  const row = rowsOf<{ used: number; window_started_at: Date | string }>(result)[0];
-  if (!row) return { remaining: LIMIT, reset: null };
+  const row = rowsOf<{
+    used: number | null;
+    window_started_at: Date | string | null;
+    generation_limit: number | string;
+  }>(result)[0];
+  if (!row) throw new Error("Failed to read generation quota");
+  const limit = effectiveLimit(row.generation_limit);
+  if (limit === UNLIMITED_GENERATION_QUOTA_OVERRIDE) {
+    return { remaining: "unlimited", reset: null };
+  }
+  if (!row.window_started_at) return { remaining: limit, reset: null };
 
   const start = new Date(row.window_started_at).getTime();
   if (start + WINDOW_DAYS * 86_400_000 <= Date.now()) {
-    return { remaining: LIMIT, reset: null };
+    return { remaining: limit, reset: null };
   }
   return {
-    remaining: Math.max(0, LIMIT - Number(row.used)),
+    remaining: remainingFor(limit, Number(row.used ?? 0)),
     reset: start + WINDOW_DAYS * 86_400_000,
   };
 }
@@ -81,7 +116,14 @@ export async function reserveFreeTierQuota(
   // Lock the existing claim to serialize retries for one idempotency key.
   // The quota upsert and claim finalization share this statement's transaction.
   const result = await executor.execute(sql`
-    WITH locked_claim AS MATERIALIZED (
+    WITH effective_limit AS MATERIALIZED (
+      SELECT COALESCE(generation_quota_limit, ${DEFAULT_GENERATION_QUOTA_LIMIT})
+        AS generation_limit
+      FROM users
+      WHERE id = ${subject}
+      FOR SHARE
+    ),
+    locked_claim AS MATERIALIZED (
       SELECT claim_key, subject, status, window_started_at
       FROM free_tier_quota_claims
       WHERE claim_key = ${claimKey}
@@ -92,8 +134,10 @@ export async function reserveFreeTierQuota(
         (subject, window_started_at, used, updated_at)
       SELECT locked_claim.subject, NOW(), 1, NOW()
       FROM locked_claim
+      CROSS JOIN effective_limit
       WHERE locked_claim.status = 'pending'
         AND locked_claim.subject = ${subject}
+        AND (effective_limit.generation_limit = -1 OR effective_limit.generation_limit > 0)
       ON CONFLICT (subject) DO UPDATE SET
         window_started_at = CASE
           WHEN free_tier_quotas.window_started_at <= NOW() - INTERVAL '7 days'
@@ -107,7 +151,8 @@ export async function reserveFreeTierQuota(
         END,
         updated_at = NOW()
       WHERE free_tier_quotas.window_started_at <= NOW() - INTERVAL '7 days'
-         OR free_tier_quotas.used < ${LIMIT}
+         OR (SELECT generation_limit FROM effective_limit) = -1
+         OR free_tier_quotas.used < (SELECT generation_limit FROM effective_limit)
       RETURNING used, window_started_at
     ),
     finalized_claim AS (
@@ -132,16 +177,20 @@ export async function reserveFreeTierQuota(
       finalized_claim.subject,
       finalized_claim.status,
       quota_result.used,
-      finalized_claim.window_started_at
+      finalized_claim.window_started_at,
+      effective_limit.generation_limit
     FROM finalized_claim
+    CROSS JOIN effective_limit
     LEFT JOIN quota_result ON TRUE
     UNION ALL
     SELECT
       locked_claim.subject,
       locked_claim.status,
       NULL::integer AS used,
-      locked_claim.window_started_at
+      locked_claim.window_started_at,
+      effective_limit.generation_limit
     FROM locked_claim
+    CROSS JOIN effective_limit
     WHERE NOT EXISTS (SELECT 1 FROM finalized_claim)
   `);
   const row = rowsOf<ReservationRow>(result)[0];
@@ -158,6 +207,7 @@ export async function reserveFreeTierQuota(
       status: row.status,
       used: row.used,
       window_started_at: row.window_started_at,
+      generation_limit: row.generation_limit,
     });
   }
 

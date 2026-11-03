@@ -19,7 +19,7 @@ function directoryHref(search: string, page: number): string {
 export default async function AdminUsersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; page?: string }>;
+  searchParams: Promise<{ q?: string; page?: string; quotaError?: string }>;
 }) {
   await requireAdmin();
   const params = await searchParams;
@@ -36,6 +36,10 @@ export default async function AdminUsersPage({
         </div>
         <Link className={styles.backAction} href="/admin"><ArrowLeft size={17} aria-hidden="true" /> Overview</Link>
       </div>
+
+      {params.quotaError === "missing-user" && (
+        <p className={styles.settingsError} role="alert">That participant record no longer exists. Search again to find the current record.</p>
+      )}
 
       <form className={styles.searchForm} action="/admin/users" method="get" role="search">
         <label htmlFor="admin-user-search">Search people</label>

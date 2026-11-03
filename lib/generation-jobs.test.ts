@@ -14,8 +14,6 @@ const h = vi.hoisted(() => ({
   release: vi.fn(),
   recordActivityEvent: vi.fn(),
   beforeSelect: null as null | (() => Promise<void>),
-  capacityUsed: 0,
-  capacityClaims: new Map<string, string>(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -115,8 +113,6 @@ function matches(where: SQL | null): boolean {
 beforeEach(() => {
   h.row = null;
   h.beforeSelect = null;
-  h.capacityUsed = 0;
-  h.capacityClaims.clear();
   h.send.mockReset().mockResolvedValue(undefined);
   h.reserve.mockReset().mockResolvedValue({
     allowed: true,
@@ -126,26 +122,7 @@ beforeEach(() => {
   });
   h.release.mockReset().mockResolvedValue(undefined);
   h.recordActivityEvent.mockReset().mockResolvedValue(undefined);
-  h.execute.mockReset().mockImplementation(async (statement: SQL) => {
-    const query = dialect.sqlToQuery(statement);
-    if (query.sql.includes("WITH budget_day AS")) {
-      return { rows: [{ subject: "system:generation:daily:2026-10-01", used: h.capacityUsed }] };
-    }
-    if (query.sql.includes("SELECT subject, status FROM free_tier_quota_claims")) {
-      const subject = h.capacityClaims.get(String(query.params[0]));
-      return { rows: subject ? [{ subject, status: "reserved" }] : [] };
-    }
-    if (query.sql.includes("INSERT INTO free_tier_quota_claims") &&
-        query.sql.includes("RETURNING claim_key")) {
-      const claimKey = String(query.params[0]);
-      const subject = String(query.params[1]);
-      if (h.capacityClaims.has(claimKey)) return { rows: [] };
-      h.capacityClaims.set(claimKey, subject);
-      h.capacityUsed += 1;
-      return { rows: [{ claim_key: claimKey }] };
-    }
-    return { rows: [] };
-  });
+  h.execute.mockReset().mockResolvedValue({ rows: [] });
   h.transaction.mockReset().mockImplementation(async (callback) => callback({
     execute: h.execute,
     update: h.update,
@@ -257,59 +234,45 @@ describe("submitGenerationJob", () => {
       kind: "generation.rejected",
       status: "quota_rejected",
     }));
-    expect(h.capacityUsed).toBe(0);
+    expect(h.execute).not.toHaveBeenCalled();
     expect(h.release).not.toHaveBeenCalled();
   });
 
-  it("admits a job through a transaction-scoped global UTC-day ledger", async () => {
+  it("reserves a user's weekly quota without writing to a global capacity ledger", async () => {
     const submission = await submitGenerationJob(input);
 
     expect(submission.accepted).toBe(true);
     expect(h.transaction).toHaveBeenCalledOnce();
     const executor = expect.objectContaining({ execute: h.execute, update: h.update });
     expect(h.reserve).toHaveBeenCalledWith("user-1", submission.job.quotaClaimKey, executor);
-    expect(h.capacityUsed).toBe(1);
-    expect(h.capacityClaims.size).toBe(1);
-    const queries = h.execute.mock.calls.map(([statement]) => dialect.sqlToQuery(statement).sql);
-    expect(queries.join("\n")).toMatch(/pg_advisory_xact_lock/);
-    expect(queries.join("\n")).toMatch(/transaction_timestamp\(\)/);
-    expect(queries.join("\n")).toMatch(/claim\.status = 'reserved'/);
-    expect(queries.join("\n")).toMatch(/INSERT INTO free_tier_quota_claims/);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("rejects daily capacity without publishing or consuming a weekly slot", async () => {
-    h.capacityUsed = 25;
+  it("ignores the obsolete daily limit setting when the user's weekly quota allows generation", async () => {
+    vi.stubEnv("DAILY_GENERATION_JOB_LIMIT", "0");
 
     const submission = await submitGenerationJob(input);
 
-    expect(submission).toMatchObject({ accepted: false, job: {
-      status: "quota_rejected",
-      lastError: "daily_generation_capacity",
-    } });
-    expect(h.release).toHaveBeenCalledWith(
-      submission.job.quotaClaimKey,
-      expect.objectContaining({ execute: h.execute, update: h.update }),
-    );
-    expect(h.capacityUsed).toBe(25);
-    expect(h.capacityClaims.size).toBe(0);
-    expect(h.send).not.toHaveBeenCalled();
-    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "generation.rejected",
-      details: expect.objectContaining({ reason: "daily_generation_capacity" }),
-    }));
+    expect(submission).toMatchObject({ accepted: true, job: { status: "queued" } });
+    expect(h.reserve).toHaveBeenCalledOnce();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.release).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("reuses daily admission on a pending retry after an ambiguous queue send", async () => {
-    vi.stubEnv("DAILY_GENERATION_JOB_LIMIT", "1");
+  it("reuses the weekly quota claim on a pending retry after an ambiguous queue send", async () => {
     h.send.mockRejectedValueOnce(new Error("Queue response lost"));
 
     await expect(submitGenerationJob(input)).rejects.toThrow("Queue response lost");
     const retry = await submitGenerationJob(input);
 
     expect(retry.accepted).toBe(true);
-    expect(h.capacityUsed).toBe(1);
-    expect(h.capacityClaims.size).toBe(1);
+    expect(h.reserve.mock.calls.map(([, claimKey]) => claimKey)).toEqual([
+      retry.job.quotaClaimKey,
+      retry.job.quotaClaimKey,
+    ]);
     expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
   it("does not report an unadmitted duplicate as accepted", async () => {
@@ -324,7 +287,7 @@ describe("submitGenerationJob", () => {
     expect(duplicate).toMatchObject({ accepted: false, job: { status: "admitting" } });
     expect(original).toMatchObject({ accepted: true, job: { status: "queued" } });
     expect(h.send).toHaveBeenCalledOnce();
-    expect(h.capacityUsed).toBe(1);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
   it("still queues generation if the optional activity insert fails", async () => {
@@ -489,7 +452,6 @@ describe("submitGenerationJob", () => {
 
     expect(recovered).toBe(1);
     expect(h.send).toHaveBeenCalledOnce();
-    expect(h.capacityUsed).toBe(1);
     expect(h.row?.status).toBe("queued");
   });
 });

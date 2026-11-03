@@ -1,10 +1,19 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { eq } from "drizzle-orm";
 import { ArrowLeft, ArrowRight, ExternalLink } from "lucide-react";
+import { updateUserGenerationQuota } from "@/app/admin/actions";
 import { ActivityList } from "@/components/admin/activity-list";
 import { formatAdminDate, formatAdminDuration } from "@/components/admin/format";
 import { requireAdmin } from "@/lib/admin-access";
 import { getAdminUserHistory, getAdminUserProfile } from "@/lib/admin-analytics";
+import { db } from "@/lib/db";
+import {
+  DEFAULT_GENERATION_QUOTA_LIMIT,
+  MAX_GENERATION_QUOTA_OVERRIDE,
+  UNLIMITED_GENERATION_QUOTA_OVERRIDE,
+} from "@/lib/quota";
+import { freeTierQuotas, users } from "@/lib/schema";
 import styles from "../../../admin.module.css";
 
 export const dynamic = "force-dynamic";
@@ -15,15 +24,33 @@ export default async function AdminUserHistoryPage({
   searchParams,
 }: {
   params: Promise<{ userId: string }>;
-  searchParams: Promise<{ cursor?: string }>;
+  searchParams: Promise<{ cursor?: string; quotaSaved?: string; quotaError?: string }>;
 }) {
   await requireAdmin();
   const { userId } = await params;
   if (!userId || userId.length > 200) notFound();
   const profile = await getAdminUserProfile(userId);
   if (!profile) notFound();
-  const { cursor } = await searchParams;
-  const history = await getAdminUserHistory(userId, profile.addresses, cursor);
+  const pageParams = await searchParams;
+  const [history, quotaSettings, quotaWindows] = await Promise.all([
+    getAdminUserHistory(userId, profile.addresses, pageParams.cursor),
+    db.select({ generationQuotaLimit: users.generationQuotaLimit })
+      .from(users).where(eq(users.id, userId)).limit(1),
+    db.select({ used: freeTierQuotas.used, windowStartedAt: freeTierQuotas.windowStartedAt })
+      .from(freeTierQuotas).where(eq(freeTierQuotas.subject, userId)).limit(1),
+  ]);
+  const quotaSetting = quotaSettings[0];
+  if (!quotaSetting) notFound();
+  const quotaOverride = quotaSetting.generationQuotaLimit;
+  const quotaMode = quotaOverride === null ? "default"
+    : quotaOverride === UNLIMITED_GENERATION_QUOTA_OVERRIDE ? "unlimited" : "custom";
+  const currentLimit = quotaOverride === null ? DEFAULT_GENERATION_QUOTA_LIMIT : quotaOverride;
+  const quotaWindow = quotaWindows[0];
+  const windowEndsAt = quotaWindow
+    ? new Date(quotaWindow.windowStartedAt.getTime() + 7 * 86_400_000)
+    : null;
+  const windowActive = windowEndsAt !== null && windowEndsAt.getTime() > Date.now();
+  const windowUsed = windowActive && quotaWindow ? quotaWindow.used : 0;
   const displayName = profile.identities[0]?.normalizedAddress
     ?? profile.user.name
     ?? profile.user.email
@@ -53,6 +80,69 @@ export default async function AdminUserHistoryPage({
         </div>
       </div>
 
+      <section className={`${styles.settingsPanel} ${styles.quotaPanel}`} id="quota-settings" aria-labelledby="quota-heading">
+        <div className={styles.settingsPanelHeading}>
+          <div>
+            <h2 id="quota-heading">Comic generation allowance</h2>
+            <p>Set this participant&apos;s app-funded generation limit. Changes affect new requests as soon as you save.</p>
+          </div>
+        </div>
+        <div className={styles.quotaPanelBody}>
+          {pageParams.quotaSaved === "1" && (
+            <p className={styles.settingsSuccess} role="status">Generation allowance saved for this participant.</p>
+          )}
+          {pageParams.quotaError === "invalid" && (
+            <p className={styles.settingsError} role="alert">Choose an allowance. Custom limits must be a whole number from 0 to {MAX_GENERATION_QUOTA_OVERRIDE.toLocaleString()}.</p>
+          )}
+          <div className={styles.quotaUsage}>
+            <strong>{quotaOverride === UNLIMITED_GENERATION_QUOTA_OVERRIDE ? "Unlimited" : `${currentLimit.toLocaleString()} per seven days`}</strong>
+            <p>{windowActive
+              ? `${windowUsed.toLocaleString()} used or reserved in the current window. Resets ${formatAdminDate(windowEndsAt)}.`
+              : "No active seven-day window. Usage begins with the next request."}</p>
+            <p>Lowering the allowance below current use pauses new requests until the window resets.</p>
+          </div>
+          <form action={updateUserGenerationQuota} className={styles.quotaForm}>
+            <input type="hidden" name="userId" value={userId} />
+            <fieldset>
+              <legend className={styles.settingsLegend}>Allowance</legend>
+              <div className={styles.quotaChoices}>
+                <label className={styles.quotaChoice}>
+                  <input type="radio" name="quotaMode" value="default" defaultChecked={quotaMode === "default"} required />
+                  <span><strong>Default</strong><small>{DEFAULT_GENERATION_QUOTA_LIMIT} generations every seven days</small></span>
+                </label>
+                <label className={styles.quotaChoice}>
+                  <input type="radio" name="quotaMode" value="unlimited" defaultChecked={quotaMode === "unlimited"} required />
+                  <span><strong>Unlimited</strong><small>No per-player generation limit</small></span>
+                </label>
+                <label className={styles.quotaChoice}>
+                  <input type="radio" name="quotaMode" value="custom" defaultChecked={quotaMode === "custom"} required />
+                  <span><strong>Custom</strong><small>Choose this player&apos;s limit</small></span>
+                </label>
+              </div>
+            </fieldset>
+            <label className={styles.quotaCustomField} htmlFor="generation-quota-custom-limit">
+              <span>Custom generations per seven days</span>
+              <input
+                id="generation-quota-custom-limit"
+                name="customLimit"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                max={MAX_GENERATION_QUOTA_OVERRIDE}
+                step={1}
+                defaultValue={quotaOverride !== null && quotaOverride >= 0 ? quotaOverride : DEFAULT_GENERATION_QUOTA_LIMIT}
+                aria-describedby="generation-quota-custom-hint"
+              />
+              <small id="generation-quota-custom-hint">A custom limit of 0 pauses app-funded generation for this player.</small>
+            </label>
+            <div className={styles.settingsActions}>
+              <button type="submit">Save allowance</button>
+              <p>Phone identities share this setting across text, WhatsApp, and voice. Google Studio accounts have separate records.</p>
+            </div>
+          </form>
+        </div>
+      </section>
+
       <div className={styles.profileGrid}>
         <section className={styles.activityPanel} aria-labelledby="history-heading">
           <div className={styles.panelHeading}>
@@ -63,7 +153,7 @@ export default async function AdminUserHistoryPage({
           </div>
           <ActivityList events={history.items} />
           <nav className={styles.historyPagination} aria-label="Activity history pages">
-            {cursor ? <Link href={`/admin/users/${encodeURIComponent(userId)}`}>Back to newest</Link> : <span />}
+            {pageParams.cursor ? <Link href={`/admin/users/${encodeURIComponent(userId)}`}>Back to newest</Link> : <span />}
             {history.nextCursor ? (
               <Link href={`/admin/users/${encodeURIComponent(userId)}?cursor=${encodeURIComponent(history.nextCursor)}`}>
                 Older events <ArrowRight size={17} aria-hidden="true" />

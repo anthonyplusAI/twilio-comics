@@ -15,18 +15,25 @@ import {
 import { relations, sql } from "drizzle-orm";
 import type { AdapterAccountType } from "next-auth/adapters";
 
-export const users = pgTable("users", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
-  name: text("name"),
-  email: text("email").unique(),
-  emailVerified: timestamp("email_verified", { mode: "date" }),
-  image: text("image"),
-  kind: text("kind").default("oauth").notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    name: text("name"),
+    email: text("email").unique(),
+    emailVerified: timestamp("email_verified", { mode: "date" }),
+    image: text("image"),
+    kind: text("kind").default("oauth").notNull(),
+    generationQuotaLimit: integer("generation_quota_limit"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (user) => [
+    check("users_generation_quota_limit_check", sql`${user.generationQuotaLimit} BETWEEN -1 AND 10000`),
+  ],
+);
 
 export const accounts = pgTable(
   "accounts",

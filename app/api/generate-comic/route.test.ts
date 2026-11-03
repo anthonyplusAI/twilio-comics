@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { PgDialect } from "drizzle-orm/pg-core";
-import type { SQL } from "drizzle-orm";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
 
 const h = vi.hoisted(() => ({
@@ -20,8 +18,6 @@ const h = vi.hoisted(() => ({
   uploadBufferToBlob: vi.fn(),
   transaction: vi.fn(),
   execute: vi.fn(),
-  capacityUsed: 0,
-  capacityClaims: new Map<string, string>(),
 }));
 
 vi.mock("@/auth", () => ({ auth: h.auth }));
@@ -59,8 +55,6 @@ vi.mock("@/lib/db", () => ({ db: { transaction: h.transaction, execute: h.execut
 
 import { POST } from "@/app/api/generate-comic/route";
 import { getBlobPublicUrl } from "@/lib/blob-storage";
-
-const dialect = new PgDialect();
 
 const story = {
   id: "98e67699-ffec-4e68-a52d-e2c28fc21453",
@@ -101,29 +95,8 @@ beforeEach(() => {
   vi.stubEnv("AZURE_STORAGE_CONTAINER_NAME", "comics");
   vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
   vi.stubEnv("MEDIA_SIGNING_SECRET", "test-media-signing-secret");
-  h.capacityUsed = 0;
-  h.capacityClaims.clear();
   h.transaction.mockImplementation(async (callback) => callback({ execute: h.execute }));
-  h.execute.mockImplementation(async (statement: SQL) => {
-    const query = dialect.sqlToQuery(statement);
-    if (query.sql.includes("WITH budget_day AS")) {
-      return { rows: [{ subject: "system:generation:daily:2026-10-01", used: h.capacityUsed }] };
-    }
-    if (query.sql.includes("SELECT subject, status FROM free_tier_quota_claims")) {
-      const subject = h.capacityClaims.get(String(query.params[0]));
-      return { rows: subject ? [{ subject, status: "reserved" }] : [] };
-    }
-    if (query.sql.includes("INSERT INTO free_tier_quota_claims") &&
-        query.sql.includes("RETURNING claim_key")) {
-      const claimKey = String(query.params[0]);
-      const subject = String(query.params[1]);
-      if (h.capacityClaims.has(claimKey)) return { rows: [] };
-      h.capacityClaims.set(claimKey, subject);
-      h.capacityUsed += 1;
-      return { rows: [{ claim_key: claimKey }] };
-    }
-    return { rows: [] };
-  });
+  h.execute.mockReset().mockResolvedValue({ rows: [] });
   h.auth.mockResolvedValue({ user: { id: story.userId } });
   h.reserveFreeTierQuota.mockResolvedValue({ allowed: true, remaining: 2, reset: null, status: "reserved" });
   h.createComicStory.mockResolvedValue({
@@ -186,7 +159,7 @@ describe("POST /api/generate-comic quota after saving", () => {
       expect(response.status).toBe(500);
       expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
       expect(h.consumeFreeTierQuota).not.toHaveBeenCalled();
-      expect(h.capacityUsed).toBe(1);
+      expect(h.execute).not.toHaveBeenCalled();
     } finally {
       logged.mockRestore();
     }
@@ -200,23 +173,21 @@ describe("POST /api/generate-comic quota after saving", () => {
     expect(response.status).toBe(429);
     expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.consumeFreeTierQuota).not.toHaveBeenCalled();
-    expect(h.capacityUsed).toBe(0);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("rejects an app-funded story when the shared daily budget is exhausted", async () => {
-    h.capacityUsed = 25;
+  it("ignores the obsolete daily limit setting for an app-funded story", async () => {
+    vi.stubEnv("DAILY_GENERATION_JOB_LIMIT", "0");
 
     const response = await POST(request({ prompt: "A fox visits Mars" }));
 
-    expect(response.status).toBe(429);
-    expect(await response.json()).toMatchObject({ errorType: "daily_capacity", isRateLimited: true });
-    expect(h.createComicStory).not.toHaveBeenCalled();
-    expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
-    expect(h.capacityUsed).toBe(25);
+    expect(response.status).toBe(200);
+    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.createComicStory).toHaveBeenCalledOnce();
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("uses a caller-owned key without spending the app-funded daily budget", async () => {
-    h.capacityUsed = 25;
+  it("uses a caller-owned key without reserving the app-funded weekly quota", async () => {
     const ownKey = `sk-${"a".repeat(32)}`;
 
     const response = await POST(request({ prompt: "A fox visits Mars", apiKey: ownKey }));
@@ -227,7 +198,7 @@ describe("POST /api/generate-comic quota after saving", () => {
       usesOwnApiKey: true,
     }));
     expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
-    expect(h.capacityUsed).toBe(25);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
   it("does not allow malformed caller-key input to bypass app-funded admission", async () => {
@@ -239,12 +210,12 @@ describe("POST /api/generate-comic quota after saving", () => {
   });
 
   it("counts a submitted copy of the server key as app-funded", async () => {
-    h.capacityUsed = 25;
-
     const response = await POST(request({ prompt: "A fox visits Mars", apiKey: "test-key" }));
 
-    expect(response.status).toBe(429);
-    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.createComicStory).toHaveBeenCalledOnce();
+    expect(h.execute).not.toHaveBeenCalled();
   });
 });
 
@@ -262,7 +233,7 @@ describe("POST /api/generate-comic input validation", () => {
     ["malformed continuation ID", { prompt: "A fox visits Mars", storyId: "not-a-uuid" }],
     ["non-boolean continuation flag", { prompt: "A fox visits Mars", isContinuation: "true" }],
     ["non-string context", { prompt: "A fox visits Mars", previousContext: { text: "previous" } }],
-  ])("rejects %s before spending shared capacity", async (_description, body) => {
+  ])("rejects %s before reserving quota", async (_description, body) => {
     const response = await POST(request(body));
 
     expect(response.status).toBe(400);
@@ -270,15 +241,15 @@ describe("POST /api/generate-comic input validation", () => {
     expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.getStoryById).not.toHaveBeenCalled();
     expect(h.generateComicImage).not.toHaveBeenCalled();
-    expect(h.capacityUsed).toBe(0);
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
   });
 
-  it("rejects malformed JSON before spending shared capacity", async () => {
+  it("rejects malformed JSON before reserving quota", async () => {
     const response = await POST(malformedJsonRequest());
 
     expect(response.status).toBe(400);
     expect(h.transaction).not.toHaveBeenCalled();
-    expect(h.capacityUsed).toBe(0);
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
   });
 
   it("keeps the missing-prompt response for the browser form", async () => {
@@ -297,7 +268,7 @@ describe("POST /api/generate-comic input validation", () => {
     expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
       characterImageUrls: [characterImage],
     }));
-    expect(h.capacityUsed).toBe(1);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 
   it("accepts a signed media reference produced by the browser upload flow", async () => {
@@ -308,6 +279,6 @@ describe("POST /api/generate-comic input validation", () => {
     expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
       characterImageUrls: [characterImage],
     }));
-    expect(h.capacityUsed).toBe(1);
+    expect(h.execute).not.toHaveBeenCalled();
   });
 });
