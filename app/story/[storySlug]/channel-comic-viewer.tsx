@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
+import { GitHubStarLink } from "@/components/github-star-link";
 import { ChannelComicActions } from "./channel-comic-actions";
 import styles from "./channel-comic-viewer.module.css";
 
@@ -42,6 +43,12 @@ export function ChannelComicViewer({
               {pages.length === 0
                 ? "Your comic is on its way"
                 : `${pages.length} ${pages.length === 1 ? "page" : "pages"} to read`}
+            </div>
+            <div className={styles.heroStarRow}>
+              <GitHubStarLink
+                className={styles.heroStar}
+                compactLabel="Star on GitHub"
+              />
             </div>
           </div>
         </section>
@@ -89,9 +96,18 @@ export function ChannelComicViewer({
             <p className={styles.eyebrow}>Your turn</p>
             <h2 id="make-another-title">What happens next?</h2>
           </div>
-          <Link href="/start" className={styles.startButton}>
-            Make your own comic <ArrowUpRight size={20} aria-hidden="true" />
-          </Link>
+          <div className={styles.makeAnotherActions}>
+            {pages.length > 0 && (
+              <GitHubStarLink
+                className={styles.starButton}
+                fullLabel="Star this project on GitHub"
+                compactLabel="Star on GitHub"
+              />
+            )}
+            <Link href="/start" className={styles.startButton}>
+              Make your own comic <ArrowUpRight size={20} aria-hidden="true" />
+            </Link>
+          </div>
         </section>
       </main>
 

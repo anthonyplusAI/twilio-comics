@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { GitHubStarLink } from "@/components/github-star-link";
 import {
   COMIC_START_MESSAGE,
   getMarketingContact,
@@ -98,9 +99,11 @@ export default async function StartPage() {
           <span>Twilio Comics</span>
         </Link>
         <nav className={marketingStyles.headerNav} aria-label="Main navigation">
-          <Link href="/" className={styles.backLink}>
-            <ArrowLeft size={17} aria-hidden="true" /> Home
+          <Link href="/" className={styles.backLink} aria-label="Home">
+            <ArrowLeft size={17} aria-hidden="true" />
+            <span className={marketingStyles.navText}>Home</span>
           </Link>
+          <GitHubStarLink className={marketingStyles.githubStar} />
         </nav>
       </header>
 

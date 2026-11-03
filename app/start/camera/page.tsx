@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import { GitHubStarLink } from "@/components/github-star-link";
 import { getCameraDestination } from "@/lib/browser-photo-access";
 import marketingStyles from "../../marketing.module.css";
 import CameraClient from "./camera-client";
@@ -28,9 +29,11 @@ export default async function CameraPage() {
           <span>Twilio Comics</span>
         </Link>
         <nav className={marketingStyles.headerNav} aria-label="Main navigation">
-          <Link href="/start" className={styles.backLink}>
-            <ArrowLeft size={18} aria-hidden="true" /> Channels
+          <Link href="/start" className={styles.backLink} aria-label="Back to channels">
+            <ArrowLeft size={18} aria-hidden="true" />
+            <span className={marketingStyles.navText}>Channels</span>
           </Link>
+          <GitHubStarLink className={marketingStyles.githubStar} />
         </nav>
       </header>
 

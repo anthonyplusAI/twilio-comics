@@ -1,26 +1,19 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { Key, User, Plus } from "lucide-react";
 
-function GithubIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
-      <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.31.678.921.678 1.856 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
-    </svg>
-  );
-}
 import Link from "next/link";
 import { ApiKeyModal } from "@/components/api-key-modal";
 import { AccountMenu } from "@/components/auth/account-menu";
 import { SignInButton } from "@/components/auth/sign-in-button";
+import { GitHubStarLink } from "@/components/github-star-link";
 import { useApiKey } from "@/hooks/use-api-key";
 
 export function Navbar() {
   const [showApiModal, setShowApiModal] = useState(false);
-  const [stars, setStars] = useState<string>("-");
 
   const { status } = useSession();
   const isLoaded = status !== "loading";
@@ -33,43 +26,17 @@ export function Navbar() {
     setShowApiModal(false);
   };
 
-  useEffect(() => {
-    async function fetchStars() {
-      try {
-        const res = await fetch(
-          "https://api.github.com/repos/anthonyplusAI/twilio-comics",
-          {
-            headers: {
-              Accept: "application/vnd.github+json",
-              "User-Agent": "twilio-comics-app",
-            },
-          }
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        setStars(
-          typeof data.stargazers_count === "number"
-            ? data.stargazers_count.toLocaleString()
-            : "-"
-        );
-      } catch {
-        setStars("-");
-      }
-    }
-    fetchStars();
-  }, []);
-
   const isOnStoriesPage = pathname === "/stories";
 
   if (!isLoaded)
-    return <div className="h-14 sm:h-16 w-full  border-b border-border/50" />;
+    return <div className="h-14 max-[359px]:h-24 sm:h-16 w-full border-b border-border/50" />;
 
   return (
     <>
-      <nav className="w-full h-14 sm:h-16 border-b border-border/50 flex items-center justify-between px-4 sm:px-6 lg:px-8 z-50 bg-background/80 backdrop-blur-md">
+      <nav className="w-full h-14 max-[359px]:h-auto sm:h-16 border-b border-border/50 flex max-[359px]:flex-wrap items-center justify-between max-[359px]:gap-y-2 px-4 sm:px-6 lg:px-8 max-[359px]:py-2 z-50 bg-background/80 backdrop-blur-md">
         <Link
           href="/"
-          className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+          className="flex shrink-0 items-center gap-1 hover:opacity-80 transition-opacity"
         >
           <div className="w-8 h-8 sm:w-10 sm:h-10 flex items-center justify-center">
             <img
@@ -78,12 +45,12 @@ export function Navbar() {
               className="w-full h-full object-contain"
             />
           </div>
-          <span className="text-white font-heading tracking-[0.005em] text-lg sm:text-xl">
+          <span className="whitespace-nowrap text-white font-heading tracking-[0.005em] text-lg sm:text-xl">
             Twilio Comics
           </span>
         </Link>
 
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex shrink-0 items-center gap-2 sm:gap-3 max-[359px]:w-full max-[359px]:justify-between">
           {isSignedIn && (
             <button
               onClick={() => setShowApiModal(true)}
@@ -96,17 +63,10 @@ export function Navbar() {
             </button>
           )}
 
-          <Link
-            href="https://github.com/anthonyplusAI/twilio-comics"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 glass-panel glass-panel-hover transition-all text-xs rounded-md"
-          >
-            <GithubIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span className="text-muted-foreground text-xs sm:text-sm hidden sm:inline">
-              {stars}
-            </span>
-          </Link>
+          <GitHubStarLink
+            compactLabel={isSignedIn ? null : "Star"}
+            className="px-2 sm:px-3 py-1.5 glass-panel glass-panel-hover transition-all text-xs rounded-md text-muted-foreground hover:text-white"
+          />
 
           {!isSignedIn && (
             <SignInButton className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 glass-panel glass-panel-hover transition-all text-xs rounded-md cursor-pointer">

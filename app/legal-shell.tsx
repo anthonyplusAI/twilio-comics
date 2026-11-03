@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { GitHubStarLink } from "@/components/github-star-link";
 import styles from "./marketing.module.css";
 
 export function LegalShell({
@@ -20,7 +21,11 @@ export function LegalShell({
           <span>Twilio Comics</span>
         </Link>
         <nav className={`${styles.headerNav} ${styles.legalNav}`} aria-label="Main navigation">
-          <Link href="/start">How to start</Link>
+          <Link href="/start" aria-label="How to start">
+            <span className={styles.navFull}>How to start</span>
+            <span className={styles.navCompact}>Start</span>
+          </Link>
+          <GitHubStarLink className={styles.githubStar} />
         </nav>
       </header>
 

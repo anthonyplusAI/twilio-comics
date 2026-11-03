@@ -4,6 +4,7 @@ import { savedHttpsShortLink } from "@/lib/channel-story-link";
 import { db } from "@/lib/db";
 import { generationJobs, type GenerationJob } from "@/lib/schema";
 import { getStoryById } from "@/lib/db-actions";
+import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import { sendChannelMessage, type TwilioMessageChannel } from "@/lib/twilio";
 
 export const deliveryStatuses = [
@@ -394,7 +395,7 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
     const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!baseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
     const comicUrl = savedHttpsShortLink(story.dubShortUrl) ?? `${baseUrl}/story/${story.slug}`;
-    const body = `Your comic "${story.title.slice(0, 100)}" is ready:\n${comicUrl}`;
+    const body = `Your comic "${story.title.slice(0, 100)}" is ready:\n${comicUrl}\n\n${GITHUB_STAR_MESSAGE}`;
     const validityPeriod = resultDeliveryValiditySeconds(job);
     if (validityPeriod === null) {
       await suppressExpiredTextFallback(jobId);

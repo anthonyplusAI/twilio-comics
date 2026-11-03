@@ -1017,6 +1017,9 @@ describe("processGenerationJob", () => {
     );
     expect(h.createComicStory).not.toHaveBeenCalled();
     expect(h.sendChannelMessage.mock.calls[0][0].body).toContain("Page 2");
+    expect(h.sendChannelMessage.mock.calls[0][0].body).toContain(
+      "Star Twilio Comics on GitHub: https://github.com/anthonyplusAI/twilio-comics",
+    );
   });
 
   it("distinguishes another page from a new comic in SMS delivery", async () => {
@@ -1025,6 +1028,9 @@ describe("processGenerationJob", () => {
     const body = h.sendChannelMessage.mock.calls[0][0].body as string;
     expect(body).toContain("Reply CONTINUE within 14 days for another page");
     expect(body).toContain("NEW for a new comic");
+    expect(body).toContain(
+      "\n\nStar Twilio Comics on GitHub: https://github.com/anthonyplusAI/twilio-comics",
+    );
   });
 
   it("marks a completed voice conversation without touching a newer draft", async () => {
@@ -1046,7 +1052,9 @@ describe("processGenerationJob", () => {
     expect(result.body).toContain("Call again from this number within 14 days; say CONTINUE for another page");
     expect(result.body).toContain("NEW for a new comic");
     expect(result.body).not.toMatch(/reply CONTINUE/i);
-    expect(result.body.length).toBeLessThanOrEqual(160);
+    expect(result.body).toContain(
+      "Star Twilio Comics on GitHub: https://github.com/anthonyplusAI/twilio-comics",
+    );
   });
 
   it("invites WhatsApp users to reply CONTINUE in their chat", async () => {
@@ -1063,6 +1071,9 @@ describe("processGenerationJob", () => {
     expect(result.channel).toBe("whatsapp");
     expect(result.body).toContain("Reply CONTINUE within 14 days for another page");
     expect(result.body).toContain("NEW for a new comic");
+    expect(result.body).toContain(
+      "Star Twilio Comics on GitHub: https://github.com/anthonyplusAI/twilio-comics",
+    );
   });
 
   it("treats a duplicate queue message during active processing as handled", async () => {

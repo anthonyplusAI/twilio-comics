@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { ArrowUpRight, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { GitHubStarLink } from "@/components/github-star-link";
 import styles from "./marketing.module.css";
 
 // The public QR destination is injected into the Container App at runtime.
@@ -22,6 +23,7 @@ export default function Home() {
           />
           <span>Twilio Comics</span>
         </Link>
+        <GitHubStarLink className={styles.githubStar} />
       </header>
 
       <main>

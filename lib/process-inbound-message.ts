@@ -10,6 +10,7 @@ import {
 import { channelStoryLink, latestStoryLinkForSms } from "@/lib/channel-story-link";
 import { submitGenerationJob } from "@/lib/generation-jobs";
 import { isDailyGenerationCapacityRejection } from "@/lib/generation-policy";
+import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import { reserveMessageAgentTurn } from "@/lib/message-agent-budget";
 import { getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
@@ -277,6 +278,7 @@ async function processOneMessage(
               const fromCall = eligibleLatest.source === "voice" ? " from your call" : "";
               replyBody = `Your latest comic${fromCall} is ready:\n${eligibleLatest.link}\n\nSend a new idea to start another by text.`;
             }
+            replyBody = `${replyBody}\n\n${GITHUB_STAR_MESSAGE}`;
           } else if (completedStoryStatusId) {
             const link = await channelStoryLink({
               storyId: completedStoryStatusId,
@@ -284,7 +286,7 @@ async function processOneMessage(
               address: message.fromAddress,
             });
             replyBody = link
-              ? `Your comic is ready:\n${link}\n\nReply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.`
+              ? `Your comic is ready:\n${link}\n\nReply CONTINUE within ${CONVERSATION_RESUME_DAYS} days for another page, or NEW for a new comic.\n\n${GITHUB_STAR_MESSAGE}`
               : "I can't show that comic link right now.\n\nReply STATUS to try again later, or NEW to start another story.";
           }
         }
