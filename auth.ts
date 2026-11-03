@@ -4,8 +4,10 @@ import { DrizzleAdapter } from "@auth/drizzle-adapter";
 import authConfig, {
   isStudioTesterEmailAllowed,
   verifiedGoogleEmail,
+  verifiedTwilioGoogleEmail,
 } from "@/auth.config";
 import {
+  ADMIN_SESSION_MAX_AGE_MS,
   authenticateAdminCredentials,
   getActiveAdminPasswordHash,
   isAdminJwtFresh,
@@ -17,6 +19,23 @@ import {
   users,
   verificationTokens,
 } from "@/lib/schema";
+
+function isGoogleAdminJwtFresh(
+  issuedAt: unknown,
+  email: unknown,
+  hostedDomain: unknown,
+  studioEmail: unknown,
+  now = Date.now(),
+): boolean {
+  return typeof issuedAt === "number" && Number.isFinite(issuedAt) &&
+    issuedAt <= now + 30_000 && now - issuedAt < ADMIN_SESSION_MAX_AGE_MS &&
+    email === studioEmail &&
+    verifiedTwilioGoogleEmail({
+      email,
+      email_verified: true,
+      hd: hostedDomain,
+    }) !== null;
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
@@ -46,29 +65,58 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         token.id = user.id;
         if (account?.provider === "admin" && user.role === "admin") {
           token.role = "admin";
+          token.adminAuthMethod = "password";
           delete token.studioEmail;
           token.adminIssuedAt = Date.now();
           token.adminCredentialVersion = user.adminCredentialVersion;
+          delete token.adminGoogleEmail;
+          delete token.adminGoogleHostedDomain;
         } else {
-          token.role = "user";
-          token.studioEmail = account?.provider === "google"
+          const googleEmail = account?.provider === "google"
             ? verifiedGoogleEmail(profile)
             : null;
-          delete token.adminIssuedAt;
+          const googleAdminEmail = account?.provider === "google"
+            ? verifiedTwilioGoogleEmail(profile)
+            : null;
+          token.studioEmail = googleEmail;
+          token.role = googleAdminEmail ? "admin" : "user";
+          if (googleAdminEmail) {
+            token.adminAuthMethod = "google";
+            token.adminIssuedAt = Date.now();
+            token.adminGoogleEmail = googleAdminEmail;
+            token.adminGoogleHostedDomain = "twilio.com";
+          } else {
+            delete token.adminAuthMethod;
+            delete token.adminIssuedAt;
+            delete token.adminGoogleEmail;
+            delete token.adminGoogleHostedDomain;
+          }
           delete token.adminCredentialVersion;
         }
       }
       if (token.role === "admin") {
-        try {
-          if (!isAdminJwtFresh(
-            typeof token.adminIssuedAt === "number" ? token.adminIssuedAt : undefined,
-            typeof token.adminCredentialVersion === "string"
-              ? token.adminCredentialVersion
-              : undefined,
-            await getActiveAdminPasswordHash() ?? undefined,
+        if (token.adminAuthMethod === "google") {
+          if (!isGoogleAdminJwtFresh(
+            token.adminIssuedAt,
+            token.adminGoogleEmail,
+            token.adminGoogleHostedDomain,
+            token.studioEmail,
           )) return null;
-        } catch {
-          // Session verification must fail closed when PostgreSQL is unavailable.
+        } else if (token.adminAuthMethod === "password" ||
+          (!token.adminAuthMethod && typeof token.adminCredentialVersion === "string")) {
+          try {
+            if (!isAdminJwtFresh(
+              typeof token.adminIssuedAt === "number" ? token.adminIssuedAt : undefined,
+              typeof token.adminCredentialVersion === "string"
+                ? token.adminCredentialVersion
+                : undefined,
+              await getActiveAdminPasswordHash() ?? undefined,
+            )) return null;
+          } catch {
+            // Session verification must fail closed when PostgreSQL is unavailable.
+            return null;
+          }
+        } else {
           return null;
         }
       }
@@ -85,8 +133,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (session.user) {
         session.user.role = token.role === "admin" ? "admin" : "user";
         // Browser creation APIs check for a user ID. Admin sessions have a
-        // signed role claim but no browser-studio identity.
-        if (token.role === "admin") {
+        // signed role claim but only approved Studio testers have a browser identity.
+        if (token.role === "admin" && !(
+          token.adminAuthMethod === "google" &&
+          isStudioTesterEmailAllowed(
+            typeof token.studioEmail === "string" ? token.studioEmail : null,
+            process.env.STUDIO_TESTER_EMAILS,
+          )
+        )) {
           session.user.id = "";
         } else {
           const userId = typeof token.id === "string" ? token.id : token.sub;
