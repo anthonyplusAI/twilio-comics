@@ -65,7 +65,7 @@ describe("Dub comic short links", () => {
     const result = await createOrRecoverDubLink({ config, storyId, key, url }, fetcher);
 
     expect(result).toEqual({ kind: "link", id: "clink_123", key, shortUrl: `https://${config.domain}/${key}` });
-    expect(fetcher.mock.calls[1][0]).toBe(`https://api.dub.co/links/info?externalId=${encodeURIComponent(externalId)}`);
+    expect(fetcher.mock.calls[1][0]).toBe(`https://api.dub.co/links/info?externalId=${encodeURIComponent(`ext_${externalId}`)}`);
   });
 
   it("recovers when an uncertain POST appears only after the first lookups", async () => {
@@ -77,7 +77,7 @@ describe("Dub comic short links", () => {
 
     await expect(createOrRecoverDubLink({ config, storyId, key, url }, fetcher))
       .resolves.toEqual({ kind: "link", id: "clink_123", key, shortUrl: `https://${config.domain}/${key}` });
-    expect(fetcher.mock.calls[3][0]).toBe(`https://api.dub.co/links/info?externalId=${encodeURIComponent(externalId)}`);
+    expect(fetcher.mock.calls[3][0]).toBe(`https://api.dub.co/links/info?externalId=${encodeURIComponent(`ext_${externalId}`)}`);
   });
 
   it("reports a taken key without adopting another comic's link", async () => {
