@@ -134,6 +134,28 @@ describe("Twilio messaging webhook", () => {
     }));
   });
 
+  it("publishes the queued turn while best-effort activity recording is still pending", async () => {
+    let finishActivity: (() => void) | undefined;
+    h.recordActivityEvent.mockReturnValue(new Promise<void>((resolve) => {
+      finishActivity = resolve;
+    }));
+
+    const pendingResponse = POST(request("/api/twilio/sms"));
+    let responseSettled = false;
+    void pendingResponse.then(() => { responseSettled = true; });
+    try {
+      await vi.waitFor(() => expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM123"));
+      expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+        occurredAt: expect.any(Date),
+      }));
+      await Promise.resolve();
+      expect(responseSettled).toBe(false);
+    } finally {
+      finishActivity?.();
+    }
+    expect((await pendingResponse).status).toBe(200);
+  });
+
   it("processes the prefilled SMS opener on the warm web app without starting a queue job", async () => {
     h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-start" });
 

@@ -159,9 +159,16 @@ export async function POST(request: NextRequest): Promise<Response> {
       mediaUrls: inbound.mediaUrls,
       mediaContentTypes: inbound.mediaContentTypes,
     });
+    const receiptMs = Date.now() - startedAt;
 
-    await recordActivityEvent({
+    // The receipt is durable. Start this best-effort history write without
+    // holding up queue publication, and keep its original event time if the
+    // queue worker happens to reply before the write finishes.
+    const activityStartedAt = Date.now();
+    let activityMs = 0;
+    const activityPromise = recordActivityEvent({
       eventKey: `message:${inbound.messageSid}:inbound`,
+      occurredAt: new Date(activityStartedAt),
       userId,
       channel: inbound.channel,
       kind: "message.inbound",
@@ -174,8 +181,11 @@ export async function POST(request: NextRequest): Promise<Response> {
         mediaCount: inbound.mediaUrls.length,
         mediaContentTypes: inbound.mediaContentTypes,
       },
-    }).catch((error) => console.error("Inbound activity history failed", error));
+    }).catch((error) => console.error("Inbound activity history failed", error))
+      .then(() => { activityMs = Date.now() - activityStartedAt; });
 
+    let dispatch: "queued" | "inline" | "duplicate" = "duplicate";
+    let queuePublishMs: number | null = null;
     if (receipt.shouldEnqueue) {
       let completedInline = false;
       if (canProcessInline(inbound.body, inbound.channel, inbound.mediaUrls.length)) {
@@ -193,8 +203,25 @@ export async function POST(request: NextRequest): Promise<Response> {
           console.error("Inline SMS readiness check failed; queueing its receipt", error);
         }
       }
-      if (!completedInline) await sendInboundMessage(inbound.messageSid);
+      if (completedInline) {
+        dispatch = "inline";
+      } else {
+        const queueStartedAt = Date.now();
+        await sendInboundMessage(inbound.messageSid);
+        queuePublishMs = Date.now() - queueStartedAt;
+        dispatch = "queued";
+      }
     }
+    await activityPromise;
+    console.info(JSON.stringify({
+      event: "messaging_webhook_processed",
+      channel: inbound.channel,
+      dispatch,
+      receiptMs,
+      queuePublishMs,
+      activityMs,
+      totalMs: Date.now() - startedAt,
+    }));
     return emptyTwiml();
   } catch (error) {
     console.error("Twilio messaging webhook failed", error);

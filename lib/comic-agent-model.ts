@@ -115,6 +115,31 @@ function userFacingReply(reply: string, readyForConfirmation: boolean, prompt: s
     .trim();
 }
 
+async function timedModelStage<T>(
+  stage: "completion" | "moderation",
+  channel: ComicAgentModelInput["channel"],
+  request: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  let outcome: "ok" | "error" = "ok";
+  try {
+    return await request();
+  } catch (error) {
+    outcome = "error";
+    throw error;
+  } finally {
+    // Stage names and durations are enough to diagnose delays without
+    // recording the person's idea, prompt, image URLs, or phone number.
+    console.info(JSON.stringify({
+      event: "comic_agent_model_stage",
+      channel,
+      stage,
+      outcome,
+      durationMs: Math.max(0, Date.now() - startedAt),
+    }));
+  }
+}
+
 /** Ask OpenAI for the next conversational reply and structured comic draft. */
 export async function proposeComicTurn(
   input: ComicAgentModelInput,
@@ -123,33 +148,34 @@ export async function proposeComicTurn(
   if (!apiKey) throw new Error("OPENAI_API_KEY is required for the comic agent");
 
   const client = new OpenAI({ apiKey, timeout: 20_000, maxRetries: 1 });
-  const response = await client.chat.completions.create({
-    model: process.env.OPENAI_TEXT_MODEL || "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "developer",
-        content: JSON.stringify({
-          currentDraft: input.prompt || "",
-          currentStyle: input.style || "",
-          legacyCharacterName: input.name || "",
-          hasCharacterReferences: input.hasReference,
-          isContinuation: Boolean(input.targetStoryId),
-          channel: input.channel,
-        }),
+  const response = await timedModelStage("completion", input.channel, () =>
+    client.chat.completions.create({
+      model: process.env.OPENAI_TEXT_MODEL || "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "developer",
+          content: JSON.stringify({
+            currentDraft: input.prompt || "",
+            currentStyle: input.style || "",
+            legacyCharacterName: input.name || "",
+            hasCharacterReferences: input.hasReference,
+            isContinuation: Boolean(input.targetStoryId),
+            channel: input.channel,
+          }),
+        },
+        ...input.history,
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "comic_agent_turn",
+          strict: true,
+          schema: responseSchema,
+        },
       },
-      ...input.history,
-    ],
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "comic_agent_turn",
-        strict: true,
-        schema: responseSchema,
-      },
-    },
-    max_completion_tokens: 750,
-  });
+      max_completion_tokens: 750,
+    }));
 
   const message = response.choices[0]?.message;
   if (message?.refusal) {
@@ -177,10 +203,11 @@ export async function proposeComicTurn(
 
   // A text-model summary alone cannot predict the image model's safety check.
   // Screen the actual proposed prompt before the state machine offers CREATE.
-  const moderation = await client.moderations.create({
-    model: "omni-moderation-latest",
-    input: safeProposal.prompt,
-  });
+  const moderation = await timedModelStage("moderation", input.channel, () =>
+    client.moderations.create({
+      model: "omni-moderation-latest",
+      input: safeProposal.prompt,
+    }));
   const screening = moderation.results[0];
   if (!screening) throw new Error("Comic idea screening returned no result");
   if (!screening.flagged) return safeProposal;

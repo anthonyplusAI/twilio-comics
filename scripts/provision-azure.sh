@@ -406,7 +406,7 @@ ensure_registry_pull app "$ACA_NAME"
 if ! az containerapp show --name "$ACA_INBOUND_APP_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
   az containerapp create --name "$ACA_INBOUND_APP_NAME" --resource-group "$RESOURCE_GROUP" \
     --environment "$ACA_ENVIRONMENT" --image "$PLACEHOLDER_IMAGE" \
-    --cpu 0.5 --memory 1Gi --min-replicas 0 --max-replicas "$ACA_INBOUND_MAX_REPLICAS" \
+    --cpu 0.25 --memory 0.5Gi --min-replicas 0 --max-replicas "$ACA_INBOUND_MAX_REPLICAS" \
     --scale-rule-name inbound-queue --scale-rule-type azure-queue \
     --scale-rule-metadata "accountName=${STORAGE_ACCOUNT}" 'cloud=AzurePublicCloud' \
       'queueLength=4' "queueName=${INBOUND_QUEUE_NAME}" \

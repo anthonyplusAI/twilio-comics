@@ -9,7 +9,7 @@ RUN pnpm install --frozen-lockfile
 FROM dependencies AS builder
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN pnpm build
+RUN pnpm build && rm -rf .next/cache
 
 FROM node:22-bookworm-slim AS production-dependencies
 WORKDIR /app

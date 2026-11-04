@@ -96,6 +96,33 @@ describe("comic confirmation screening", () => {
     });
   });
 
+  it("records model-stage timings without logging the comic idea", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await proposeComicTurn(input);
+
+      const stages = log.mock.calls.map(([line]) => JSON.parse(String(line)));
+      expect(stages).toEqual([
+        {
+          event: "comic_agent_model_stage",
+          channel: "sms",
+          stage: "completion",
+          outcome: "ok",
+          durationMs: expect.any(Number),
+        },
+        {
+          event: "comic_agent_model_stage",
+          channel: "sms",
+          stage: "moderation",
+          outcome: "ok",
+          durationMs: expect.any(Number),
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("instructs the model to keep the confirmation high level and leave CREATE to the app", async () => {
     await proposeComicTurn(input);
 

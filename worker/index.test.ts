@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   deleteInboundMessage: vi.fn(),
   verifyInboundQueueAccess: vi.fn(),
   dbExecute: vi.fn(),
+  generationModuleImported: vi.fn(),
   processGenerationJob: vi.fn(),
   processInboundMessage: vi.fn(),
   recoverPendingInboundMessages: vi.fn(),
@@ -31,9 +32,10 @@ vi.mock("@/lib/generation-queue", () => ({
 vi.mock("@/lib/db", () => ({
   db: { execute: h.dbExecute },
 }));
-vi.mock("@/lib/process-generation-job", () => ({
-  processGenerationJob: h.processGenerationJob,
-}));
+vi.mock("@/lib/process-generation-job", () => {
+  h.generationModuleImported();
+  return { processGenerationJob: h.processGenerationJob };
+});
 vi.mock("@/lib/process-inbound-message", () => ({
   processInboundMessage: h.processInboundMessage,
   ConversationLeaseBusyError: h.Busy,
@@ -107,10 +109,11 @@ afterEach(() => {
 });
 
 describe("Azure Queue worker dispatch", () => {
-  it("does not consume a queue message when imported by tests or tooling", async () => {
+  it("does not consume a queue message or load generation code when imported", async () => {
     await import("@/worker/index");
 
     expect(h.receiveGenerationJob).not.toHaveBeenCalled();
+    expect(h.generationModuleImported).not.toHaveBeenCalled();
   });
 
   it("continues to process and delete legacy generation messages", async () => {
