@@ -25,6 +25,16 @@ export function safePostgresErrorCode(error: unknown): string | undefined {
   }
 }
 
+function postgresPoolMax(): number {
+  const configured = process.env.DB_POOL_MAX?.trim();
+  if (!configured) return 4;
+  const max = Number(configured);
+  if (!Number.isSafeInteger(max) || max < 1 || max > 4) {
+    throw new Error("DB_POOL_MAX must be an integer from 1 to 4");
+  }
+  return max;
+}
+
 /** Keep TLS verification explicit; node-postgres URL SSL options override ssl config. */
 export function createPostgresPoolConfig(databaseUrl: string): PoolConfig {
   let url: URL;
@@ -66,7 +76,7 @@ export function createPostgresPoolConfig(databaseUrl: string): PoolConfig {
     ssl: tlsRequired
       ? { rejectUnauthorized: true, ...(isIP(url.hostname) ? {} : { servername: url.hostname }) }
       : false,
-    max: 4,
+    max: postgresPoolMax(),
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 5_000,
     allowExitOnIdle: true,

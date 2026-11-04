@@ -3,10 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const h = vi.hoisted(() => ({
   validateRequest: vi.fn(),
   create: vi.fn(),
+  fetch: vi.fn(),
+  messageResource: vi.fn(),
 }));
 
 vi.mock("twilio", () => {
-  const twilio: any = vi.fn(() => ({ messages: { create: h.create } }));
+  const messages = Object.assign(h.messageResource, { create: h.create });
+  const twilio: any = vi.fn(() => ({ messages }));
   twilio.validateRequest = h.validateRequest;
   return { default: twilio };
 });
@@ -18,7 +21,10 @@ beforeEach(() => {
   process.env.TWILIO_WHATSAPP_NUMBER = "whatsapp:+14155238886";
   h.validateRequest.mockReset();
   h.create.mockReset();
+  h.fetch.mockReset();
+  h.messageResource.mockReset();
   h.create.mockResolvedValue({ sid: "SM1" });
+  h.messageResource.mockReturnValue({ fetch: h.fetch });
 });
 
 afterEach(() => {
@@ -188,6 +194,28 @@ describe("sendComicMms", () => {
     expect(h.create).toHaveBeenCalledWith({
       to: "whatsapp:+15551112222", from: "whatsapp:+14155238886", body: "ready",
     });
+  });
+});
+
+describe("fetchTwilioMessageStatus", () => {
+  it("reads only the saved message's current status without sending anything", async () => {
+    process.env.TWILIO_AUTH_TOKEN = "tok-status-test";
+    h.fetch.mockResolvedValue({ status: "scheduled", body: "private reply" });
+    const { fetchTwilioMessageStatus } = await import("@/lib/twilio");
+
+    await expect(fetchTwilioMessageStatus("SMoutbound")).resolves.toBe("scheduled");
+    await expect(fetchTwilioMessageStatus("SMoutbound2")).resolves.toBe("scheduled");
+
+    const twilioModule = await import("twilio");
+    const statusClientCalls = vi.mocked(twilioModule.default).mock.calls.filter((call) =>
+      call[2]?.timeout === 5_000);
+    expect(statusClientCalls).toEqual([["ACtest", "tok-status-test", {
+      timeout: 5_000,
+      autoRetry: false,
+    }]]);
+    expect(h.messageResource.mock.calls.map(([sid]) => sid)).toEqual(["SMoutbound", "SMoutbound2"]);
+    expect(h.fetch).toHaveBeenCalledTimes(2);
+    expect(h.create).not.toHaveBeenCalled();
   });
 });
 

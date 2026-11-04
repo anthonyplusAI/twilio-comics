@@ -7,6 +7,8 @@ const eventLabels: Record<string, string> = {
   "message.inbound": "Text received",
   "message.outbound": "Text sent",
   "message.delivery": "Delivery update",
+  "message.delivery.alert": "Stalled agent reply",
+  "message.delivery.audit": "Agent reply status checked",
   "voice.started": "Call started",
   "voice.ended": "Call ended",
   "voice.caller_turn": "Caller spoke",

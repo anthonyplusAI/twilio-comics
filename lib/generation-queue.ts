@@ -5,6 +5,7 @@ import {
 } from "@/lib/azure-credential";
 
 const DEFAULT_VISIBILITY_TIMEOUT_SECONDS = 5 * 60;
+const DEFAULT_INBOUND_VISIBILITY_TIMEOUT_SECONDS = 60;
 
 export interface GenerationQueueMessage {
   version: 1;
@@ -24,9 +25,18 @@ export type ReceivedGenerationJob = QueueWorkMessage & {
   popReceipt: string;
 };
 
+export type ReceivedInboundMessage = InboundQueueMessage & {
+  messageId: string;
+  popReceipt: string;
+  insertedOn?: Date;
+};
+
 let queueClient: QueueClient | undefined;
+let inboundQueueClient: QueueClient | undefined;
 let poisonQueueClient: QueueClient | undefined;
+let inboundPoisonQueueClient: QueueClient | undefined;
 let serviceClient: QueueServiceClient | undefined;
+let warnedAboutLegacyInboundQueue = false;
 
 function getQueueServiceClient(): QueueServiceClient {
   if (serviceClient) return serviceClient;
@@ -48,12 +58,44 @@ function getQueueClient(): QueueClient {
   return queueClient;
 }
 
+function getInboundQueueName(): string {
+  const inboundName = requireAzureEnvironmentVariable("AZURE_STORAGE_INBOUND_QUEUE_NAME");
+  if (inboundName === requireAzureEnvironmentVariable("AZURE_STORAGE_QUEUE_NAME")) {
+    throw new Error("AZURE_STORAGE_INBOUND_QUEUE_NAME must differ from AZURE_STORAGE_QUEUE_NAME");
+  }
+  return inboundName;
+}
+
+function getInboundQueueClient(): QueueClient {
+  const inboundName = getInboundQueueName();
+  if (inboundQueueClient) return inboundQueueClient;
+  inboundQueueClient = getQueueServiceClient().getQueueClient(inboundName);
+  return inboundQueueClient;
+}
+
+function getInboundPublisherClient(): QueueClient {
+  if (process.env.AZURE_STORAGE_INBOUND_QUEUE_NAME?.trim()) return getInboundQueueClient();
+  if (!warnedAboutLegacyInboundQueue) {
+    console.warn("Inbound queue is not configured; publishing to the generation queue");
+    warnedAboutLegacyInboundQueue = true;
+  }
+  return getQueueClient();
+}
+
 function getPoisonQueueClient(): QueueClient {
   if (poisonQueueClient) return poisonQueueClient;
   poisonQueueClient = getQueueServiceClient().getQueueClient(
     process.env.AZURE_STORAGE_POISON_QUEUE_NAME || "comic-generation-poison",
   );
   return poisonQueueClient;
+}
+
+function getInboundPoisonQueueClient(): QueueClient {
+  if (inboundPoisonQueueClient) return inboundPoisonQueueClient;
+  inboundPoisonQueueClient = getQueueServiceClient().getQueueClient(
+    process.env.AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME?.trim() || "comic-inbound-poison",
+  );
+  return inboundPoisonQueueClient;
 }
 
 function serializeMessage(message: QueueWorkMessage): string {
@@ -100,9 +142,63 @@ export async function sendInboundMessage(messageSid: string): Promise<void> {
   if (!messageSid.trim()) {
     throw new Error("messageSid is required");
   }
-  await getQueueClient().sendMessage(
+  await getInboundPublisherClient().sendMessage(
     serializeMessage({ version: 2, kind: "inbound", messageSid }),
   );
+}
+
+export async function verifyInboundQueueAccess(): Promise<void> {
+  await getInboundQueueClient().getProperties();
+}
+
+export async function receiveInboundMessage(
+  visibilityTimeout = DEFAULT_INBOUND_VISIBILITY_TIMEOUT_SECONDS,
+): Promise<ReceivedInboundMessage | null> {
+  const client = getInboundQueueClient();
+  const response = await client.receiveMessages({ numberOfMessages: 1, visibilityTimeout });
+  const received = response.receivedMessageItems[0];
+  if (!received) return null;
+
+  let message: QueueWorkMessage;
+  try {
+    message = parseMessage(received.messageText);
+    if (message.version !== 2) throw new Error("Invalid inbound queue message");
+  } catch (error) {
+    if ((received.dequeueCount || 1) < 3) throw error;
+    await getInboundPoisonQueueClient().sendMessage(JSON.stringify({
+      version: 1,
+      sourceMessageId: received.messageId,
+      reason: "invalid_inbound_message",
+    }));
+    await client.deleteMessage(received.messageId, received.popReceipt);
+    return null;
+  }
+  return {
+    ...message,
+    messageId: received.messageId,
+    popReceipt: received.popReceipt,
+    ...(received.insertedOn ? { insertedOn: received.insertedOn } : {}),
+  };
+}
+
+export async function renewInboundMessage(
+  message: ReceivedInboundMessage,
+  visibilityTimeout = DEFAULT_INBOUND_VISIBILITY_TIMEOUT_SECONDS,
+): Promise<ReceivedInboundMessage> {
+  const receipt = await getInboundQueueClient().updateMessage(
+    message.messageId,
+    message.popReceipt,
+    serializeMessage({ version: 2, kind: "inbound", messageSid: message.messageSid }),
+    visibilityTimeout,
+  );
+  if (!receipt.popReceipt) throw new Error("Azure Queue returned no pop receipt");
+  return { ...message, popReceipt: receipt.popReceipt };
+}
+
+export async function deleteInboundMessage(
+  message: Pick<ReceivedInboundMessage, "messageId" | "popReceipt">,
+): Promise<void> {
+  await getInboundQueueClient().deleteMessage(message.messageId, message.popReceipt);
 }
 
 export async function receiveGenerationJob(

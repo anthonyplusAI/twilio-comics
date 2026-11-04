@@ -13,6 +13,7 @@ The Twilio number **+1 866 901 2028** is toll-free approved and has verified SMS
 | Private Container Apps environment | `cae-twilio-comics-v2` |
 | Public web and Voice app | `twilio-comics` |
 | Old-link redirect | `twilio-comics-v2` |
+| Private inbound SMS app added by the queue separation rollout | `twilio-comics-inbound-v2` |
 | Queue generation Job | `twilio-comics-generation-v2` |
 | Scheduled recovery Job | `twilio-comics-recovery-v2` |
 | Manual migration Job | `twilio-comics-migrate-v2` |
@@ -50,7 +51,7 @@ bash scripts/provision-azure.sh
 
 The script prints the subscription, resource group, repository, and OIDC subject before its confirmation prompt. It creates or reuses the foundation; it does **not** deploy this application, create the private VNet or PostgreSQL server, run migrations, configure Twilio, or set runtime credentials. For an unattended rerun, set `PROVISION_AZURE_CONFIRM=yes` only after reviewing those values.
 
-Optional name overrides are `RESOURCE_GROUP`, `LOCATION`, `LOG_ANALYTICS_WORKSPACE`, `ACA_ENVIRONMENT`, `ACA_NAME`, `ACA_JOB_NAME`, `ACA_RECOVERY_JOB_NAME`, `BLOB_CONTAINER`, `QUEUE_NAME`, `POISON_QUEUE_NAME`, the three `*_IDENTITY_NAME` variables, and `DEPLOY_APP_NAME`. Defaults are shown below. `CREATED_BY` and `MANAGED_BY` override the tenant tag values if your policy requires different values.
+Optional name overrides are `RESOURCE_GROUP`, `LOCATION`, `LOG_ANALYTICS_WORKSPACE`, `ACA_ENVIRONMENT`, `ACA_NAME`, `ACA_INBOUND_APP_NAME`, `ACA_INBOUND_MAX_REPLICAS`, `ACA_JOB_NAME`, `ACA_RECOVERY_JOB_NAME`, `BLOB_CONTAINER`, `QUEUE_NAME`, `POISON_QUEUE_NAME`, `INBOUND_QUEUE_NAME`, `INBOUND_POISON_QUEUE_NAME`, the three `*_IDENTITY_NAME` variables, and `DEPLOY_APP_NAME`. Defaults are shown below. `CREATED_BY` and `MANAGED_BY` override the tenant tag values if your policy requires different values.
 
 ## Resources created or reused
 
@@ -61,11 +62,12 @@ Optional name overrides are `RESOURCE_GROUP`, `LOCATION`, `LOG_ANALYTICS_WORKSPA
 | Log Analytics workspace | `law-twilio-comics` | Explicit log destination for a new ACA environment |
 | Container Apps environment | `cae-twilio-comics-v2` | Private-network environment; create it before this script |
 | Web Container App | `twilio-comics` | New placeholders use internal port 8080 ingress and zero minimum replicas |
+| Private inbound Container App | `twilio-comics-inbound-v2` | No ingress; zero-replica placeholder before release, then one warm queue consumer with scale-out to eight replicas by default |
 | Event-driven ACA Job | `twilio-comics-generation-v2` | Azure Queue trigger; placeholder image before release |
 | Scheduled ACA recovery Job | `twilio-comics-recovery-v2` | Dormant annual cron before release |
-| StorageV2 account | `STORAGE_ACCOUNT` | Private Blob container and generation queues |
+| StorageV2 account | `STORAGE_ACCOUNT` | Private Blob container and generation/inbound queues |
 | Blob container | `comics` | Generated images and references |
-| Storage queues | `comic-generation`, `comic-generation-poison` | Pending and poison job messages |
+| Storage queues | `comic-generation`, `comic-generation-poison`, `comic-inbound`, `comic-inbound-poison` | Separate generation and inbound work and malformed-payload queues |
 | User-assigned identities | `id-twilio-comics-v2-web`, `id-twilio-comics-v2-worker`, `id-twilio-comics-v2-acr-pull` | Storage access and ACR image pulls |
 | Entra application | `twilio-comics-v2-gha-deploy` | GitHub OIDC deployment principal |
 
@@ -73,7 +75,7 @@ Every newly created Azure Resource Manager resource receives `created_by=github-
 
 The script checks for resources by their exact configured names before creating them. It reuses role assignments, identities, ACR pull configuration, and the OIDC credential. On an existing web app or Job, it fills in missing infrastructure environment variables; if a configured storage account or managed identity differs, it stops instead of redirecting a live workload. An adopted app must have HTTP ingress targeting port 8080; the script accepts internal or external ingress without changing it. It refuses to proceed if the ASP.NET sample is externally reachable. Changing ingress on a live app may interrupt traffic, so make that change deliberately or choose a new `ACA_NAME`. An existing Container Apps environment keeps its current Log Analytics destination. Rerunning after an interrupted setup does not delete resources.
 
-New web placeholders start from Microsoft's ASP.NET sample image on internal port 8080 with `minReplicas=0`, and do not serve `/api/healthz`. The recovery Job has a dormant annual cron. The production release changes the runtime workloads to immutable image digests, enables the five-minute recovery sweep, waits for the web revision to become healthy, and then switches its ingress to external HTTPS.
+New web placeholders start from Microsoft's ASP.NET sample image on internal port 8080 with `minReplicas=0`, and do not serve `/api/healthz`. The private inbound placeholder uses the same sample image, has no ingress, stays at zero replicas, and has an Azure Queue scale rule with `queueLength=4` using the existing worker identity. Its runtime secrets are bound in a separate, pre-release step. The recovery Job has a dormant annual cron. The production release changes the runtime workloads to immutable image digests, starts the inbound app and verifies its startup checks before changing publishers to the new queue, enables the five-minute recovery sweep, waits for the web revision to become healthy, and then switches its ingress to external HTTPS.
 
 After deployment, the recovery Job runs `pnpm start:worker` with `RECOVERY_MODE=1` on `*/5 * * * *` (five-minute UTC). Give it the same worker managed identity, storage environment variables, runtime secrets, and ACR pull identity as the queue Job. Its bounded sweep republishes pending inbound receipts and generation jobs after transient failures. The scheduled and queue Jobs remain separate so a recovery sweep never consumes a queue message.
 
@@ -126,6 +128,8 @@ ACR_NAME='twiliocomicsacr1a1d98' \
 STORAGE_ACCOUNT='twiliocomicsst1a1d98' \
 ACA_ENVIRONMENT='cae-twilio-comics-v2' \
 ACA_NAME='twilio-comics' \
+ACA_INBOUND_APP_NAME='twilio-comics-inbound-v2' \
+ACA_INBOUND_MAX_REPLICAS=8 \
 ACA_JOB_NAME='twilio-comics-generation-v2' \
 ACA_RECOVERY_JOB_NAME='twilio-comics-recovery-v2' \
 ACA_MIGRATION_JOB_NAME='twilio-comics-migrate-v2' \
@@ -134,7 +138,7 @@ PROVISION_AZURE_CONFIRM=yes \
 bash scripts/provision-azure.sh
 ```
 
-At bootstrap, a new web placeholder is internal and scaled to zero. The release workflow requires single revision mode and makes it externally reachable only after the private migration Job succeeds and a digest-pinned Twilio Comics web revision is healthy. The public web app has external HTTPS ingress on port 8080 for the website, Twilio webhooks, and ConversationRelay WebSocket. The two runtime Jobs need no public ingress. The PostgreSQL role provisioner creates the fourth workload as a **manual**, one-container migration Job using the reviewed `Dockerfile.migrate` image. Build and pin its image and the one-off role bootstrap image from committed source:
+At bootstrap, a new web placeholder is internal and scaled to zero. The release workflow requires single revision mode and makes it externally reachable only after the private migration Job succeeds and a digest-pinned Twilio Comics web revision is healthy. The public web app has external HTTPS ingress on port 8080 for the website, Twilio webhooks, and ConversationRelay WebSocket. The inbound app has no ingress; the two runtime Jobs have no public ingress. The PostgreSQL role provisioner creates the manual, one-container migration Job using the reviewed `Dockerfile.migrate` image. Build and pin its image and the one-off role bootstrap image from committed source:
 
 ```bash
 export SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98'
@@ -163,6 +167,7 @@ The script grants the following roles after creating or finding each identity:
 | Provisioning user | Storage account | Storage Blob Data Contributor; Storage Queue Data Contributor |
 | GitHub V2 deployment principal | Existing registry | AcrPush |
 | GitHub deployment principal | Exact `twilio-comics` web app | Container Apps Contributor |
+| GitHub deployment principal | Exact `twilio-comics-inbound-v2` app | Container Apps Contributor |
 | GitHub deployment principal | Exact generation and recovery Jobs | Container Apps Jobs Contributor on each Job |
 | GitHub deployment principal | Exact migration Job, after it exists | Container Apps Jobs Contributor |
 
@@ -188,6 +193,10 @@ The repository's `ACA_*` variables must point to the single public app and the e
 
 ```bash
 gh variable set ACA_NAME --body 'twilio-comics'
+gh variable set ACA_INBOUND_APP_NAME --body 'twilio-comics-inbound-v2'
+gh variable set ACA_INBOUND_MAX_REPLICAS --body '8'
+gh variable set AZURE_STORAGE_INBOUND_QUEUE_NAME --body 'comic-inbound'
+gh variable set AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME --body 'comic-inbound-poison'
 gh variable set ACA_JOB_NAME --body 'twilio-comics-generation-v2'
 gh variable set ACA_RECOVERY_JOB_NAME --body 'twilio-comics-recovery-v2'
 gh variable set ACA_MIGRATION_JOB_NAME --body 'twilio-comics-migrate-v2'
@@ -274,13 +283,13 @@ If the Key Vault firewall denies the operator's current network, temporarily all
 
 Import the owner-only file into a password manager, then run `rm -- "$admin_password_file"`. Do not keep a local copy. The firewall rule cleanup runs before the subshell returns. If cleanup reports an error, remove the temporary rule manually before proceeding.
 
-| Key Vault secret | Public web app | Generation and recovery Jobs | Purpose |
-|---|---|---|---|
-| `auth-secret` | Yes |  | Auth.js/admin sessions and Voice authorization signing |
-| `media-signing-secret` | Yes | Yes | Private media link signing |
-| `admin-password-hash` | Yes |  | `/admin/login` password check; plaintext is never bound to a workload |
-| `openai-api-key` | Yes | Yes | Comic and conversation models |
-| `twilio-auth-token` | Yes | Yes | Twilio API and signed webhook validation |
+| Key Vault secret | Public web app | Inbound app after the binding step below | Generation and recovery Jobs | Purpose |
+|---|---|---|---|---|
+| `auth-secret` | Yes |  |  | Auth.js/admin sessions and Voice authorization signing |
+| `media-signing-secret` | Yes | Yes | Yes | Private media link signing |
+| `admin-password-hash` | Yes |  |  | `/admin/login` password check; plaintext is never bound to a workload |
+| `openai-api-key` | Yes | Yes | Yes | Comic and conversation models |
+| `twilio-auth-token` | Yes | Yes | Yes | Twilio API and signed webhook validation |
 
 The approved Twilio Account SID supplied through `TWILIO_ACCOUNT_SID`, `+18669012028` number, Voice Verify Service SID, and operator name/contact are configured as ordinary environment settings. The bootstrap script initially leaves `TWILIO_ENABLED_CHANNELS` empty; the current public pilot overrides it with `sms,voice`. The script leaves the migration Job and `DATABASE_URL` bindings alone. It uses existing Key Vault operator access or a temporary Secrets Officer grant that it revokes on exit; it allows only the current operator IPv4 through the vault firewall when needed.
 
@@ -294,6 +303,23 @@ TWILIO_AUTH_TOKEN_FILE='/secure/path/twilio-auth-token' \
 CONFIGURE_RUNTIME_CONFIRM=yes \
 bash scripts/configure-runtime-secrets.sh
 ```
+
+### Bind the private inbound app before release
+
+For the existing pilot, first run the [foundation provisioner](#build-the-private-production-environment) with the reviewed production names and OIDC subject to create `comic-inbound`, `comic-inbound-poison`, and the private `twilio-comics-inbound-v2` placeholder. This does not change the live web or recovery queue routing. The existing worker identity has Storage Queue Data Contributor and the needed Key Vault secret-scoped reads. The GitHub deployment principal receives Container Apps Contributor on only the new app; the provisioner sets `ACA_INBOUND_APP_NAME`, `ACA_INBOUND_MAX_REPLICAS=8`, and the two inbound queue variables. Do not merge a release that uses the new queue until these resources and variables exist.
+
+Once the generation Job has its runtime database, OpenAI, Twilio, and media-signing Key Vault references, bind the same approved references and non-secret settings to the new app:
+
+```bash
+az account set --subscription 'b001fc6f-ea19-456a-8401-63971a1a1d98'
+SUBSCRIPTION_ID='b001fc6f-ea19-456a-8401-63971a1a1d98' \
+CONFIGURE_INBOUND_CONFIRM=yes \
+bash scripts/configure-inbound-worker.sh
+```
+
+The script requires a no-ingress, zero-replica sample placeholder in the reviewed private environment and verifies both inbound queues. It reads the generation Job's **Key Vault reference metadata** and binds `runtime-database-url`, `media-signing-secret`, `openai-api-key`, and `twilio-auth-token` to the inbound app using the same worker identity. It copies the required non-secret worker settings from the generation Job and `TWILIO_ENABLED_CHANNELS` from the public web app, sets `WORKER_MODE=inbound`, `INBOUND_WORKER_CONCURRENCY=4`, and `DB_POOL_MAX=2`, and leaves Dub credentials on the generation Job. It does not read or print secret values, start the app, or change the web and recovery Jobs. It is intentionally a pre-release command; after the app is running, it refuses to rebind an active revision. If the generation Job uses the optional `TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET` pair for media downloads, bind the same reviewed pair to the inbound app before release or let both use the Auth Token path.
+
+The release workflow checks these bindings and the queue scale rule, starts one inbound replica, and waits for its `inbound_worker_ready` log before setting `AZURE_STORAGE_INBOUND_QUEUE_NAME` on the generation Job, recovery Job, and public web app. It also copies the public app's `TWILIO_ENABLED_CHANNELS` value to the inbound app and generation Job on every deployment. The generation Job continues to consume `comic-generation` so earlier receipts drain. See [the capacity budget and rollback](DEPLOYMENT.md#inbound-capacity-and-limits).
 
 ### Runtime secret expiry and rotation
 
@@ -414,7 +440,13 @@ Only SMS and Voice are enabled on the public web app for controlled production t
 ```bash
 az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
   --set-env-vars 'TWILIO_ENABLED_CHANNELS=sms,voice'
+az containerapp update --name twilio-comics-inbound-v2 --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars 'TWILIO_ENABLED_CHANNELS=sms,voice'
+az containerapp job update --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars 'TWILIO_ENABLED_CHANNELS=sms,voice'
 ```
+
+After the inbound app is released, keep this setting equal on the public web app, inbound app, and generation Job when changing channels manually. For opening a channel, update the workers before the web app; for closing one, update the web app first. The normal release workflow reads the web app's current value and syncs both workers. The worker receives only this non-secret channel selection, not the web app's `AUTH_SECRET`, Verify service, or Relay URL.
 
 At phone and desktop widths, verify the two phone `/start` actions and QR codes lead to `sms:+18669012028?body=Turn%20me%20into%20a%20comic!` and `/start/voice`, with the shared disclosure and policy links nearby. The Voice guide should tell the player to text photos before calling. Scanning the SMS code opens a draft with the suggested “Turn me into a comic!” opener; the player must tap Send and send one or two reference photos before approval. Any first idea or photo-only MMS starts a comic without `NEW`. A live inbound SMS and delivered agent reply have confirmed the queued reply path after release `1e94459`; see the [incident record](DEPLOYMENT.md#if-a-text-gets-no-reply). **Pending real-device checks:** complete the agent's SMS approval step and receive a generated comic result; then make a call, receive the Verify text, enter its code on the keypad, create a comic through ConversationRelay, and receive the result by SMS. Confirm the generation Job completes comic work and the recovery Job runs as scheduled, then verify the test activity and timeline at `/admin/login`. Operator sign-in has succeeded, but live test records still need review. Finally, verify records remain after a new revision; they live in PostgreSQL and Azure Blob Storage, outside the container image. [Deployment verification](DEPLOYMENT.md#twilio-verification) has the detailed checks and [rollback](DEPLOYMENT.md#health-and-rollback) covers image recovery.
 
@@ -422,4 +454,4 @@ The checked-in Browser Studio migration adds a durable `studio_enabled` admin sw
 
 To close entry without clearing the sender number, set `TWILIO_ENABLED_CHANNELS=` on the public web app. Unset is also closed. This changes the public actions and inbound channel acceptance, not the sender's Twilio capabilities or webhook settings. Keep the database and backup policy active so admin history survives deploys; use the [deletion procedure](DATA_DELETION.md) for explicit user requests.
 
-Keep initial capacity modest: web `0.5` CPU and `1Gi`, each runtime Job `1` CPU and `2Gi`, generation `minExecutions: 0` and `maxExecutions: 4`, recovery every five minutes with one replica. The `twilio-comics-launch` $150 monthly budget is already configured for `rg-twilio-comics`, with actual alerts at 50%, 80%, and 100% and a forecast alert at 100% emailed to `adellavecchia@twilio.com`; it does not stop spending or cover Twilio and OpenAI. Add a lifecycle policy for abandoned Blob uploads after observing actual usage. No ACR admin password or Azure service-principal secret is stored in GitHub.
+Keep initial capacity bounded: web `0.5` CPU and `1Gi` with at most two replicas; inbound `0.5` CPU and `1Gi` with one warm and at most eight replicas, four concurrent turns per replica; each runtime Job `1` CPU and `2Gi`; generation `minExecutions: 0` and `maxExecutions: 4`; recovery every five minutes with one replica. Set `DB_POOL_MAX=2` on inbound, generation, and recovery. At these maxima, pool budgets total 34 of the PostgreSQL server's 50 connections, leaving 16 for migration, administration, and other clients. The GitHub `ACA_INBOUND_MAX_REPLICAS` variable accepts 1–10; review database, OpenAI, and Twilio sender capacity and run a 25-person concurrent test before raising it. Larger events need a PostgreSQL capacity plan and sender throughput review, not only a higher replica count. The `twilio-comics-launch` $150 monthly budget is already configured for `rg-twilio-comics`, with actual alerts at 50%, 80%, and 100% and a forecast alert at 100% emailed to `adellavecchia@twilio.com`; it does not stop spending or cover Twilio and OpenAI. Add a lifecycle policy for abandoned Blob uploads after observing actual usage. No ACR admin password or Azure service-principal secret is stored in GitHub.

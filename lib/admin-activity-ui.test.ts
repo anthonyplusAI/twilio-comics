@@ -96,7 +96,7 @@ describe("administrator dashboard and activity visibility", () => {
       searchParams: Promise.resolve({ filter: "failed-agent-replies" }),
     }));
 
-    expect(html).toContain("Failed agent replies");
+    expect(html).toContain("Agent reply issues");
     expect(html).toContain('href="/admin/activity?filter=failed-agent-replies"');
     expect(html).toContain('aria-current="page"');
     expect(html).toContain("Agent reply delivery");
@@ -105,14 +105,43 @@ describe("administrator dashboard and activity visibility", () => {
     expect(html).toContain('href="/admin/users?q=%2B14155552671"');
   });
 
-  it("explains when the failed-replies filter has no matching events", async () => {
+  it("shows a stalled reply with its outbound SID and Twilio status without a message body", async () => {
+    h.execute.mockResolvedValueOnce({ rows: [{
+      id: "11111111-1111-4111-8111-111111111112",
+      occurred_at: new Date("2026-10-21T12:00:00.000Z"),
+      user_id: null,
+      channel: "sms",
+      kind: "message.delivery.alert",
+      direction: "outbound",
+      address: null,
+      call_sid: null,
+      message_sid: "SMstalledreply",
+      job_id: null,
+      story_id: null,
+      content: null,
+      status: "stalled",
+      details: { purpose: "agent_reply", observedStatus: "scheduled", inReplyTo: "SMinbound" },
+    }] });
+
+    const html = renderToStaticMarkup(await AdminActivityPage({
+      searchParams: Promise.resolve({ filter: "failed-agent-replies" }),
+    }));
+
+    expect(html).toContain("Agent reply issues");
+    expect(html).toContain("Stalled agent reply");
+    expect(html).toContain("SMstalledreply");
+    expect(html).toContain("scheduled");
+    expect(html).not.toContain("private reply");
+  });
+
+  it("explains when the reply-issues filter has no matching events", async () => {
     h.execute.mockResolvedValueOnce({ rows: [] });
 
     const html = renderToStaticMarkup(await AdminActivityPage({
       searchParams: Promise.resolve({ filter: "failed-agent-replies" }),
     }));
 
-    expect(html).toContain("No failed agent replies recorded");
+    expect(html).toContain("No agent reply issues recorded");
     expect(html).not.toContain("No activity recorded yet");
   });
 });

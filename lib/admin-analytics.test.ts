@@ -122,7 +122,7 @@ describe("administrator analytics", () => {
     expect(summarizeAdminCounts({})).toMatchObject({ agentReplyDeliveryFailed: 0 });
   });
 
-  it("counts only failed Twilio agent text replies, once per outbound Message SID", async () => {
+  it("counts failed and stalled Twilio agent text replies once per outbound Message SID", async () => {
     h.execute
       .mockResolvedValueOnce({ rows: [{ agent_reply_delivery_failed: "4" }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -135,6 +135,8 @@ describe("administrator analytics", () => {
     expect(countsSql).toMatch(/COUNT\(DISTINCT message_sid\).*?AS agent_reply_delivery_failed/s);
     expect(countsSql).toContain("kind = 'message.delivery'");
     expect(countsSql).toContain("status IN ('failed', 'undelivered')");
+    expect(countsSql).toContain("kind = 'message.delivery.alert'");
+    expect(countsSql).toContain("status = 'stalled'");
     expect(countsSql).toContain("details->>'purpose' = 'agent_reply'");
   });
 
@@ -227,7 +229,7 @@ describe("administrator analytics", () => {
     expect(trendQuery.params).toHaveLength(8);
   });
 
-  it("filters paged operations history to failed agent replies without including comic delivery", () => {
+  it("filters paged operations history to failed or stalled agent replies without comic delivery", () => {
     const cursor = {
       occurredAt: new Date("2026-10-20T12:00:00.000Z"),
       id: "11111111-1111-4111-8111-111111111111",
@@ -241,6 +243,8 @@ describe("administrator analytics", () => {
 
     expect(filtered.sql).toContain("kind = 'message.delivery'");
     expect(filtered.sql).toContain("status IN ('failed', 'undelivered')");
+    expect(filtered.sql).toContain("kind = 'message.delivery.alert'");
+    expect(filtered.sql).toContain("status = 'stalled'");
     expect(filtered.sql).toContain("details->>'purpose' = 'agent_reply'");
     expect(filtered.sql).toContain("message_sid IS NOT NULL");
     expect(filtered.sql).toContain("(occurred_at, id) <");

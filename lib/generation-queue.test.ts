@@ -5,12 +5,34 @@ const h = vi.hoisted(() => {
   const receiveMessages = vi.fn();
   const updateMessage = vi.fn();
   const deleteMessage = vi.fn();
-  const getQueueClient = vi.fn(() => ({
+  const generationGetProperties = vi.fn();
+  const generationClient = {
     sendMessage,
     receiveMessages,
     updateMessage,
     deleteMessage,
-  }));
+    getProperties: generationGetProperties,
+  };
+  const inboundSendMessage = vi.fn();
+  const inboundReceiveMessages = vi.fn();
+  const inboundUpdateMessage = vi.fn();
+  const inboundDeleteMessage = vi.fn();
+  const inboundGetProperties = vi.fn();
+  const inboundClient = {
+    sendMessage: inboundSendMessage,
+    receiveMessages: inboundReceiveMessages,
+    updateMessage: inboundUpdateMessage,
+    deleteMessage: inboundDeleteMessage,
+    getProperties: inboundGetProperties,
+  };
+  const generationPoisonSendMessage = vi.fn();
+  const inboundPoisonSendMessage = vi.fn();
+  const generationPoisonClient = { sendMessage: generationPoisonSendMessage };
+  const inboundPoisonClient = { sendMessage: inboundPoisonSendMessage };
+  const getQueueClient = vi.fn((name: string) =>
+    name === "inbound" ? inboundClient
+      : name === "comic-inbound-poison" || name === "inbound-poison" ? inboundPoisonClient
+        : name === "comic-generation-poison" ? generationPoisonClient : generationClient);
   const serviceClient = { getQueueClient };
   return {
     credential: {},
@@ -23,6 +45,14 @@ const h = vi.hoisted(() => {
     receiveMessages,
     updateMessage,
     deleteMessage,
+    generationGetProperties,
+    inboundSendMessage,
+    inboundReceiveMessages,
+    inboundUpdateMessage,
+    inboundDeleteMessage,
+    inboundGetProperties,
+    generationPoisonSendMessage,
+    inboundPoisonSendMessage,
   };
 });
 
@@ -47,6 +77,9 @@ const environmentVariables = [
   "AZURE_STORAGE_CONNECTION_STRING",
   "AZURE_STORAGE_QUEUE_ENDPOINT",
   "AZURE_STORAGE_QUEUE_NAME",
+  "AZURE_STORAGE_INBOUND_QUEUE_NAME",
+  "AZURE_STORAGE_POISON_QUEUE_NAME",
+  "AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME",
   "AZURE_CLIENT_ID",
 ] as const;
 const originalEnvironment = Object.fromEntries(
@@ -57,14 +90,24 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   h.receiveMessages.mockReset();
+  h.inboundReceiveMessages.mockReset();
   h.sendMessage.mockResolvedValue({ messageId: "sent" });
+  h.inboundSendMessage.mockResolvedValue({ messageId: "sent-inbound" });
   h.receiveMessages.mockResolvedValue({ receivedMessageItems: [] });
+  h.inboundReceiveMessages.mockResolvedValue({ receivedMessageItems: [] });
   h.updateMessage.mockResolvedValue({ popReceipt: "receipt-2" });
+  h.inboundUpdateMessage.mockResolvedValue({ popReceipt: "inbound-receipt-2" });
   h.deleteMessage.mockResolvedValue({});
+  h.inboundDeleteMessage.mockResolvedValue({});
+  h.inboundGetProperties.mockResolvedValue({});
+  h.generationGetProperties.mockResolvedValue({});
+  h.generationPoisonSendMessage.mockResolvedValue({ messageId: "sent-generation-poison" });
+  h.inboundPoisonSendMessage.mockResolvedValue({ messageId: "sent-inbound-poison" });
   for (const name of environmentVariables) {
     delete process.env[name];
   }
   process.env.AZURE_STORAGE_QUEUE_NAME = "generation";
+  process.env.AZURE_STORAGE_INBOUND_QUEUE_NAME = "inbound";
 });
 
 afterEach(() => {
@@ -192,11 +235,12 @@ describe("generation queue", () => {
     const queue = await import("@/lib/generation-queue");
 
     await expect(queue.receiveGenerationJob()).resolves.toBeNull();
-    expect(JSON.parse(h.sendMessage.mock.calls[0][0])).toEqual({
+    expect(JSON.parse(h.generationPoisonSendMessage.mock.calls[0][0])).toEqual({
       version: 1,
       sourceMessageId: "bad-message",
       reason: "invalid_generation_message",
     });
+    expect(h.inboundPoisonSendMessage).not.toHaveBeenCalled();
     expect(h.deleteMessage).toHaveBeenCalledWith(
       "bad-message",
       "bad-receipt",
@@ -209,11 +253,156 @@ describe("generation queue", () => {
 
     await queue.sendInboundMessage("SM123");
 
+    expect(JSON.parse(h.inboundSendMessage.mock.calls[0][0])).toEqual({
+      version: 2,
+      kind: "inbound",
+      messageSid: "SM123",
+    });
+    expect(h.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps publishing to the legacy queue until the inbound queue is configured", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    delete process.env.AZURE_STORAGE_INBOUND_QUEUE_NAME;
+    const queue = await import("@/lib/generation-queue");
+
+    await queue.sendInboundMessage("SM123");
+
     expect(JSON.parse(h.sendMessage.mock.calls[0][0])).toEqual({
       version: 2,
       kind: "inbound",
       messageSid: "SM123",
     });
+    expect(h.inboundSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an inbound queue configured with the generation queue name", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    process.env.AZURE_STORAGE_INBOUND_QUEUE_NAME = " generation ";
+    const queue = await import("@/lib/generation-queue");
+
+    await expect(queue.sendInboundMessage("SM123")).rejects.toThrow(
+      "AZURE_STORAGE_INBOUND_QUEUE_NAME must differ from AZURE_STORAGE_QUEUE_NAME",
+    );
+    await expect(queue.verifyInboundQueueAccess()).rejects.toThrow(
+      "AZURE_STORAGE_INBOUND_QUEUE_NAME must differ from AZURE_STORAGE_QUEUE_NAME",
+    );
+    await expect(queue.receiveInboundMessage()).rejects.toThrow(
+      "AZURE_STORAGE_INBOUND_QUEUE_NAME must differ from AZURE_STORAGE_QUEUE_NAME",
+    );
+    expect(h.getQueueClient).not.toHaveBeenCalled();
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    expect(h.generationGetProperties).not.toHaveBeenCalled();
+  });
+
+  it("quarantines malformed inbound work in the dedicated default poison queue", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    h.inboundReceiveMessages.mockResolvedValue({
+      receivedMessageItems: [{
+        messageId: "bad-inbound",
+        popReceipt: "bad-receipt",
+        messageText: JSON.stringify({ version: 1, jobId: "job-must-stay-in-generation" }),
+        dequeueCount: 3,
+      }],
+    });
+    const queue = await import("@/lib/generation-queue");
+
+    await expect(queue.receiveInboundMessage()).resolves.toBeNull();
+
+    expect(h.getQueueClient).toHaveBeenCalledWith("comic-inbound-poison");
+    expect(JSON.parse(h.inboundPoisonSendMessage.mock.calls[0][0])).toEqual({
+      version: 1,
+      sourceMessageId: "bad-inbound",
+      reason: "invalid_inbound_message",
+    });
+    expect(h.generationPoisonSendMessage).not.toHaveBeenCalled();
+    expect(h.inboundDeleteMessage).toHaveBeenCalledWith("bad-inbound", "bad-receipt");
+  });
+
+  it("honors the configured inbound poison queue", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    process.env.AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME = "inbound-poison";
+    h.inboundReceiveMessages.mockResolvedValue({
+      receivedMessageItems: [{
+        messageId: "bad-inbound",
+        popReceipt: "bad-receipt",
+        messageText: "not-json",
+        dequeueCount: 3,
+      }],
+    });
+    const queue = await import("@/lib/generation-queue");
+
+    await expect(queue.receiveInboundMessage()).resolves.toBeNull();
+    expect(h.getQueueClient).toHaveBeenCalledWith("inbound-poison");
+    expect(h.inboundPoisonSendMessage).toHaveBeenCalledOnce();
+    expect(h.generationPoisonSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("receives, renews, and deletes inbound work only through its dedicated queue", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    h.inboundReceiveMessages.mockResolvedValue({
+      receivedMessageItems: [{
+        messageId: "inbound-1",
+        popReceipt: "receipt-1",
+        insertedOn: new Date("2026-11-04T07:59:57.500Z"),
+        messageText: JSON.stringify({ version: 2, kind: "inbound", messageSid: "SM123" }),
+      }],
+    });
+    const queue = await import("@/lib/generation-queue");
+
+    const message = await queue.receiveInboundMessage(60);
+    expect(message).toEqual({
+      version: 2,
+      kind: "inbound",
+      messageSid: "SM123",
+      messageId: "inbound-1",
+      popReceipt: "receipt-1",
+      insertedOn: new Date("2026-11-04T07:59:57.500Z"),
+    });
+    expect(h.inboundReceiveMessages).toHaveBeenCalledWith({
+      numberOfMessages: 1,
+      visibilityTimeout: 60,
+    });
+    expect(h.receiveMessages).not.toHaveBeenCalled();
+
+    const renewed = await queue.renewInboundMessage(message!, 60);
+    expect(h.inboundUpdateMessage).toHaveBeenCalledWith(
+      "inbound-1",
+      "receipt-1",
+      JSON.stringify({ version: 2, kind: "inbound", messageSid: "SM123" }),
+      60,
+    );
+    expect(renewed.popReceipt).toBe("inbound-receipt-2");
+    await queue.deleteInboundMessage(renewed);
+    expect(h.inboundDeleteMessage).toHaveBeenCalledWith("inbound-1", "inbound-receipt-2");
+    expect(h.deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it("checks the inbound queue exists and is readable before starting a worker", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    const queue = await import("@/lib/generation-queue");
+
+    await queue.verifyInboundQueueAccess();
+
+    expect(h.inboundGetProperties).toHaveBeenCalledOnce();
+    expect(h.getQueueClient).toHaveBeenCalledWith("inbound");
+  });
+
+  it("fails the inbound preflight when Azure denies queue access", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    h.inboundGetProperties.mockRejectedValue(new Error("Queue access denied"));
+    const queue = await import("@/lib/generation-queue");
+
+    await expect(queue.verifyInboundQueueAccess()).rejects.toThrow("Queue access denied");
+  });
+
+  it("does not let the warm worker preflight silently use the legacy queue", async () => {
+    process.env.AZURE_STORAGE_CONNECTION_STRING = "UseDevelopmentStorage=true";
+    delete process.env.AZURE_STORAGE_INBOUND_QUEUE_NAME;
+    const queue = await import("@/lib/generation-queue");
+
+    await expect(queue.verifyInboundQueueAccess()).rejects.toThrow("AZURE_STORAGE_INBOUND_QUEUE_NAME");
+    expect(h.inboundGetProperties).not.toHaveBeenCalled();
   });
 
   it("receives inbound work while preserving legacy generation work", async () => {

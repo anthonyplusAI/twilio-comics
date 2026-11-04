@@ -67,7 +67,7 @@ export default async function AdminActivityPage({
   const filter: AdminActivityFilter = requestedFilter === "failed-agent-replies"
     ? "failed-agent-replies"
     : "all";
-  const failuresOnly = filter === "failed-agent-replies";
+  const replyIssuesOnly = filter === "failed-agent-replies";
   const history = await getAdminActivityHistory(filter, cursor, range);
   const isCustomRequest = rawMode === "custom";
   const customSelected = range.mode === "custom";
@@ -97,7 +97,7 @@ export default async function AdminActivityPage({
             <Link href={activityHref(filter, { mode: "30d" })} aria-current={range.mode === "30d" ? "page" : undefined}>Last 30 days</Link>
           </nav>
           <form className={styles.customDateForm} method="get" action="/admin/activity" aria-label="Custom activity date range">
-            {failuresOnly && <input type="hidden" name="filter" value="failed-agent-replies" />}
+            {replyIssuesOnly && <input type="hidden" name="filter" value="failed-agent-replies" />}
             <input type="hidden" name="range" value="custom" />
             <div className={styles.customDateHeading}>Custom dates{customSelected ? " (selected)" : ""}</div>
             <label className={styles.customDateField} htmlFor="activity-from">
@@ -122,23 +122,23 @@ export default async function AdminActivityPage({
       <section className={styles.activityPanel} aria-labelledby="activity-heading">
         <div className={styles.panelHeading}>
           <div>
-            <h2 id="activity-heading">{failuresOnly ? "Failed agent replies" : "All activity"}</h2>
-            <p>{failuresOnly
-              ? "Twilio marked these agent text replies failed or undelivered. Open a record for its outbound Message SID and error code."
+            <h2 id="activity-heading">{replyIssuesOnly ? "Agent reply issues" : "All activity"}</h2>
+            <p>{replyIssuesOnly
+              ? "Agent text replies appear here when Twilio reports a failure or a status check finds one still pending after 10 minutes. Open a record for its outbound Message SID and observed status."
               : "Texts, calls, comic jobs, and delivery updates from all participants."}</p>
           </div>
         </div>
         <nav className={styles.activityFilters} aria-label="Activity filters">
-          <Link href={activityHref("all", range)} aria-current={!failuresOnly ? "page" : undefined}>All activity</Link>
-          <Link href={activityHref("failed-agent-replies", range)} aria-current={failuresOnly ? "page" : undefined}>Failed agent replies</Link>
+          <Link href={activityHref("all", range)} aria-current={!replyIssuesOnly ? "page" : undefined}>All activity</Link>
+          <Link href={activityHref("failed-agent-replies", range)} aria-current={replyIssuesOnly ? "page" : undefined}>Agent reply issues</Link>
         </nav>
         {history.items.length ? (
           <ActivityList events={history.items} showUserLink />
-        ) : failuresOnly ? (
+        ) : replyIssuesOnly ? (
           <div className={styles.emptyState}>
-            <strong>{range.mode === "all" ? "No failed agent replies recorded." : "No failed agent replies in this period."}</strong>
+            <strong>{range.mode === "all" ? "No agent reply issues recorded." : "No agent reply issues in this period."}</strong>
             <p>{range.mode === "all"
-              ? "Twilio failures and undelivered callbacks for agent text replies will appear here."
+              ? "Failed, undelivered, and stalled agent text replies will appear here."
               : "Try a wider date range to see more events."}</p>
           </div>
         ) : range.mode !== "all" ? (

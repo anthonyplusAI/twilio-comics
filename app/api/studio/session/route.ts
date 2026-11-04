@@ -26,10 +26,21 @@ export async function POST(request: NextRequest) {
     if (!await getBrowserStudioEnabled()) {
       return NextResponse.json({ error: "Browser Studio is closed" }, { status: 403 });
     }
-    // This endpoint accepts no payload; new identities are charged to a trusted source.
-    if (request.body || request.headers.get("content-length") !== null &&
-        request.headers.get("content-length") !== "0") {
+    // An empty POST can still arrive as a readable stream; reject actual bytes.
+    const contentLength = request.headers.get("content-length");
+    if (contentLength !== null && contentLength !== "0") {
       return NextResponse.json({ error: "Session request must be empty" }, { status: 400 });
+    }
+    if (request.body) {
+      const reader = request.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value.byteLength > 0) {
+          await reader.cancel();
+          return NextResponse.json({ error: "Session request must be empty" }, { status: 400 });
+        }
+      }
     }
     const google = await getAuthorizedGoogleStudioActor();
     if (google) {

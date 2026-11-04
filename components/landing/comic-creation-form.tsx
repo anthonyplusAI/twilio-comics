@@ -15,6 +15,7 @@ import styles from "./comic-creation-form.module.css";
 
 interface ComicCreationFormProps {
   studioReady: boolean;
+  sessionError?: string | null;
   prompt: string;
   setPrompt: (prompt: string) => void;
   style: string;
@@ -64,6 +65,7 @@ function photoDisplayName(file: File, index: number): string {
 
 export function ComicCreationForm({
   studioReady,
+  sessionError,
   prompt,
   setPrompt,
   style,
@@ -260,8 +262,10 @@ export function ComicCreationForm({
   const photoSlotsAvailable = characterFiles.length < MAX_REFERENCE_PHOTOS;
   const canAddPhotos = studioReady && !isLoading && photoSlotsAvailable;
   const canGenerate = studioReady && !isLoading && Boolean(prompt.trim()) && characterFiles.length > 0;
-  const actionHint = !studioReady
-    ? "Preparing Browser Studio…"
+  const actionHint = sessionError
+    ? "Browser Studio could not open. Use Try again above."
+    : !studioReady
+      ? "Preparing Browser Studio…"
     : characterFiles.length === 0
         ? "Add a photo to make your comic personal."
         : !prompt.trim()
@@ -279,7 +283,7 @@ export function ComicCreationForm({
       <div className={styles.formBody}>
         {!studioReady && (
           <div className={styles.signInGate}>
-            <p>Preparing Browser Studio…</p>
+            <p>{sessionError ? "Browser Studio could not open. Use Try again above." : "Preparing Browser Studio…"}</p>
           </div>
         )}
         <section className={styles.stepSection} aria-labelledby="studio-photos-title">
