@@ -62,6 +62,7 @@ vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserv
 
 import { EarlierInboundTurnsPendingError, processInboundMessage } from "@/lib/process-inbound-message";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
+import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
 
 type Receipt = {
   messageSid: string;
@@ -460,6 +461,31 @@ describe("ordered inbound messaging processor", () => {
     expect(sends[0].body).toMatch(/^Twilio Comics\n\nDraft: A robot detective/);
     expect(sends[0].body).toMatch(/\n\nReply HELP.*STOP.*Msg & data rates may apply/i);
     expect(sends[1].body).toBe("Draft: Make it manga");
+  });
+
+  it("sends the normal first SMS greeting in one GSM-7 segment", async () => {
+    receipts.SM1.body = COMIC_START_MESSAGE;
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    const agent = await vi.importActual<typeof import("@/lib/comic-agent")>("@/lib/comic-agent");
+    h.advanceComicAgent.mockImplementation(agent.advanceComicAgent);
+
+    await processInboundMessage("SM1");
+
+    const body = sends[0].body;
+    const basicAscii = new Set(
+      "@ $!\"#%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz\n\r",
+    );
+    const extensionAscii = new Set("^{}\\[~]|");
+    let septets = 0;
+    for (const character of body) {
+      if (basicAscii.has(character)) septets += 1;
+      else if (extensionAscii.has(character)) septets += 2;
+      else throw new Error(`Greeting contains a non-GSM-7 character: ${character}`);
+    }
+    expect(septets).toBeLessThanOrEqual(160);
+    expect(body).toMatch(/^Twilio Comics\n\nSend 1 or 2 photos/i);
+    expect(body).toMatch(/comic idea/i);
+    expect(body).toMatch(/Reply HELP.*STOP.*Msg & data rates may apply/i);
   });
 
   it("caps SMS AI turns at 100 per sender per UTC day without changing the saved draft", async () => {
