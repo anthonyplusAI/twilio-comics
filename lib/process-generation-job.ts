@@ -9,10 +9,12 @@ import {
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import {
+  GenerationJobDeferredError,
   GenerationJobLeaseLostError,
   checkpointGenerationDelivery,
   checkpointGenerationOutput,
   claimGenerationJob,
+  deferGenerationJobRetry,
   getGenerationJob,
   markGenerationJobFailed,
   markGenerationJobSuppressed,
@@ -46,6 +48,12 @@ const EXPIRED_POLICY_REJECTION_REASON = "Result delivery expired after 24 hours 
 const OPTED_OUT_DELIVERY_REASON = "recipient_opted_out";
 const POLICY_REJECTION_REASON = "Image service policy rejection";
 const MISSING_REFERENCE_REASON = "missing_reference";
+const IMAGE_429_DEFAULT_RETRY_SECONDS = 60;
+const IMAGE_TRANSIENT_DEFAULT_RETRY_SECONDS = 20;
+const IMAGE_RETRY_MIN_SECONDS = 10;
+const IMAGE_RETRY_MAX_SECONDS = 600;
+const IMAGE_RETRY_QUEUE_MARGIN_SECONDS = 5;
+const DEFERRED_IMAGE_HTTP_STATUSES = new Set([408, 409, 429]);
 
 class TerminalConversationReconciliationError extends Error {}
 
@@ -442,8 +450,32 @@ function isPermanent(error: unknown, attempts: number): boolean {
     ? error.type === "missing_reference" ||
         error.type === "content_policy" ||
         error.type === "credit_limit" ||
-        [403, 404, 409].includes(error.status || 0)
+        [403, 404].includes(error.status || 0) ||
+        (error.status === 409 && !error.imageGenerationError)
     : false;
+}
+
+function isDeferrableImageError(error: unknown): error is ComicServiceError {
+  const status = error instanceof ComicServiceError ? error.status : undefined;
+  return error instanceof ComicServiceError && error.type === "api_error" &&
+    error.imageGenerationError === true &&
+    (error.retryableConnection === true ||
+      (status !== undefined &&
+        (DEFERRED_IMAGE_HTTP_STATUSES.has(status) || (status >= 500 && status < 600))));
+}
+
+function imageProviderRetryDelaySeconds(jobId: string, error: ComicServiceError): number {
+  // Stable per-job jitter spreads a burst without making a duplicate delivery
+  // choose a different retry time. Invalid/non-UUID tails get no jitter.
+  const suffix = jobId.slice(-2);
+  const jitter = /^[0-9a-f]{2}$/i.test(suffix) ? Number.parseInt(suffix, 16) % 5 : 0;
+  const retryAfterSeconds = error.retryAfterSeconds;
+  const requested = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) &&
+      retryAfterSeconds >= 0
+    ? Math.ceil(retryAfterSeconds)
+    : error.status === 429 ? IMAGE_429_DEFAULT_RETRY_SECONDS : IMAGE_TRANSIENT_DEFAULT_RETRY_SECONDS;
+  return Math.min(IMAGE_RETRY_MAX_SECONDS,
+    Math.max(IMAGE_RETRY_MIN_SECONDS, requested + jitter));
 }
 
 function isMediaSubmissionError(error: unknown): boolean {
@@ -566,6 +598,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
           prompt: claimed.prompt,
           characterImageUrls,
           imageKey,
+          imageMaxRetries: 0,
         })
       : await createComicStory({
           userId: claimed.userId,
@@ -577,6 +610,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
           pageId: claimed.id,
           imageKey,
           preserveOnFailure: true,
+          imageMaxRetries: 0,
         });
     generatedStoryId = result.story.id;
 
@@ -728,7 +762,33 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       return;
     }
     const expired = resultDeliveryExpired(claimed);
-    if (!expired && !isPermanent(error, claimed.attemptCount)) {
+    // The queue deferral is capped at ten minutes. Do not shorten a longer
+    // provider Retry-After: end this attempt and restore the saved draft so
+    // the player can retry later instead of silently retrying too early.
+    const providerWaitTooLong = !generatedStoryId && !deliveryAttempted &&
+      isDeferrableImageError(error) && error.retryAfterSeconds !== undefined &&
+      Number.isFinite(error.retryAfterSeconds) &&
+      error.retryAfterSeconds > IMAGE_RETRY_MAX_SECONDS;
+    if (!expired && !generatedStoryId && !deliveryAttempted &&
+        !providerWaitTooLong && !isPermanent(error, claimed.attemptCount) &&
+        isDeferrableImageError(error)) {
+      const delaySeconds = imageProviderRetryDelaySeconds(claimed.id, error);
+      try {
+        await deferGenerationJobRetry(claimed.id, workerId, delaySeconds);
+        await logGenerationEvent(
+          claimed,
+          "generation.retry",
+          `attempt:${claimed.attemptCount}:retry`,
+          "deferred",
+          { ...errorDetails(error), retryDelaySeconds: delaySeconds },
+        );
+      } catch (checkpointError) {
+        if (checkpointError instanceof GenerationJobLeaseLostError) return;
+        throw checkpointError;
+      }
+      throw new GenerationJobDeferredError(delaySeconds + IMAGE_RETRY_QUEUE_MARGIN_SECONDS);
+    }
+    if (!expired && !providerWaitTooLong && !isPermanent(error, claimed.attemptCount)) {
       try {
         await returnGenerationJobToQueue(claimed.id, workerId, message);
         await logGenerationEvent(
@@ -753,7 +813,11 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       const terminalReason = expired
         ? policyRejected ? EXPIRED_POLICY_REJECTION_REASON : EXPIRED_DELIVERY_REASON
         : policyRejected ? POLICY_REJECTION_REASON
-          : missingReference ? MISSING_REFERENCE_REASON : message;
+          : missingReference ? MISSING_REFERENCE_REASON
+            : error instanceof ComicServiceError && error.status === 429
+              ? error.type === "credit_limit" ? "Image credits unavailable" : "Image request rate limited"
+              : isDeferrableImageError(error) ? "Image service unavailable"
+              : message;
       if (generatedStoryId) {
         await markGenerationJobSuppressed(claimed.id, workerId, terminalReason, generatedStoryId);
       } else {

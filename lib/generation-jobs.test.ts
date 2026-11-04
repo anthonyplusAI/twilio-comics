@@ -34,6 +34,7 @@ vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityE
 
 import {
   GenerationJobLeaseLostError,
+  deferGenerationJobRetry,
   checkpointGenerationDelivery,
   checkpointGenerationOutput,
   markGenerationJobFailed,
@@ -472,6 +473,7 @@ describe("processing lease fences", () => {
     { name: "delivery checkpoint", run: () => checkpointGenerationDelivery(jobId, owner, data) },
     { name: "success transition", run: () => markGenerationJobSucceeded(jobId, owner, data) },
     { name: "requeue transition", run: () => returnGenerationJobToQueue(jobId, owner, "retry") },
+    { name: "rate-limit defer", run: () => deferGenerationJobRetry(jobId, owner, 75) },
   ];
 
   it.each(operations)("rejects a stale owner on $name", async ({ run }) => {
@@ -503,6 +505,54 @@ describe("processing lease fences", () => {
     await expect(run()).resolves.toBeUndefined();
 
     expect(h.update).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a deferred image job processing with its quota claim and original queuedAt", async () => {
+    h.row = jobRow({ id: jobId, ...input, quotaClaimKey: "claim-9" });
+    h.row.status = "processing";
+    h.row.leaseOwner = owner;
+    h.row.queuedAt = new Date(Date.now() - 20 * 60_000);
+    const originalQueuedAt = h.row.queuedAt;
+
+    await deferGenerationJobRetry(jobId, owner, 75);
+
+    expect(h.row.status).toBe("processing");
+    expect(h.row.leaseOwner).toBe(owner);
+    expect(h.row.quotaClaimKey).toBe("claim-9");
+    expect(h.row.queuedAt).toBe(originalQueuedAt);
+    expect(h.row.lastError).toBe("image_provider_deferred");
+    const leaseQuery = dialect.sqlToQuery(h.row.leaseExpiresAt as SQL);
+    expect(leaseQuery.sql).toContain("NOW()");
+    expect(leaseQuery.params).toContain(75);
+  });
+
+  it("recovers a deferred processing job after its lease expires if queue renewal is lost", async () => {
+    h.row = jobRow({ id: jobId, ...input, quotaClaimKey: "claim-9" });
+    h.row.status = "processing";
+    h.row.leaseOwner = owner;
+    h.row.queuedAt = new Date(Date.now() - 20 * 60_000);
+    h.row.leaseExpiresAt = new Date(Date.now() + 60_000);
+    h.select.mockImplementation(() => {
+      const query = {
+        from: () => query,
+        where: (condition: SQL) => {
+          expect(dialect.sqlToQuery(condition).sql).toContain("lease_expires_at");
+          return query;
+        },
+        orderBy: () => query,
+        limit: async () => h.row?.leaseExpiresAt instanceof Date &&
+          h.row.leaseExpiresAt.getTime() < Date.now() ? [{ ...h.row }] : [],
+      };
+      return query;
+    });
+
+    await expect(recoverUnpublishedGenerationJobs(10)).resolves.toBe(0);
+    expect(h.send).not.toHaveBeenCalled();
+
+    h.row.leaseExpiresAt = new Date(Date.now() - 1_000);
+    await expect(recoverUnpublishedGenerationJobs(10)).resolves.toBe(1);
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.row.status).toBe("processing");
   });
 
   it("atomically fails an owned job and releases a reserved free quota claim", async () => {

@@ -1,3 +1,4 @@
+import { APIConnectionError } from "openai";
 import { buildComicPrompt } from "./prompt";
 import { generateComicImage } from "./image-generation";
 import {
@@ -33,6 +34,16 @@ const PUBLIC_MODERATION_CATEGORIES = [
   "violence/graphic",
 ] as const;
 
+// A 429 can mean either a temporary request-rate limit or credits that cannot
+// recover with a retry. OpenAI exposes the specific cause in the error code.
+const HARD_BILLING_CODES = new Set([
+  "credit_balance_exhausted",
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+  "insufficient_quota", // Legacy code.
+]);
+
 export type ComicModerationCategory = (typeof PUBLIC_MODERATION_CATEGORIES)[number];
 export type ComicModerationStage = "input" | "output" | "unknown";
 export interface ComicModerationDetails {
@@ -45,17 +56,29 @@ export class ComicServiceError extends Error {
   status?: number;
   code?: "moderation_blocked";
   moderationDetails?: ComicModerationDetails;
+  retryAfterSeconds?: number;
+  imageGenerationError?: boolean;
+  retryableConnection?: boolean;
   constructor(
     type: "content_policy" | "credit_limit" | "api_error" | "missing_reference",
     message: string,
     status?: number,
-    options?: { code?: "moderation_blocked"; moderationDetails?: ComicModerationDetails },
+    options?: {
+      code?: "moderation_blocked";
+      moderationDetails?: ComicModerationDetails;
+      retryAfterSeconds?: number;
+      imageGenerationError?: boolean;
+      retryableConnection?: boolean;
+    },
   ) {
     super(message);
     this.type = type;
     this.status = status;
     this.code = options?.code;
     this.moderationDetails = options?.moderationDetails;
+    this.retryAfterSeconds = options?.retryAfterSeconds;
+    this.imageGenerationError = options?.imageGenerationError;
+    this.retryableConnection = options?.retryableConnection;
   }
 }
 
@@ -81,23 +104,66 @@ function providerModerationDetails(error: unknown): ComicModerationDetails | und
   return stage || categories.length ? { ...(stage ? { stage } : {}), categories } : undefined;
 }
 
+function providerErrorField(error: unknown, field: "code" | "type"): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const direct = (error as Record<string, unknown>)[field];
+  if (typeof direct === "string" && direct) return direct;
+  const inner = "error" in error ? (error as { error?: unknown }).error : undefined;
+  if (!inner || typeof inner !== "object") return undefined;
+  const nested = (inner as Record<string, unknown>)[field];
+  return typeof nested === "string" && nested ? nested : undefined;
+}
+
+function providerRetryAfterSeconds(error: unknown): number | undefined {
+  if (!error || typeof error !== "object" || !("headers" in error)) return undefined;
+  const headers = (error as { headers?: unknown }).headers;
+  if (!headers || typeof headers !== "object") return undefined;
+  let rawMillis: unknown;
+  let raw: unknown;
+  if ("get" in headers && typeof headers.get === "function") {
+    rawMillis = headers.get("retry-after-ms");
+    raw = headers.get("retry-after");
+  } else {
+    rawMillis = Object.entries(headers).find(([name]) => name.toLowerCase() === "retry-after-ms")?.[1];
+    raw = Object.entries(headers).find(([name]) => name.toLowerCase() === "retry-after")?.[1];
+  }
+  if (typeof rawMillis === "string" && rawMillis.trim()) {
+    const millis = Number(rawMillis);
+    if (Number.isFinite(millis) && millis >= 0) return Math.ceil(millis / 1000);
+  }
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric >= 0) return Math.ceil(numeric);
+  const date = Date.parse(raw);
+  return Number.isFinite(date) ? Math.max(0, Math.ceil((date - Date.now()) / 1000)) : undefined;
+}
+
 function comicImageError(error: unknown): ComicServiceError {
   const message = error instanceof Error ? error.message : "Unknown error";
   const statusValue = error && typeof error === "object" && "status" in error
     ? (error as { status?: unknown }).status : undefined;
   const status = typeof statusValue === "number" && Number.isInteger(statusValue)
     ? statusValue : undefined;
-  const code = error && typeof error === "object" && "code" in error
-    ? (error as { code?: unknown }).code : undefined;
+  const code = providerErrorField(error, "code");
+  const type = providerErrorField(error, "type");
 
   if (code === "moderation_blocked" || isContentPolicyViolation(message)) {
     return new ComicServiceError("content_policy", message, status, code === "moderation_blocked"
       ? { code, moderationDetails: providerModerationDetails(error) } : undefined);
   }
-  if (status === 402 || status === 429) {
+  if (status === 402 || HARD_BILLING_CODES.has(code || "") ||
+      (status === 429 && !code && type === "insufficient_quota")) {
     return new ComicServiceError("credit_limit", message, status);
   }
-  return new ComicServiceError("api_error", message, status);
+  // Mark the origin so an image API 409 can retry without changing the
+  // terminal handling of story ownership conflicts elsewhere in the service.
+  return new ComicServiceError("api_error", message, status, {
+    imageGenerationError: true,
+    retryableConnection: error instanceof APIConnectionError,
+    retryAfterSeconds: status !== undefined &&
+      ([408, 409, 429].includes(status) || (status >= 500 && status < 600))
+      ? providerRetryAfterSeconds(error) : undefined,
+  });
 }
 
 export interface CreateComicArgs {
@@ -114,6 +180,7 @@ export interface CreateComicArgs {
   generateTitle?: boolean;
   usesOwnApiKey?: boolean;
   beforeProviderCall?: () => Promise<void>;
+  imageMaxRetries?: number;
 }
 
 export interface CreateComicResult {
@@ -136,6 +203,7 @@ export async function createComicStory({
   generateTitle = true,
   usesOwnApiKey = !!apiKey,
   beforeProviderCall,
+  imageMaxRetries,
 }: CreateComicArgs): Promise<CreateComicResult> {
   if (!characterImageUrls.some((url) => typeof url === "string" && url.trim().length > 0)) {
     throw new ComicServiceError(
@@ -250,6 +318,7 @@ export async function createComicStory({
       apiKey: openAIApiKey,
       prompt: fullPrompt,
       referenceImageUrls: characterImageUrls,
+      imageMaxRetries,
     });
   } catch (error) {
     await cleanupStoryAfterFailure();
@@ -289,6 +358,7 @@ export interface CreateComicContinuationArgs {
   apiKey?: string;
   characterImageUrls?: string[];
   imageKey?: string;
+  imageMaxRetries?: number;
 }
 
 /** Safe to call after a continuation job is marked failed; generated pages survive. */
@@ -309,6 +379,7 @@ export async function createComicContinuationPage({
   apiKey,
   characterImageUrls = [],
   imageKey = `stories/${storyId}/page-${pageId}.png`,
+  imageMaxRetries,
 }: CreateComicContinuationArgs): Promise<CreateComicResult> {
   const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
   if (!openAIApiKey) {
@@ -393,6 +464,7 @@ export async function createComicContinuationPage({
       apiKey: openAIApiKey,
       prompt: fullPrompt,
       referenceImageUrls,
+      imageMaxRetries,
     });
   } catch (error) {
     throw comicImageError(error);

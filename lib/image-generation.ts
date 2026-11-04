@@ -9,6 +9,7 @@ export interface GenerateComicImageArgs {
   apiKey: string;
   prompt: string;
   referenceImageUrls?: string[];
+  imageMaxRetries?: number;
 }
 
 async function urlToFile(url: string, index: number) {
@@ -22,7 +23,7 @@ async function urlToFile(url: string, index: number) {
     redirect: "manual",
   });
   if (!res.ok) {
-    throw new Error(`Failed to fetch reference image ${url}: ${res.status}`);
+    throw new Error(`Failed to fetch reference image: ${res.status}`);
   }
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length > 10 * 1024 * 1024) {
@@ -37,8 +38,12 @@ export async function generateComicImage({
   apiKey,
   prompt,
   referenceImageUrls = [],
+  imageMaxRetries,
 }: GenerateComicImageArgs): Promise<Buffer> {
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({
+    apiKey,
+    ...(imageMaxRetries === undefined ? {} : { maxRetries: imageMaxRetries }),
+  });
   const refs = referenceImageUrls.slice(0, MAX_REFERENCE_IMAGES);
 
   let response;

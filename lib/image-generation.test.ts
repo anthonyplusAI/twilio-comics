@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const { generateMock, editMock, toFileMock } = vi.hoisted(() => ({
+const { openAIOptionsMock, generateMock, editMock, toFileMock } = vi.hoisted(() => ({
+  openAIOptionsMock: vi.fn(),
   generateMock: vi.fn(),
   editMock: vi.fn(),
   toFileMock: vi.fn(async (buf: Buffer, name: string, opts: any) => ({ name, opts })),
 }));
 
 vi.mock("openai", () => {
-  function OpenAI() {
+  function OpenAI(options: unknown) {
+    openAIOptionsMock(options);
     return { images: { generate: generateMock, edit: editMock } };
   }
   return { default: OpenAI, toFile: toFileMock };
@@ -27,6 +29,7 @@ beforeEach(() => {
   vi.stubEnv("MEDIA_SIGNING_SECRET", "test-media-signing-secret");
   generateMock.mockReset();
   editMock.mockReset();
+  openAIOptionsMock.mockReset();
   toFileMock.mockClear();
   generateMock.mockResolvedValue({ data: [{ b64_json: B64 }] });
   editMock.mockResolvedValue({ data: [{ b64_json: B64 }] });
@@ -44,6 +47,25 @@ afterEach(() => {
 });
 
 describe("generateComicImage", () => {
+  it("keeps SDK retry defaults for browser image generation", async () => {
+    await generateComicImage({ apiKey: "k", prompt: "hero", referenceImageUrls: [] });
+
+    expect(openAIOptionsMock).toHaveBeenCalledExactlyOnceWith({ apiKey: "k" });
+  });
+
+  it("uses zero SDK retries only when the caller requests them", async () => {
+    await generateComicImage({ apiKey: "k", prompt: "hero", imageMaxRetries: 0 });
+    await generateComicImage({
+      apiKey: "k", prompt: "hero", imageMaxRetries: 0,
+      referenceImageUrls: ["https://account.blob.core.windows.net/comics/a.png"],
+    });
+
+    expect(openAIOptionsMock).toHaveBeenNthCalledWith(1, { apiKey: "k", maxRetries: 0 });
+    expect(openAIOptionsMock).toHaveBeenNthCalledWith(2, { apiKey: "k", maxRetries: 0 });
+    expect(generateMock).toHaveBeenCalledOnce();
+    expect(editMock).toHaveBeenCalledOnce();
+  });
+
   it("uses images.generate (text-only) when there are no reference images", async () => {
     const out = await generateComicImage({ apiKey: "k", prompt: "hero", referenceImageUrls: [] });
     expect(generateMock).toHaveBeenCalledOnce();

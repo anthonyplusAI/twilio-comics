@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { APIConnectionError, APIConnectionTimeoutError } from "openai";
 
 const h = vi.hoisted(() => ({
   generateComicImage: vi.fn(),
@@ -163,6 +164,16 @@ describe("createComicStory", () => {
       characterImageUrls: ["https://s3/a.png"],
     });
     expect(h.generateComicImage.mock.calls[0][0].referenceImageUrls).toEqual(["https://s3/a.png"]);
+    expect(h.generateComicImage.mock.calls[0][0].imageMaxRetries).toBeUndefined();
+  });
+
+  it("forwards a phone job's zero-retry image override", async () => {
+    await createComicStory({
+      userId: "u1", prompt: "x", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO], imageMaxRetries: 0,
+    });
+
+    expect(h.generateComicImage.mock.calls[0][0].imageMaxRetries).toBe(0);
   });
 
   it("uses a provided OpenAI key", async () => {
@@ -249,6 +260,164 @@ describe("createComicStory", () => {
       createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toMatchObject({ type: "credit_limit" });
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
+  });
+
+  it.each([
+    { name: "generic rate limit", code: undefined, type: undefined },
+    { name: "request rate limit", code: "rate_limit_exceeded", type: "rate_limit_error" },
+    { name: "slow down", code: "slow_down", type: "rate_limit_error" },
+    { name: "specific rate limit with a broad quota type", code: "rate_limit_exceeded", type: "insufficient_quota" },
+  ])("keeps a $name 429 retryable", async ({ code, type }) => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Provider busy"), {
+      status: 429,
+      code,
+      type,
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "api_error", status: 429, imageGenerationError: true });
+    expect(h.deleteStory).toHaveBeenCalledWith("s1");
+  });
+
+  it.each([
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+    "insufficient_quota",
+  ])("keeps hard 429 code %s terminal", async (code) => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Billing limit"), {
+      status: 429,
+      code,
+      type: "insufficient_quota",
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "credit_limit", status: 429 });
+  });
+
+  it("recognizes a legacy quota type when a 429 has no specific code", async () => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Billing limit"), {
+      status: 429,
+      type: "insufficient_quota",
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "credit_limit", status: 429 });
+  });
+
+  it("recognizes a hard billing code in an unwrapped provider response", async () => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Billing limit"), {
+      status: 429,
+      error: { code: "credit_balance_exhausted", type: "insufficient_quota" },
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "credit_limit", status: 429 });
+  });
+
+  it("carries a numeric Retry-After hint from a temporary image 429", async () => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Provider busy"), {
+      status: 429,
+      code: "rate_limit_exceeded",
+      headers: new Headers({ "retry-after": "42" }),
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "api_error", status: 429, retryAfterSeconds: 42 });
+  });
+
+  it("honors the image API's millisecond retry hint when both headers are present", async () => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Provider busy"), {
+      status: 429,
+      headers: new Headers({ "retry-after-ms": "45500", "retry-after": "30" }),
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({ type: "api_error", status: 429, retryAfterSeconds: 46 });
+  });
+
+  it.each([503, 529])("carries Retry-After from an overloaded image %i", async (status) => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Provider busy"), {
+      status,
+      headers: new Headers({ "retry-after": "35" }),
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({
+      type: "api_error", status, retryAfterSeconds: 35, imageGenerationError: true,
+    });
+  });
+
+  it.each([
+    ["connection failure", new APIConnectionError({ message: "Connection dropped" })],
+    ["connection timeout", new APIConnectionTimeoutError()],
+  ])("marks an OpenAI image %s for bounded job retry", async (_label, providerError) => {
+    h.generateComicImage.mockRejectedValue(providerError);
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({
+      type: "api_error", imageGenerationError: true, retryableConnection: true,
+    });
+  });
+
+  it("does not mark a local invalid reference as an OpenAI connection failure", async () => {
+    h.generateComicImage.mockRejectedValue(new Error(
+      "Reference image must be a configured Azure Blob or signed media URL",
+    ));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({
+      type: "api_error", imageGenerationError: true, retryableConnection: false,
+    });
+  });
+
+  it("marks an image API conflict separately from a story ownership conflict", async () => {
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Image API conflict"), {
+      status: 409,
+    }));
+
+    await expect(createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    })).rejects.toMatchObject({
+      type: "api_error", status: 409, imageGenerationError: true,
+    });
+  });
+
+  it("accepts an HTTP-date Retry-After hint for temporary image 429s", async () => {
+    const retryAt = new Date(Date.now() + 90_000).toUTCString();
+    h.generateComicImage.mockRejectedValue(Object.assign(new Error("Provider busy"), {
+      status: 429,
+      code: "rate_limit_exceeded",
+      headers: new Headers({ "retry-after": retryAt }),
+    }));
+
+    const failure = await createComicStory({
+      userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ type: "api_error", status: 429 });
+    expect((failure as { retryAfterSeconds: number }).retryAfterSeconds).toBeGreaterThanOrEqual(88);
+    expect((failure as { retryAfterSeconds: number }).retryAfterSeconds).toBeLessThanOrEqual(90);
   });
 
   it("uses the prompt title and finishes the comic when title generation rejects", async () => {
@@ -363,10 +532,12 @@ describe("createComicContinuationPage", () => {
       storyId: "s1",
       pageId: "p2",
       prompt: "A second page",
+      imageMaxRetries: 0,
     })).rejects.toMatchObject({
       type: "content_policy",
       code: "moderation_blocked",
       moderationDetails: { stage: "output", categories: ["sexual"] },
     });
+    expect(h.generateComicImage.mock.calls[0][0].imageMaxRetries).toBe(0);
   });
 });
