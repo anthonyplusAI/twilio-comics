@@ -46,6 +46,7 @@ describe("production readiness", () => {
     expect(query).toContain("public.admin_login_attempts");
     expect(query).toContain("public.admin_credentials");
     expect(query).toContain("public.experience_settings");
+    expect(query).toContain("studio_enabled");
     expect(query).toContain("public.stories");
     expect(query).toContain("dub_key");
     expect(query).toContain("dub_short_url");

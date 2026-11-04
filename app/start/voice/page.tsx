@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, CheckCircle2, ImagePlus, MessageCircle, Phone } from "lucide-react";
-import { getCameraDestination } from "@/lib/browser-photo-access";
 import { getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
@@ -26,14 +25,8 @@ export default async function VoiceStartPage() {
   const smsReady = channels.includes("sms") && Boolean(contact.smsHref);
   const settings = voiceReady ? await getExperienceSettings() : null;
   const voiceCanUsePhotos = voiceReady && settings?.voicePhotoMode !== "none";
-  const camera = voiceCanUsePhotos && settings?.cameraEnabled
-    ? await getCameraDestination(settings)
-    : null;
-  const browserUploadReady = Boolean(camera?.callHref);
-  const mmsReady = voiceCanUsePhotos && smsReady;
-  const hasPhotoPath = browserUploadReady || mmsReady;
-  const browserUploadPrimary = browserUploadReady && !mmsReady;
-  const photoTextHref = mmsReady && contact.phoneNumber ? `sms:${contact.phoneNumber}` : null;
+  const hasPhotoPath = voiceCanUsePhotos && smsReady;
+  const photoTextHref = hasPhotoPath && contact.phoneNumber ? `sms:${contact.phoneNumber}` : null;
 
   return (
     <div className={`${marketingStyles.page} ${styles.page}`}>
@@ -52,7 +45,7 @@ export default async function VoiceStartPage() {
       <main>
         <section className={styles.hero} aria-labelledby="voice-start-title">
           <div className={styles.heroInner}>
-            <p className={styles.kicker}>Twilio Voice</p>
+            <p className={styles.kicker}>Twilio SMS + Voice</p>
             <h1 id="voice-start-title">
               {!voiceReady
                 ? "Voice is unavailable."
@@ -86,40 +79,17 @@ export default async function VoiceStartPage() {
                   <ImagePlus size={27} aria-hidden="true" />
                 </div>
                 <h2 id="photos-step-title">Save your reference photos.</h2>
-                {browserUploadPrimary ? (
-                  <>
-                    <p>
-                      Verify the phone number you&apos;ll call from and take or upload one or two photos.
-                      Finish photo setup, then call from that same number within 24 hours.
-                    </p>
-                    <Link className={styles.primaryAction} href="/start/camera">
-                      Take or upload photos <ArrowUpRight size={20} aria-hidden="true" />
-                    </Link>
-                    <p className={styles.finePrint}>
-                      You&apos;ll receive a text code to save photos and a new six-digit code when you call.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p>
-                      Attach one or two photos in a text to <strong>{contact.phoneNumber}</strong> from
-                      the phone you&apos;ll call on. Wait for the “Photo saved” reply, then call within 24 hours.
-                    </p>
-                    <a className={styles.primaryAction} href={photoTextHref ?? undefined}>
-                      <MessageCircle size={20} aria-hidden="true" /> Open Messages to attach photos
-                      <ArrowUpRight size={20} aria-hidden="true" />
-                    </a>
-                    <p className={styles.finePrint}>
-                      Send only photos first. Making another comic? Text NEW, then send fresh photos.
-                    </p>
-                    {browserUploadReady && (
-                      <p className={styles.alternatePhotoPath}>
-                        Want to use your browser camera? <Link href="/start/camera">Take or upload photos</Link> there
-                        with the same phone number before calling.
-                      </p>
-                    )}
-                  </>
-                )}
+                <p>
+                  Attach one or two photos in a text to <strong>{contact.phoneNumber}</strong> from
+                  the phone you&apos;ll call on. Wait for the “Photo saved” reply, then call within 24 hours.
+                </p>
+                <a className={styles.primaryAction} href={photoTextHref ?? undefined}>
+                  <MessageCircle size={20} aria-hidden="true" /> Open Messages to attach photos
+                  <ArrowUpRight size={20} aria-hidden="true" />
+                </a>
+                <p className={styles.finePrint}>
+                  Send only photos first. Making another comic? Text NEW, then send fresh photos.
+                </p>
               </section>
 
               <section className={styles.step} aria-labelledby="call-step-title">
@@ -170,7 +140,7 @@ export default async function VoiceStartPage() {
                 ? smsReady
                   ? "Voice calls currently cannot use reference photos. Choose SMS for a personalized comic instead."
                   : "Voice calls currently cannot use reference photos. Choose another available start option."
-                : "The browser upload and MMS photo paths are unavailable. A personalized Voice comic cannot start yet."}
+                : "Text messaging is unavailable. A personalized Voice comic cannot start yet."}
             </p>
             {smsReady && contact.smsHref && (
               <a className={styles.primaryAction} href={contact.smsHref}>

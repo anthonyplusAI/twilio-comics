@@ -727,7 +727,7 @@ describe("ordered inbound messaging processor", () => {
 
   it("adds recent verified kiosk photos to an SMS idea", async () => {
     const cameraPhoto = "blob:uploads/twilio_owner/camera/photo.jpg";
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "confirming",
@@ -752,7 +752,7 @@ describe("ordered inbound messaging processor", () => {
     conversation.collected = { characterImageUrls: [cameraPhoto] };
     receipts.SM1.mediaUrls = [mmsPhoto];
     receipts.SM1.mediaContentTypes = ["image/jpeg"];
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.advanceComicAgent.mockResolvedValue({
       nextState: "confirming",
       collected: { prompt: "A robot detective", characterImageUrls: [mmsPhoto] },
@@ -779,7 +779,7 @@ describe("ordered inbound messaging processor", () => {
         prompt: "Old draft", characterImageUrls: [stagedPhoto],
       };
       receipts.SM1.body = command;
-      h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+      h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
       h.getStagedCameraPhotoReferences.mockResolvedValue([stagedPhoto]);
       h.advanceComicAgent.mockResolvedValue({
         nextState: "collecting",
@@ -1038,7 +1038,7 @@ describe("ordered inbound messaging processor", () => {
     receipts.SM1.body = "NEW";
     receipts.SM1.mediaUrls = [mmsPhoto];
     receipts.SM1.mediaContentTypes = ["image/jpeg"];
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockResolvedValue([boothPhoto]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "collecting",
@@ -1095,7 +1095,7 @@ describe("ordered inbound messaging processor", () => {
       prompt: "Robot detective", style: "noir", characterImageUrls: [submittedPhoto],
     };
     receipts.SM1.body = "CREATE";
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockImplementation(async () => [...stagedPhotos]);
     h.clearStagedCameraPhotoReferences.mockImplementation(async (_phone: string, expected: string[]) => {
       if (JSON.stringify(expected) !== JSON.stringify(stagedPhotos)) return false;
@@ -1141,7 +1141,7 @@ describe("ordered inbound messaging processor", () => {
     expect(receipts.SM1.status).toBe("completed");
   });
 
-  it("does not depend on camera staging when approving a text-only comic with camera disabled", async () => {
+  it("retries an SMS approval if the legacy stage lookup fails after camera intake closes", async () => {
     conversation.state = "confirming";
     conversation.collected = { prompt: "Robot detective", style: "noir" };
     receipts.SM1.body = "CREATE";
@@ -1155,15 +1155,13 @@ describe("ordered inbound messaging processor", () => {
       submission: { prompt: "Robot detective", style: "noir", characterImageUrls: [] },
     });
 
-    await processInboundMessage("SM1");
+    await expect(processInboundMessage("SM1")).rejects.toThrow("camera staging unavailable");
 
-    expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
+    expect(h.getStagedCameraPhotoReferences).toHaveBeenCalledExactlyOnceWith(FROM, "channel-user");
     expect(h.clearStagedCameraPhotoReferences).not.toHaveBeenCalled();
     expect(h.submitGenerationJob).not.toHaveBeenCalled();
     expect(conversation.state).toBe("confirming");
-    expect(receipts.SM1.status).toBe("completed");
-    expect(receipts.SM1.submission).toBeNull();
-    expect(sends[0].body).toMatch(/at least one reference photo/i);
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
 
   it.each(["sms", "whatsapp"] as const)(
@@ -1208,7 +1206,7 @@ describe("ordered inbound messaging processor", () => {
       prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
     };
     receipts.SM1.body = "CREATE";
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "generating",
@@ -1237,7 +1235,7 @@ describe("ordered inbound messaging processor", () => {
       prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
     };
     receipts.SM1.body = "CREATE";
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "generating",
@@ -1270,7 +1268,7 @@ describe("ordered inbound messaging processor", () => {
       prompt: "Robot detective", style: "noir", characterImageUrls: [cameraPhoto],
     };
     receipts.SM1.body = "CREATE";
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
     h.getStagedCameraPhotoReferences.mockResolvedValue([cameraPhoto]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "generating",
@@ -1328,7 +1326,7 @@ describe("ordered inbound messaging processor", () => {
     receipts.SM1.body = "";
     receipts.SM1.mediaUrls = ["https://api.twilio.com/attachment"];
     receipts.SM1.mediaContentTypes = ["application/pdf"];
-    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: true });
+    h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
 
     await processInboundMessage("SM1");
 
@@ -1440,6 +1438,7 @@ describe("ordered inbound messaging processor", () => {
 
     await processInboundMessage("SM1");
 
+    expect(h.getStagedCameraPhotoReferences).not.toHaveBeenCalled();
     expect(conversation.state).toBe("confirming");
     expect(conversation.collected).toMatchObject({
       characterImageUrls: ["https://api.twilio.com/photo"],

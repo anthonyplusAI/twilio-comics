@@ -89,8 +89,8 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
   // Relay setup is reached only after Twilio Verify confirms that this caller
   // receives SMS at the same number. A recent, unfinished photo draft can
   // therefore be handed to Voice without trusting caller ID alone.
-  const { voicePhotoMode, cameraEnabled } = await getExperienceSettings();
-  const sourceChannels = photoHandoffSourceChannels(voicePhotoMode, cameraEnabled);
+  const { voicePhotoMode } = await getExperienceSettings();
+  const sourceChannels = photoHandoffSourceChannels(voicePhotoMode);
 
   const cutoff = new Date(Date.now() - VOICE_PHOTO_HANDOFF_WINDOW_MS);
   return db.transaction(async (tx) => {

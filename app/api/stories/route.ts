@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import { stories, pages } from "@/lib/schema";
 import { eq } from "drizzle-orm";
+import { getStudioReadActor } from "@/lib/studio-guest-session";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioReadActor(request);
+    const userId = actor?.userId;
 
     if (!userId) {
       return NextResponse.json(
@@ -75,8 +75,8 @@ export async function GET() {
       return bTime - aTime; // Most recent first
     });
 
-    return NextResponse.json({
-      stories: storiesWithCovers
+    return NextResponse.json({ stories: storiesWithCovers }, {
+      headers: { "Cache-Control": "private, no-store, max-age=0" },
     });
   } catch (error) {
     console.error("Error fetching user stories:", error);

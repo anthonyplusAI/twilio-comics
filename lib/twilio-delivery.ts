@@ -49,6 +49,10 @@ const terminalStatuses = [
 const mediaFallbackErrorCodes = [
   "11751", "21620", "21621", "21622", "30008", "30011", "63019", "63021",
 ] as const;
+// Twilio says a 30008 SMS failure may be transient and recommends trying a
+// shorter body. Other text failures may be opt-out, filtering, or bad routing;
+// sending the same result again would not fix those conditions.
+const RETRYABLE_TEXT_ERROR_CODE = "30008";
 const RESULT_DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TWILIO_VALIDITY_SAFETY_SECONDS = 10;
 const MIN_TWILIO_VALIDITY_SECONDS = 6;
@@ -292,15 +296,25 @@ export async function recordFallbackMessageStatus({
 
 function eligibleForTextFallback(now: Date) {
   return and(
-    eq(generationJobs.deliveryHadMedia, true),
     inArray(generationJobs.deliveryStatus, ["failed", "undelivered"]),
-    inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
+    or(
+      and(
+        eq(generationJobs.deliveryHadMedia, true),
+        inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
+        lt(generationJobs.deliveryFallbackAttempts, 2),
+      ),
+      and(
+        eq(generationJobs.deliveryHadMedia, false),
+        inArray(generationJobs.source, ["sms", "voice"]),
+        eq(generationJobs.deliveryErrorCode, RETRYABLE_TEXT_ERROR_CODE),
+        lt(generationJobs.deliveryFallbackAttempts, 1),
+      ),
+    ),
     isNull(generationJobs.deliveryFallbackSid),
     or(
       isNull(generationJobs.deliveryFallbackStatus),
       notInArray(generationJobs.deliveryFallbackStatus, ["suppressed"]),
     ),
-    lt(generationJobs.deliveryFallbackAttempts, 2),
     or(
       isNull(generationJobs.deliveryFallbackLeaseExpiresAt),
       lt(generationJobs.deliveryFallbackLeaseExpiresAt, now),
@@ -320,9 +334,18 @@ async function suppressExpiredTextFallback(jobId: string, now = new Date()): Pro
     })
     .where(and(
       eq(generationJobs.id, jobId),
-      eq(generationJobs.deliveryHadMedia, true),
       inArray(generationJobs.deliveryStatus, ["failed", "undelivered"]),
-      inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
+      or(
+        and(
+          eq(generationJobs.deliveryHadMedia, true),
+          inArray(generationJobs.deliveryErrorCode, [...mediaFallbackErrorCodes]),
+        ),
+        and(
+          eq(generationJobs.deliveryHadMedia, false),
+          inArray(generationJobs.source, ["sms", "voice"]),
+          eq(generationJobs.deliveryErrorCode, RETRYABLE_TEXT_ERROR_CODE),
+        ),
+      ),
       isNull(generationJobs.deliveryFallbackSid),
       or(
         isNull(generationJobs.deliveryFallbackStatus),
@@ -364,8 +387,8 @@ async function suppressExpiredTextFallback(jobId: string, now = new Date()): Pro
   }
 }
 
-/** Claim at most two text-link attempts across duplicate callbacks and recovery runs. */
-export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean> {
+/** Claim at most two media fallbacks or one short SMS retry across callbacks. */
+export async function sendFailedComicTextFallback(jobId: string): Promise<boolean> {
   const now = new Date();
   const [job] = await db
     .update(generationJobs)
@@ -395,7 +418,9 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
     const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
     if (!baseUrl) throw new Error("PUBLIC_BASE_URL is not configured");
     const comicUrl = savedHttpsShortLink(story.dubShortUrl) ?? `${baseUrl}/story/${story.slug}`;
-    const body = `Your comic "${story.title.slice(0, 100)}" is ready:\n${comicUrl}\n\n${GITHUB_STAR_MESSAGE}`;
+    const body = job.deliveryHadMedia === false
+      ? `Your comic: ${comicUrl}`
+      : `Your comic "${story.title.slice(0, 100)}" is ready:\n${comicUrl}\n\n${GITHUB_STAR_MESSAGE}`;
     const validityPeriod = resultDeliveryValiditySeconds(job);
     if (validityPeriod === null) {
       await suppressExpiredTextFallback(jobId);
@@ -427,6 +452,7 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
         details: {
           fallback: true,
           hadMedia: false,
+          originalHadMedia: job.deliveryHadMedia,
           attemptCount: job.attemptCount,
           fallbackAttempt: job.deliveryFallbackAttempts,
         },
@@ -470,7 +496,7 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
         await db
           .update(generationJobs)
           .set({
-            deliveryFallbackStatus: job.deliveryFallbackAttempts >= 2
+            deliveryFallbackStatus: job.deliveryFallbackAttempts >= (job.deliveryHadMedia === false ? 1 : 2)
               ? "failed"
               : "retry_pending",
             deliveryFallbackLeaseExpiresAt: null,
@@ -486,8 +512,8 @@ export async function sendFailedMmsTextFallback(jobId: string): Promise<boolean>
   }
 }
 
-/** Retry recorded media failures whose text fallback was interrupted. */
-export async function recoverFailedMmsTextFallbacks(limit = 50): Promise<number> {
+/** Recover eligible media fallbacks and one-shot short SMS link retries. */
+export async function recoverFailedComicTextFallbacks(limit = 50): Promise<number> {
   const candidates = await db
     .select({ id: generationJobs.id })
     .from(generationJobs)
@@ -497,7 +523,7 @@ export async function recoverFailedMmsTextFallbacks(limit = 50): Promise<number>
   let sent = 0;
   for (const candidate of candidates) {
     try {
-      if (await sendFailedMmsTextFallback(candidate.id)) sent++;
+      if (await sendFailedComicTextFallback(candidate.id)) sent++;
     } catch (error) {
       console.error("Failed to send comic text fallback", candidate.id, error);
     }

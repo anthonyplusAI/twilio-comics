@@ -6,6 +6,7 @@ import { LockKeyhole, ArrowRight } from "lucide-react";
 import { auth } from "@/auth";
 import { isAdminSession } from "@/lib/admin-auth";
 import { adminGoogleSignIn, adminSignIn } from "@/app/admin/actions";
+import { GoogleSubmitButton } from "./google-submit-button";
 import styles from "../admin.module.css";
 
 export const dynamic = "force-dynamic";
@@ -49,11 +50,7 @@ export default async function AdminLoginPage({
         {googleConfigured && (
           <>
             <form action={adminGoogleSignIn} className={styles.loginGoogleForm}>
-              <button type="submit" className={styles.loginGoogleButton}>
-                <span className={styles.loginGoogleMark} aria-hidden="true">G</span>
-                Continue with Google
-                <ArrowRight size={18} aria-hidden="true" />
-              </button>
+              <GoogleSubmitButton />
             </form>
             <p className={styles.loginGoogleHint}>
               Use a verified @twilio.com Google Workspace account.

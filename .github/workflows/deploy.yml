@@ -139,6 +139,7 @@ jobs:
             --name "$ACA_JOB_NAME" \
             --resource-group "$ACA_RESOURCE_GROUP" \
             --image "$APP_IMAGE" \
+            --max-executions 4 \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" \
             --remove-env-vars DAILY_GENERATION_JOB_LIMIT MESSAGE_AGENT_GLOBAL_DAILY_LIMIT
       - name: Deploy scheduled recovery job

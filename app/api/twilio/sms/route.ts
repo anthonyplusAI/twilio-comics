@@ -38,7 +38,11 @@ function normalizedCommand(text: string): string {
 }
 
 function canProcessInline(body: string, channel: string, mediaCount: number): boolean {
-  if (channel !== "sms" || mediaCount !== 0) return false;
+  if (channel !== "sms") return false;
+  // A bare MMS only saves its signed media URLs and returns a deterministic
+  // acknowledgement. Keep captioned photos on the worker because an idea can
+  // require a model turn that exceeds Twilio's webhook deadline.
+  if (mediaCount > 0) return !body.trim();
   const command = normalizedCommand(body);
   return command === normalizedCommand(COMIC_START_MESSAGE) || FAST_SMS_COMMANDS.has(command);
 }

@@ -44,20 +44,30 @@ describe("photo experience settings", () => {
       cameraEnabled: false,
     });
 
-    await setExperienceSettings({ voicePhotoMode: "camera", cameraEnabled: true });
+    await setExperienceSettings({ voicePhotoMode: "sms", cameraEnabled: false });
     await expect(getExperienceSettings()).resolves.toEqual({
-      voicePhotoMode: "camera",
-      cameraEnabled: true,
+      voicePhotoMode: "sms",
+      cameraEnabled: false,
     });
   });
 
-  it("rejects unsupported or inconsistent settings before writing", async () => {
+  it("rejects unsupported and retired camera settings before writing", async () => {
     await expect(setExperienceSettings({ voicePhotoMode: "other", cameraEnabled: false } as unknown as ExperienceSettings)).rejects.toThrow(
       "Invalid Voice photo mode",
     );
     await expect(setExperienceSettings({ voicePhotoMode: "camera", cameraEnabled: false })).rejects.toThrow(
-      "Enable the browser camera",
+      "retired",
     );
+    await expect(setExperienceSettings({ voicePhotoMode: "sms", cameraEnabled: true })).rejects.toThrow(
+      "retired",
+    );
+    await expect(setVoicePhotoMode("camera")).rejects.toThrow("retired");
     expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("clears an old camera flag when a caller setting is saved", async () => {
+    h.row = { voicePhotoMode: "camera", cameraEnabled: true };
+    await setVoicePhotoMode("sms");
+    expect(h.row).toEqual({ voicePhotoMode: "sms", cameraEnabled: false });
   });
 });

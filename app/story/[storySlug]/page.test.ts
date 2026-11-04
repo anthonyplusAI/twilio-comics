@@ -78,4 +78,15 @@ describe("story page", () => {
       images: ["https://example.com/page-1.png"],
     });
   });
+
+  it("keeps Browser Studio comics with reference likenesses out of search indexing", async () => {
+    h.getStoryWithPagesBySlug.mockResolvedValue(storyResult("web"));
+    const metadata = await generateMetadata(params);
+
+    expect(metadata.robots).toEqual({ index: false, follow: false });
+    expect(metadata.openGraph).toMatchObject({
+      title: "The Clockwork Hero | Twilio Comics",
+      images: ["https://example.com/page-1.png"],
+    });
+  });
 });

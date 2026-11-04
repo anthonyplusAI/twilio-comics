@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowUpRight, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { GitHubStarLink } from "@/components/github-star-link";
+import { HomeStyleShowcase } from "@/components/landing/home-style-showcase";
 import { getHomeStartEntryMode } from "@/lib/home-start-entry";
 import { getPublicOrigin } from "@/lib/public-origin";
 import styles from "./marketing.module.css";
@@ -40,7 +41,7 @@ export default function Home() {
 
       <main className={styles.homeMain}>
         <section className={styles.hero} aria-labelledby="hero-title">
-          <div className={styles.heroCopy}>
+          <div className={`${styles.heroCopy} ${showQr && !showButton ? styles.heroCopyQrOnly : ""}`}>
             <p className={styles.kicker}>Your comic starts with Twilio</p>
             <h1 id="hero-title">
               Your story.
@@ -79,24 +80,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className={styles.heroArt}>
-            <div className={styles.artBackdrop} aria-hidden="true" />
-            <div className={styles.ideaBubble}>
-              <span className={styles.bubbleLabel}>The idea</span>
-              “A detective finds a clock that runs backwards…”
-            </div>
-            <figure className={styles.comicSheet}>
-              <Image
-                src="/noir.jpg"
-                alt="Sample comic page in a noir style"
-                width={1024}
-                height={1024}
-                priority
-              />
-              <figcaption>Imagine what yours could be</figcaption>
-            </figure>
-            <div className={styles.resultBubble}>Your comic is ready!</div>
-          </div>
+          <HomeStyleShowcase />
         </section>
 
         <section className={styles.howSection} id="how-it-works" aria-labelledby="how-title">
@@ -107,27 +91,24 @@ export default function Home() {
           <div className={styles.steps}>
             <article className={styles.step}>
               <span className={styles.stepNumber}>1</span>
-              <h3>Add a reference photo</h3>
-              <p>Show us who stars in the story.</p>
+              <h3>Add photos</h3>
+              <p>Show who stars in your comic.</p>
             </article>
             <article className={styles.step}>
               <span className={styles.stepNumber}>2</span>
               <h3>Share your idea</h3>
-              <p>Tell us who they are and what happens.</p>
+              <p>Tell us what happens.</p>
             </article>
             <article className={styles.step}>
               <span className={styles.stepNumber}>3</span>
               <h3>Get your comic</h3>
-              <p>Open and share the finished comic.</p>
+              <p>Open and share your comic.</p>
             </article>
           </div>
         </section>
       </main>
 
       <footer className={`${styles.footer} ${styles.homeFooter}`}>
-        <div className={styles.footerIdentity}>
-          <span>Twilio Comics</span>
-        </div>
         <p className={styles.footerCredit}>
           Built by Twilio · Forked from <a href="https://github.com/Nutlope/make-comics">Make Comics</a>
         </p>

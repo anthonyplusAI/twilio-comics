@@ -76,7 +76,8 @@ export async function GET(): Promise<Response> {
     // A connection to an empty or unrelated PostgreSQL database is not ready.
     // These tables are required by the channel and admin release paths.
     await db.execute(sql`
-      SELECT stories.dub_key, stories.dub_short_url, stories.dub_link_id
+      SELECT stories.dub_key, stories.dub_short_url, stories.dub_link_id,
+             experience_settings.studio_enabled
       FROM public.users,
            public.generation_jobs,
            public.activity_events,

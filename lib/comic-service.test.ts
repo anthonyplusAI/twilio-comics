@@ -49,6 +49,82 @@ beforeEach(() => {
 });
 
 describe("createComicStory", () => {
+  it("awaits the Studio charge marker before starting either provider request", async () => {
+    const calls: string[] = [];
+    h.generateTitleAndDescription.mockImplementation(async () => {
+      calls.push("title");
+      return { title: "The Rooftop Hero", description: "A hero rises." };
+    });
+    h.generateComicImage.mockImplementation(async () => {
+      calls.push("image");
+      return Buffer.from("png");
+    });
+
+    await createComicStory({
+      userId: "u1",
+      prompt: "A moon hero",
+      source: "web",
+      characterImageUrls: [REFERENCE_PHOTO],
+      beforeProviderCall: async () => { calls.push("charge"); },
+    });
+
+    expect(calls).toEqual(["charge", "title", "image"]);
+  });
+
+  it("does not call a provider when the Studio charge marker fails", async () => {
+    await expect(createComicStory({
+      userId: "u1",
+      prompt: "A moon hero",
+      source: "web",
+      characterImageUrls: [REFERENCE_PHOTO],
+      beforeProviderCall: async () => { throw new Error("Budget write failed"); },
+    })).rejects.toThrow("Budget write failed");
+
+    expect(h.generateTitleAndDescription).not.toHaveBeenCalled();
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+    expect(h.deleteStory).toHaveBeenCalledWith("s1");
+  });
+
+  it.each(["image", "upload"] as const)(
+    "keeps the Studio generation active until a parallel title request finishes after %s failure",
+    async (failureStage) => {
+      let finishTitle!: (value: { title: string; description: string }) => void;
+      const pendingTitle = new Promise<{ title: string; description: string }>((resolve) => {
+        finishTitle = resolve;
+      });
+      h.generateTitleAndDescription.mockReturnValue(pendingTitle);
+      if (failureStage === "image") {
+        h.generateComicImage.mockRejectedValue(new Error("Image request blocked"));
+      } else {
+        h.uploadBufferToBlob.mockRejectedValue(new Error("Blob write failed"));
+      }
+
+      const outcome = createComicStory({
+        userId: "u1",
+        prompt: "A moon hero",
+        source: "web",
+        characterImageUrls: [REFERENCE_PHOTO],
+        beforeProviderCall: async () => {},
+      }).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let settled = false;
+      void outcome.then(() => { settled = true; });
+
+      try {
+        await vi.waitFor(() => {
+          expect(h.deleteStory).toHaveBeenCalledWith("s1");
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+      } finally {
+        finishTitle({ title: "The Rooftop Hero", description: "A hero rises." });
+      }
+      expect(await outcome).toMatchObject({ ok: false });
+    },
+  );
+
   it.each([[undefined], [[]], [["  "]]])(
     "rejects a new story without a usable reference photo (%j)",
     async (characterImageUrls) => {

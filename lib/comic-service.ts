@@ -113,6 +113,7 @@ export interface CreateComicArgs {
   source: "web" | "sms" | "whatsapp" | "voice";
   generateTitle?: boolean;
   usesOwnApiKey?: boolean;
+  beforeProviderCall?: () => Promise<void>;
 }
 
 export interface CreateComicResult {
@@ -134,6 +135,7 @@ export async function createComicStory({
   source,
   generateTitle = true,
   usesOwnApiKey = !!apiKey,
+  beforeProviderCall,
 }: CreateComicArgs): Promise<CreateComicResult> {
   if (!characterImageUrls.some((url) => typeof url === "string" && url.trim().length > 0)) {
     throw new ComicServiceError(
@@ -224,6 +226,13 @@ export async function createComicStory({
     characterImages: characterImageUrls,
   });
 
+  try {
+    await beforeProviderCall?.();
+  } catch (error) {
+    await cleanupStoryAfterFailure();
+    throw error;
+  }
+
   // Kick off title generation in parallel and settle errors before image work finishes.
   const titlePromise = (generateTitle
     ? generateTitleAndDescription({ apiKey: openAIApiKey, prompt, style })
@@ -244,6 +253,7 @@ export async function createComicStory({
     });
   } catch (error) {
     await cleanupStoryAfterFailure();
+    if (beforeProviderCall) await titlePromise;
     throw comicImageError(error);
   }
 
@@ -253,6 +263,7 @@ export async function createComicStory({
     await updatePage(page.id, imageUrl);
   } catch (error) {
     await cleanupStoryAfterFailure();
+    if (beforeProviderCall) await titlePromise;
     throw error;
   }
 

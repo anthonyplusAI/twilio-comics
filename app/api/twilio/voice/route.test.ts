@@ -3,12 +3,11 @@ import { NextRequest } from "next/server";
 import twilio from "twilio";
 import { POST } from "@/app/api/twilio/voice/route";
 
-const { startVoiceVerification, reserveVoiceVerificationStart, finishVoiceVerificationStart, getExperienceSettings, getCameraDestination, getVoiceCallPhotoReadiness } = vi.hoisted(() => ({
+const { startVoiceVerification, reserveVoiceVerificationStart, finishVoiceVerificationStart, getExperienceSettings, getVoiceCallPhotoReadiness } = vi.hoisted(() => ({
   startVoiceVerification: vi.fn(),
   reserveVoiceVerificationStart: vi.fn(),
   finishVoiceVerificationStart: vi.fn(),
   getExperienceSettings: vi.fn(),
-  getCameraDestination: vi.fn(),
   getVoiceCallPhotoReadiness: vi.fn(),
 }));
 vi.mock("@/lib/voice-verification", () => ({
@@ -20,7 +19,6 @@ vi.mock("@/lib/voice-verification-budget", () => ({
   finishVoiceVerificationStart,
 }));
 vi.mock("@/lib/photo-experience-settings", () => ({ getExperienceSettings }));
-vi.mock("@/lib/browser-photo-access", () => ({ getCameraDestination }));
 vi.mock("@/lib/voice-call-photo-readiness", () => ({ getVoiceCallPhotoReadiness }));
 
 const BASE = "https://comics.example";
@@ -56,7 +54,6 @@ beforeEach(() => {
   reserveVoiceVerificationStart.mockResolvedValue({ allowed: true, sendCode: true });
   finishVoiceVerificationStart.mockResolvedValue(undefined);
   getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
-  getCameraDestination.mockResolvedValue(null);
   getVoiceCallPhotoReadiness.mockResolvedValue({ kind: "photos", count: 1 });
   vi.stubEnv("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
   vi.stubEnv("TWILIO_AUTH_TOKEN", TOKEN);
@@ -92,19 +89,15 @@ describe("inbound voice verification", () => {
     expect(startVoiceVerification).toHaveBeenCalledOnce();
   });
 
-  it("directs a browser-only caller to the photo page before verification", async () => {
+  it("does not direct a Voice-only caller to the retired photo page", async () => {
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
     getExperienceSettings.mockResolvedValueOnce({ voicePhotoMode: "camera", cameraEnabled: true });
-    getCameraDestination.mockResolvedValueOnce({
-      phoneNumber: PHONE_NUMBER,
-      smsHref: null,
-      callHref: `tel:${PHONE_NUMBER}`,
-    });
     getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "missing" });
 
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
     const xml = await response.text();
-    expect(xml).toMatch(/photo page/i);
+    expect(xml).toMatch(/photo setup is unavailable/i);
+    expect(xml).not.toMatch(/photo page/i);
     expect(xml).toContain("<Hangup");
     expect(xml).not.toMatch(/Text one or two photos/i);
     expect(startVoiceVerification).not.toHaveBeenCalled();
@@ -159,7 +152,6 @@ describe("inbound voice verification", () => {
     expect(response.status).toBe(200);
     expect(xml).toMatch(/reference photos?|photo setup/i);
     expect(xml).toContain("<Hangup");
-    expect(getCameraDestination).not.toHaveBeenCalled();
     expect(reserveVoiceVerificationStart).not.toHaveBeenCalled();
     expect(startVoiceVerification).not.toHaveBeenCalled();
   });
@@ -228,18 +220,12 @@ describe("inbound voice verification", () => {
     expect(startVoiceVerification).not.toHaveBeenCalled();
   });
 
-  it("starts a selected Voice call with browser photo intake when inbound SMS is disabled", async () => {
+  it("continues a saved Voice draft when inbound SMS is disabled", async () => {
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
     getExperienceSettings.mockResolvedValueOnce({ voicePhotoMode: "camera", cameraEnabled: true });
-    getCameraDestination.mockResolvedValueOnce({
-      phoneNumber: PHONE_NUMBER,
-      smsHref: null,
-      callHref: `tel:${PHONE_NUMBER}`,
-    });
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
     expect(response.status).toBe(200);
     expect(startVoiceVerification).toHaveBeenCalledOnce();
-    expect(getCameraDestination).toHaveBeenCalledWith({ voicePhotoMode: "camera", cameraEnabled: true });
   });
 
   it("rejects a signed call to an unrelated number or with a malformed caller", async () => {

@@ -1,5 +1,4 @@
 import { type NextRequest } from "next/server";
-import { getCameraDestination } from "@/lib/browser-photo-access";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getVoiceCallPhotoReadiness } from "@/lib/voice-call-photo-readiness";
@@ -62,13 +61,8 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
 
   let photoMode: Awaited<ReturnType<typeof getExperienceSettings>>;
-  let browserPhotosReady = false;
   try {
     photoMode = await getExperienceSettings();
-    if (photoMode.voicePhotoMode !== "none" &&
-        !enabledChannels.includes("sms") && photoMode.cameraEnabled) {
-      browserPhotosReady = Boolean((await getCameraDestination(photoMode))?.callHref);
-    }
   } catch (error) {
     console.error("Voice photo availability check failed", error instanceof Error ? error.name : "unknown");
     return new Response("Voice service unavailable", { status: 503 });
@@ -81,7 +75,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   try {
     const readiness = await getVoiceCallPhotoReadiness(params.From, photoMode);
     if (readiness.kind === "missing") {
-      if (!enabledChannels.includes("sms") && !browserPhotosReady) {
+      if (!enabledChannels.includes("sms")) {
         return voiceHangupTwiML(
           "A reference photo is required before a comic can be created, but photo setup is unavailable right now. Please try again later.",
         );

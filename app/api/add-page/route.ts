@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
 import {
   updatePage,
   createPage,
@@ -15,7 +15,6 @@ import {
 } from "@/lib/quota";
 import {
   chooseGenerationApiKey,
-  reserveBrowserGenerationCapacity,
 } from "@/lib/generation-capacity";
 import { buildComicPrompt } from "@/lib/prompt";
 import { generateComicImage } from "@/lib/image-generation";
@@ -24,47 +23,71 @@ import {
   getContentPolicyErrorMessage,
 } from "@/lib/utils";
 import { addPageRequestSchema } from "@/lib/browser-generation-request";
+import { isAllowedReferenceImageUrl } from "@/lib/reference-image-url";
+import {
+  markStudioAppGenerationPaidStarted,
+  reserveStudioAppGenerationCapacity,
+} from "@/lib/studio-guest-capacity";
+import { readBoundedStudioJson } from "@/lib/studio-guest-json";
+import { getStudioActor, guestOwnsReferenceImages } from "@/lib/studio-guest-session";
+
+const FIRST_PAGE_REFERENCE_MESSAGE = "This first page has no authorized original photo to redraw.";
+
+function authorizedOriginalReferences(
+  urls: unknown,
+  actor: { userId: string; kind: "guest" | "google" },
+): string[] {
+  if (!Array.isArray(urls)) return [];
+  return urls.filter((url): url is string =>
+    typeof url === "string" && (actor.kind === "guest"
+      ? guestOwnsReferenceImages(actor.userId, [url])
+      : isAllowedReferenceImageUrl(url)),
+  ).slice(0, 2);
+}
 
 export async function POST(request: NextRequest) {
   let quotaClaimKey: string | null = null;
-  async function releasePendingQuota(): Promise<void> {
-    if (!quotaClaimKey) return;
-    const claimKey = quotaClaimKey;
-    await releaseFreeTierQuota(claimKey);
-    quotaClaimKey = null;
+  let providerStarted = false;
+  async function markProviderStarted(): Promise<void> {
+    if (!quotaClaimKey || providerStarted) return;
+    await markStudioAppGenerationPaidStarted(quotaClaimKey);
+    providerStarted = true;
   }
 
-  async function finishSavedQuota(): Promise<void> {
+  async function settlePendingQuota(): Promise<void> {
     const claimKey = quotaClaimKey;
-    // Saving the image already spent this reservation. Keep the saved result
-    // visible even if marking its claim consumed temporarily fails.
-    quotaClaimKey = null;
     if (!claimKey) return;
-    try {
-      await consumeFreeTierQuota(claimKey);
-    } catch (error) {
-      console.error("Failed to mark saved page quota consumed:", error);
+    if (providerStarted) {
+      quotaClaimKey = null;
+      try {
+        await consumeFreeTierQuota(claimKey);
+      } catch (error) {
+        console.error("Failed to mark paid page generation consumed:", error);
+      }
+    } else {
+      await releaseFreeTierQuota(claimKey);
+      quotaClaimKey = null;
     }
   }
 
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioActor(request);
+    const userId = actor?.userId;
     const apiKey = request.headers.get("x-api-key") ?? undefined;
 
-    if (!userId) {
+    if (!actor || !userId) {
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 },
       );
     }
-
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON request" }, { status: 400 });
+    if (actor.kind === "guest" && !photoRequestHasAllowedOrigin(request)) {
+      return NextResponse.json({ error: "Invalid request origin" }, { status: 403 });
     }
+
+    const json = await readBoundedStudioJson(request);
+    if (!json.ok) return NextResponse.json({ error: json.error }, { status: json.status });
+    const body = json.value;
     const parsed = addPageRequestSchema.safeParse(body);
     if (!parsed.success) {
       const fields = body && typeof body === "object" && !Array.isArray(body)
@@ -83,7 +106,17 @@ export async function POST(request: NextRequest) {
       characterImages,
     } = parsed.data;
 
-    const keyChoice = chooseGenerationApiKey(apiKey, process.env.OPENAI_API_KEY);
+    if (actor.kind === "guest" && apiKey !== undefined) {
+      return NextResponse.json({ error: "Browser Studio uses the app's OpenAI key" }, { status: 400 });
+    }
+    if (actor.kind === "guest" && !guestOwnsReferenceImages(userId, characterImages)) {
+      return NextResponse.json({ error: "Reference photos must belong to this browser session" }, { status: 403 });
+    }
+
+    const keyChoice = chooseGenerationApiKey(
+      actor.kind === "guest" ? undefined : apiKey,
+      process.env.OPENAI_API_KEY,
+    );
     if (!keyChoice.valid) {
       return NextResponse.json(
         { error: keyChoice.reason === "missing"
@@ -107,52 +140,74 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    // Validate redraw targets before reserving a weekly generation credit.
-    // An unknown page must not leave a live quota claim behind.
+    // Validate redraw targets before reserving a generation slot.
+    // An unknown page must not leave a live claim behind.
     let page = pageId ? pages.find((candidate) => candidate.id === pageId) : undefined;
     if (pageId && !page) {
       return NextResponse.json({ error: "Page not found" }, { status: 404 });
     }
+    if (page?.pageNumber === 1 &&
+        authorizedOriginalReferences(page.characterImageUrls, actor).length === 0) {
+      return NextResponse.json({ error: FIRST_PAGE_REFERENCE_MESSAGE }, { status: 400 });
+    }
 
     if (keyChoice.appFunded) {
-      quotaClaimKey = `web-page:${userId}:${randomUUID()}`;
-      const admission = await reserveBrowserGenerationCapacity(userId, quotaClaimKey);
+      const claimKey = `web-page:${userId}:${randomUUID()}`;
+      const admission = await reserveStudioAppGenerationCapacity(actor, claimKey, request);
       if (admission.reason !== "accepted") {
-        quotaClaimKey = null;
-        return NextResponse.json(
-          {
-            error: "You've reached your comic generation limit.",
-            errorType: "quota_limit",
+        if (admission.reason === "busy") {
+          return NextResponse.json({
+            error: admission.scope === "user"
+              ? "Your comic is still being drawn. Wait for it to finish before making another."
+              : "Browser Studio is busy right now. Please try again shortly.",
+            errorType: "generation_busy",
             isRateLimited: true,
-            creditsRemaining: admission.quota.remaining,
-            resetTime: admission.quota.reset,
-          },
-          { status: 429 },
-        );
+          }, { status: 429 });
+        }
+        if (admission.reason === "rate_limit") {
+          return NextResponse.json({
+            error: admission.message,
+            errorType: "generation_rate_limit",
+            isRateLimited: true,
+          }, { status: 429 });
+        }
+        if (admission.reason === "unavailable") {
+          return NextResponse.json({ error: "Browser Studio is temporarily unavailable" }, { status: 503 });
+        }
+        return NextResponse.json({ error: "Browser Studio is temporarily unavailable" }, { status: 503 });
       }
+      quotaClaimKey = claimKey;
     }
 
     let pageNumber: number;
     const isRedraw = Boolean(pageId);
+    let firstPageReferences: string[] = [];
 
     if (isRedraw) {
       // Preserve the post-reservation recheck: a page may be removed while the
       // quota request is in flight. Release its claim before returning.
       const refreshed = await getStoryWithPagesBySlug(storyId);
       if (!refreshed) {
-        await releasePendingQuota();
+        await settlePendingQuota();
         return NextResponse.json({ error: "Story not found" }, { status: 404 });
       }
       if (refreshed.story.userId !== userId) {
-        await releasePendingQuota();
+        await settlePendingQuota();
         return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
       }
       page = refreshed.pages.find((candidate) => candidate.id === pageId);
       if (!page) {
-        await releasePendingQuota();
+        await settlePendingQuota();
         return NextResponse.json({ error: "Page not found" }, { status: 404 });
       }
       pageNumber = page.pageNumber;
+      if (pageNumber === 1) {
+        firstPageReferences = authorizedOriginalReferences(page.characterImageUrls, actor);
+        if (firstPageReferences.length === 0) {
+          await settlePendingQuota();
+          return NextResponse.json({ error: FIRST_PAGE_REFERENCE_MESSAGE }, { status: 400 });
+        }
+      }
     } else {
       // Add new page mode
       pageNumber = await getNextPageNumber(story.id);
@@ -181,9 +236,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Use only the character images sent from the frontend (user's selection)
-    // These are already the most recent/relevant characters the user wants to use
-    referenceImages.push(...characterImages);
+    // A first-page redraw keeps at least one authorized original portrait.
+    const effectiveCharacterImages = firstPageReferences.length > 0
+      ? [...new Set([...firstPageReferences, ...characterImages])].slice(0, 2)
+      : characterImages;
+    referenceImages.push(...effectiveCharacterImages);
 
     // Build the prompt with continuation context
     // For redraw, only include pages up to the current page being redrawn
@@ -199,7 +256,7 @@ export async function POST(request: NextRequest) {
     const fullPrompt = buildComicPrompt({
       prompt,
       style: story.style,
-      characterImages,
+      characterImages: effectiveCharacterImages,
       isAddPage: true,
       previousPages,
     });
@@ -208,6 +265,7 @@ export async function POST(request: NextRequest) {
     try {
       console.log("Starting image generation for ...");
       const startTime = Date.now();
+      await markProviderStarted();
       imageBuffer = await generateComicImage({
         apiKey: openAIApiKey,
         prompt: fullPrompt,
@@ -219,7 +277,7 @@ export async function POST(request: NextRequest) {
       console.log(`Image generation completed in ${durationSeconds} seconds`);
     } catch (error) {
       console.error("Image generation error:", error);
-      await releasePendingQuota();
+      await settlePendingQuota();
 
       // Clean up DB records if generation failed
       try {
@@ -284,7 +342,7 @@ export async function POST(request: NextRequest) {
 
     await updatePage(page.id, imageUrl);
 
-    await finishSavedQuota();
+    await settlePendingQuota();
 
     return NextResponse.json({
       imageUrl,
@@ -294,7 +352,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     if (quotaClaimKey) {
       try {
-        await releasePendingQuota();
+        await settlePendingQuota();
       } catch (quotaError) {
         console.error("Failed to release generation quota", quotaError);
       }

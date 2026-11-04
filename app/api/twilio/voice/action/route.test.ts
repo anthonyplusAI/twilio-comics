@@ -127,7 +127,7 @@ describe("ConversationRelay action callback", () => {
     expect(h.recordVoiceCallEnd).toHaveBeenCalledWith(expect.objectContaining({ status: result }));
   });
 
-  it("sends a caller to browser photo setup when Relay finds no photo and SMS is off", async () => {
+  it("does not send a caller to retired browser photo setup when SMS is off", async () => {
     const { POST } = await import("@/app/api/twilio/voice/action/route");
     const response = await POST(signedAction({
       CallSid: CALL_SID,
@@ -136,9 +136,8 @@ describe("ConversationRelay action callback", () => {
     }));
     const xml = await response.text();
 
-    expect(xml).toMatch(/photo page on our website/i);
-    expect(xml).toMatch(/one or two.*reference photos/i);
-    expect(xml).toMatch(/call again from the same number/i);
+    expect(xml).toMatch(/photo setup for calls is unavailable/i);
+    expect(xml).not.toMatch(/photo page/i);
     expect(xml).toContain("<Hangup/>");
   });
 

@@ -2,6 +2,7 @@ import { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { getStoryWithPagesBySlug } from "@/lib/db-actions";
+import { getStudioComicTextOrigin } from "@/lib/studio-comic-text";
 import { ChannelComicViewer } from "./channel-comic-viewer";
 import { StoryEditorClient } from "./story-editor-client";
 
@@ -30,6 +31,7 @@ export async function generateMetadata({
       return {
         title: "Story Not Found | Twilio Comics",
         description: "The requested comic story could not be found.",
+        robots: { index: false, follow: false },
       };
     }
 
@@ -45,10 +47,8 @@ export async function generateMetadata({
     return {
       title,
       description,
-      // Phone-channel comics can be shared by link without appearing in search.
-      ...(isPhoneChannel(story.source)
-        ? { robots: { index: false, follow: false } }
-        : {}),
+      // Comics can be shared by link, but may contain reference-photo likenesses.
+      robots: { index: false, follow: false },
       openGraph: {
         title,
         description,
@@ -67,6 +67,7 @@ export async function generateMetadata({
     return {
       title: "Twilio Comics",
       description: "Create your own comic book with Twilio Comics",
+      robots: { index: false, follow: false },
     };
   }
 }
@@ -96,5 +97,12 @@ export default async function StoryPage({
     );
   }
 
-  return <StoryEditorClient />;
+  let canTextComic = false;
+  try {
+    canTextComic = Boolean(await getStudioComicTextOrigin());
+  } catch (error) {
+    console.error("Studio comic text readiness unavailable", error instanceof Error ? error.name : "unknown");
+  }
+
+  return <StoryEditorClient canTextComic={canTextComic} />;
 }

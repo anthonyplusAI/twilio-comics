@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({
   recordGeneratedMessageStatus: vi.fn(),
   recordFallbackMessageStatus: vi.fn(),
   recordFailedGenerationNoticeStatus: vi.fn(),
-  sendFailedMmsTextFallback: vi.fn(),
+  sendFailedComicTextFallback: vi.fn(),
   recordAgentMessageStatus: vi.fn(),
 }));
 
@@ -17,7 +17,7 @@ vi.mock("@/lib/twilio-delivery", () => ({
   recordGeneratedMessageStatus: h.recordGeneratedMessageStatus,
   recordFallbackMessageStatus: h.recordFallbackMessageStatus,
   recordFailedGenerationNoticeStatus: h.recordFailedGenerationNoticeStatus,
-  sendFailedMmsTextFallback: h.sendFailedMmsTextFallback,
+  sendFailedComicTextFallback: h.sendFailedComicTextFallback,
   isDeliveryStatus: (status: string) => [
     "accepted", "scheduled", "queued", "sending", "sent", "delivered",
     "read", "failed", "undelivered", "canceled",
@@ -38,7 +38,7 @@ beforeEach(() => {
   h.recordGeneratedMessageStatus.mockResolvedValue(true);
   h.recordFallbackMessageStatus.mockResolvedValue(true);
   h.recordFailedGenerationNoticeStatus.mockResolvedValue(true);
-  h.sendFailedMmsTextFallback.mockResolvedValue(false);
+  h.sendFailedComicTextFallback.mockResolvedValue(false);
   h.recordAgentMessageStatus.mockResolvedValue(true);
 });
 
@@ -82,7 +82,7 @@ describe("Twilio generated-comic delivery callback", () => {
       errorCode: null,
     });
     expect(h.recordGeneratedMessageStatus).not.toHaveBeenCalled();
-    expect(h.sendFailedMmsTextFallback).not.toHaveBeenCalled();
+    expect(h.sendFailedComicTextFallback).not.toHaveBeenCalled();
   });
 
   it("rejects an ambiguous delivery callback", async () => {
@@ -109,7 +109,7 @@ describe("Twilio generated-comic delivery callback", () => {
       errorCode: null,
     });
     expect(h.recordGeneratedMessageStatus).not.toHaveBeenCalled();
-    expect(h.sendFailedMmsTextFallback).not.toHaveBeenCalled();
+    expect(h.sendFailedComicTextFallback).not.toHaveBeenCalled();
   });
 
   it("rejects callbacks that mix a job and a conversational reply", async () => {
@@ -142,14 +142,14 @@ describe("Twilio generated-comic delivery callback", () => {
       status: "undelivered",
       errorCode: "30008",
     });
-    expect(h.sendFailedMmsTextFallback).toHaveBeenCalledWith(jobId);
+    expect(h.sendFailedComicTextFallback).toHaveBeenCalledWith(jobId);
   });
 
   it("tries the bounded text fallback on duplicate failed callbacks", async () => {
     h.recordGeneratedMessageStatus.mockResolvedValue(false);
     const response = await POST(request());
     expect(response.status).toBe(204);
-    expect(h.sendFailedMmsTextFallback).toHaveBeenCalledWith(jobId);
+    expect(h.sendFailedComicTextFallback).toHaveBeenCalledWith(jobId);
   });
 
   it("tracks a fallback message separately without trying another fallback", async () => {
@@ -171,11 +171,11 @@ describe("Twilio generated-comic delivery callback", () => {
       errorCode: null,
     });
     expect(h.recordGeneratedMessageStatus).not.toHaveBeenCalled();
-    expect(h.sendFailedMmsTextFallback).not.toHaveBeenCalled();
+    expect(h.sendFailedComicTextFallback).not.toHaveBeenCalled();
   });
 
   it("acknowledges a fallback send error so scheduled recovery can retry it", async () => {
-    h.sendFailedMmsTextFallback.mockRejectedValue(new Error("Twilio temporarily unavailable"));
+    h.sendFailedComicTextFallback.mockRejectedValue(new Error("Twilio temporarily unavailable"));
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const response = await POST(request());

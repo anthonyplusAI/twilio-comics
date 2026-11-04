@@ -1,26 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
 import { uploadBufferToBlob } from "@/lib/blob-storage";
 import { reserveBrowserUpload } from "@/lib/browser-upload-budget";
+import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
 import {
   CameraImageError,
   MAX_CAMERA_REQUEST_BYTES,
   normalizeCameraImage,
   readCameraPhotoForm,
 } from "@/lib/browser-photo-image";
+import { getStudioActor } from "@/lib/studio-guest-session";
+import { reserveStudioGuestUpload } from "@/lib/studio-guest-budget";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const session = await auth();
-  const userId = session?.user?.id?.trim();
-  if (!userId || session?.user?.studioAuthorized !== true) {
+  const actor = await getStudioActor(request);
+  if (!actor) {
     return NextResponse.json(
       { error: "Authentication required" },
       { status: 401 },
     );
   }
+  if (actor.kind === "guest" && !photoRequestHasAllowedOrigin(request)) {
+    return NextResponse.json({ error: "Invalid request origin" }, { status: 403 });
+  }
+  const userId = actor.userId;
 
   if (!request.headers.get("content-type")?.includes("multipart/form-data")) {
     return NextResponse.json(
@@ -37,6 +42,15 @@ export async function POST(request: Request) {
       { error: "Image must be 5 MiB or smaller" },
       { status: 413 },
     );
+  }
+
+  if (actor.kind === "guest") {
+    const sourceBudget = await reserveStudioGuestUpload(userId, request);
+    if (!sourceBudget.allowed) {
+      return sourceBudget.reason === "rate_limit"
+        ? NextResponse.json({ error: "Upload limit reached. Please try again later." }, { status: 429 })
+        : NextResponse.json({ error: "Uploads are temporarily unavailable. Please try again later." }, { status: 503 });
+    }
   }
 
   const uploadBudget = await reserveBrowserUpload(userId);

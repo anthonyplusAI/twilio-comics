@@ -87,7 +87,15 @@ describe("marketing homepage entry point", () => {
     expect(hasStartButton(html)).toBe(false);
     expect(html).toMatch(/<a\b[^>]*href="\/start"[^>]*>[\s\S]*?<svg\b[^>]*role="img"/);
     expect(html.indexOf("Scan to choose how to start"))
-      .toBeLessThan(html.indexOf("Imagine what yours could be"));
+      .toBeLessThan(html.indexOf('aria-label="Show American Modern sample"'));
+  });
+
+  it("shows a comic sample with four selectable styles", () => {
+    const html = renderPage("sms,voice");
+    expect(html).toContain("Sample: Noir");
+    for (const style of ["American Modern", "Manga", "Noir", "Vintage"]) {
+      expect(html).toContain(`aria-label="Show ${style} sample"`);
+    }
   });
 
   it("supports a button without a QR", () => {
@@ -110,7 +118,8 @@ describe("marketing homepage entry point", () => {
     const html = renderPage("sms,voice");
 
     expect(html).toContain("Add a reference photo");
-    expect(html.indexOf("Add a reference photo")).toBeLessThan(html.indexOf("Share your idea"));
+    expect(html).toContain("Add photos");
+    expect(html.indexOf("Add photos")).toBeLessThan(html.indexOf("Share your idea"));
   });
 
   it("keeps the start link usable when the public QR origin is invalid", () => {

@@ -148,6 +148,33 @@ describe("Twilio messaging webhook", () => {
     expect(h.sendInboundMessage).not.toHaveBeenCalled();
   });
 
+  it("saves a photo-only MMS on the warm web app without starting a queue job", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-photo" });
+
+    const response = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-photo&From=%2B15551112222&To=%2B15553334444&Body=&NumMedia=1&MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Fphoto&MediaContentType0=image%2Fjpeg",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(h.getOldestOpenInboundMessage).toHaveBeenCalledWith("sms", "+15551112222");
+    expect(h.processInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-photo");
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
+  });
+
+  it("queues a photo-only MMS behind an earlier unprocessed turn", async () => {
+    h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-earlier" });
+
+    const response = await POST(request(
+      "/api/twilio/sms",
+      "MessageSid=SM-photo&From=%2B15551112222&To=%2B15553334444&Body=&NumMedia=1&MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Fphoto&MediaContentType0=image%2Fjpeg",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(h.processInboundMessage).not.toHaveBeenCalled();
+    expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-photo");
+  });
+
   it.each(["NEW", "STATUS", "CONTINUE"])(
     "processes the deterministic %s command without waiting for a queue job",
     async (command) => {
@@ -177,7 +204,7 @@ describe("Twilio messaging webhook", () => {
     expect(h.sendInboundMessage).toHaveBeenCalledExactlyOnceWith("SM-later");
   });
 
-  it("keeps CREATE and photo messages out of the inline fast path", async () => {
+  it("keeps CREATE and captioned photo messages out of the inline fast path", async () => {
     h.getOldestOpenInboundMessage.mockResolvedValue({ messageSid: "SM-command" });
 
     const createResponse = await POST(request(

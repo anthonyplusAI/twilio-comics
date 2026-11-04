@@ -30,6 +30,7 @@ describe("Voice call guidance", () => {
     const spoken = await greeting({ kind: "continuation", phase: "finished" });
     expect(spoken).toMatch(/say continue.+page/i);
     expect(spoken).toMatch(/new comic.+new photos.+call/i);
+    expect(spoken).not.toMatch(/photo page/i);
     expect(spoken).not.toMatch(/tell me your comic idea/i);
   });
 
@@ -78,10 +79,10 @@ describe("Voice call guidance", () => {
     expect(spoken).toMatch(/wait.+photo saved.+call again/i);
   });
 
-  it("guides browser-only callers to the photo page", () => {
+  it("does not send Voice-only callers to the retired photo page", () => {
     const spoken = voiceMissingPhotoPrompt(false);
-    expect(spoken).toMatch(/photo page.+take or upload.+same phone number/i);
-    expect(spoken).toMatch(/call again/i);
+    expect(spoken).toMatch(/photo setup.+unavailable.+try again later/i);
+    expect(spoken).not.toMatch(/photo page/i);
     expect(spoken).not.toMatch(/text one or two photos/i);
   });
 });

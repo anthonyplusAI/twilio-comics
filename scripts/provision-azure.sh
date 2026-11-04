@@ -22,6 +22,9 @@ ACA_NAME="${ACA_NAME:-twilio-comics}"
 ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation-v2}"
 ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery-v2}"
 GENERATION_JOB_POLLING_INTERVAL=5
+# Keep a long image render from serializing every inbound text behind it.
+# Conversation and generation leases fence duplicate work across replicas.
+GENERATION_JOB_MAX_EXECUTIONS=4
 # The migration Job is created later by provision-postgres-roles.sh. A second
 # foundation run gives the deployment principal access once that Job exists.
 ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-twilio-comics-migrate-v2}"
@@ -376,7 +379,7 @@ if ! az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE
     --environment "$ACA_ENVIRONMENT" --trigger-type Event \
     --replica-timeout 900 --replica-retry-limit 0 \
     --replica-completion-count 1 --parallelism 1 --polling-interval "$GENERATION_JOB_POLLING_INTERVAL" \
-    --min-executions 0 --max-executions 1 \
+    --min-executions 0 --max-executions "$GENERATION_JOB_MAX_EXECUTIONS" \
     --scale-rule-name generation-queue --scale-rule-type azure-queue \
     --scale-rule-metadata "accountName=${STORAGE_ACCOUNT}" 'cloud=AzurePublicCloud' \
       'queueLength=1' "queueName=${QUEUE_NAME}" \

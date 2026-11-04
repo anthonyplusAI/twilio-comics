@@ -77,7 +77,7 @@ function freshPhotoInstruction(afterVoiceCancel = false): string {
   const channels = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS);
   return channels.includes("sms")
     ? `${afterVoiceCancel ? "text NEW to this number. After it replies, " : ""}text one or two fresh reference photos to this number. Wait for a Photo saved reply, then call again from the same number.`
-    : "use the photo page on our website to add one or two fresh reference photos using the number you called from, then call again from the same number.";
+    : "photo setup for calls is unavailable right now. Please try again later.";
 }
 
 /** Twilio requests this signed URL when <Connect><ConversationRelay> exits. */

@@ -23,17 +23,18 @@ export default function PrivacyPage() {
       <p>
         {operatorName ?? "The operator of Twilio Comics"} operates this AI comic service.
         This policy describes the information the app uses when you text, call, view a comic,
-        prepare photos for a text or call in your browser, or use its browser testing studio.
+        or use Browser Studio.
       </p>
 
       <section className={styles.legalSection}>
         <h2>Information we handle</h2>
         <ul>
-          <li>Your phone number, channel, text messages, and voice conversation transcripts.</li>
-          <li>Comic ideas, prompts, reference photos sent by message or uploaded for a text or call, generated pages, and story links, including short links when enabled.</li>
-          <li>Phone verification status and a short-lived browser session when you prepare photos in the browser.</li>
+          <li>Your phone number, channel, text messages, and voice conversation transcripts when you text or call.</li>
+          <li>Comic ideas, prompts, reference photos sent by message or uploaded in Browser Studio, generated pages, and story links, including short links when enabled.</li>
+          <li>A signed browser session cookie that lets you find Browser Studio comics for up to 30 days on that device; creation and editing are available while Studio is open.</li>
+          <li>Your phone number and verification status if you ask Browser Studio to text you a finished comic link.</li>
           <li>Message and call identifiers, delivery status, dates, errors, and usage history.</li>
-          <li>Google account details and session data if you sign in to the browser studio.</li>
+          <li>Google account details and session data if you use Google to sign in as an administrator.</li>
         </ul>
       </section>
 
@@ -47,12 +48,12 @@ export default function PrivacyPage() {
           and messaging, OpenAI processes comic ideas and images, Azure hosts
           the app, stores images and jobs, and provides the PostgreSQL database. When short
           links are enabled, Dub stores redirects to our comic pages and processes visits to
-          those links. A browser
-          photo upload is tied to your number only after an SMS verification code succeeds.
-          Google is
-          used only when you choose to sign in to the browser studio. Authorized app
+          those links. Browser Studio ties uploaded photos and comics to a signed browser
+          session, without requiring your phone number. If you choose to receive a comic
+          link by text, Twilio Verify sends a code to the number you enter before the app
+          sends the link. Google sign-in is for eligible administrators. Authorized app
           administrators can review identifiable conversation, call, comic, and delivery
-          history through a password-protected dashboard.
+          history through the admin dashboard.
         </p>
       </section>
 
@@ -79,7 +80,10 @@ export default function PrivacyPage() {
           We retain messages, voice transcripts, prompts, reference images, comic records,
           story redirects, and operational history until we explicitly delete them. We process verified deletion
           requests manually. There is no automatic expiration schedule. These records
-          remain in the database and storage across app deployments. We handle access and
+          remain in the database and storage across app deployments. The Browser Studio
+          session cookie expires after 30 days; its expiration does not delete the comic.
+          Clearing browser data or changing devices can remove your edit and text access,
+          while anyone with the story link can still view the comic. We handle access and
           deletion requests manually and may need to confirm that you control the phone
           number or account. Service providers
           may retain their own records under their separate policies.

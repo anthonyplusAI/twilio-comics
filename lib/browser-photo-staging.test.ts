@@ -98,6 +98,19 @@ describe("verified browser photo staging", () => {
       .toEqual({ references: [`blob:${REPLACEMENT}`], replaced: false });
   });
 
+  it("expires each photo by its original upload time when a later change refreshes the row", () => {
+    const oldPhoto = `blob:${FIRST}`;
+    const recentPhoto = `blob:${SECOND}`;
+    const collected = {
+      characterImageUrls: [oldPhoto, recentPhoto],
+      cameraReferenceSavedAt: {
+        [oldPhoto]: NOW - VOICE_PHOTO_HANDOFF_WINDOW_MS - 1,
+        [recentPhoto]: NOW - 1_000,
+      },
+    };
+    expect(currentCameraReferences(collected, FRESH, OWNER, NOW)).toEqual([recentPhoto]);
+  });
+
   it("tolerates bounded clock skew across Container App replicas", () => {
     const collected = { characterImageUrls: [`blob:${FIRST}`] };
     expect(currentCameraReferences(collected, new Date(NOW + 29_999), OWNER, NOW))
@@ -129,7 +142,7 @@ describe("verified browser photo staging", () => {
 
     expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`])).toBe(true);
     expect(row.collected).toMatchObject({ characterImageUrls: [`blob:${REPLACEMENT}`] });
-    expect(row.collected.cameraReferenceSavedAt?.[`blob:${REPLACEMENT}`]).toBeTypeOf("number");
+    expect(row.collected.cameraReferenceSavedAt?.[`blob:${REPLACEMENT}`]).toBe(NOW - 1000);
   });
 
   it("clears any staged set for an explicit reset and rejects malformed input", async () => {

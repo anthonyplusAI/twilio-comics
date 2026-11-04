@@ -1,24 +1,24 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight, BookOpen, Camera, MessageCircle, Phone, ScanLine } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, BookOpen, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { GitHubStarLink } from "@/components/github-star-link";
 import {
   COMIC_START_MESSAGE,
   getMarketingContact,
-  type MarketingChannel,
 } from "@/lib/marketing-contact";
-import { getCameraDestination } from "@/lib/browser-photo-access";
+import { getBrowserStudioEnabled } from "@/lib/browser-studio-settings";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import { getPublicOrigin } from "@/lib/public-origin";
 import { isStudioStartReady } from "@/lib/studio-start-readiness";
+import { isVoiceVerificationConfigured } from "@/lib/voice-verification";
 import marketingStyles from "../marketing.module.css";
 import styles from "./start.module.css";
 
 type StartChoice = {
-  id: MarketingChannel | "camera" | "studio";
+  id: "sms" | "voice" | "studio";
   label: string;
   heading: string;
   destination: string;
@@ -35,7 +35,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Choose how to start | Twilio Comics",
   description:
-    "Choose an available way to start a comic by text, call, browser photos, or Studio.",
+    "Choose an available way to make a comic by text, text plus call, or in your browser.",
 };
 
 export default async function StartPage() {
@@ -48,25 +48,19 @@ export default async function StartPage() {
     process.env.TWILIO_ENABLED_CHANNELS,
   );
   const phoneNumber = contact.phoneNumber ?? "";
-  const whatsappNumber = contact.whatsappNumber ?? "";
   const hasSms = selectedChannels.includes("sms") && Boolean(contact.smsHref);
   const selectedVoice = selectedChannels.includes("voice") && Boolean(contact.callHref);
   const settings = hasSms || selectedVoice ? await getExperienceSettings() : null;
-  const cameraDestination = settings?.cameraEnabled
-    ? await getCameraDestination(settings)
-    : null;
-  const showCamera = Boolean(cameraDestination);
-  const showStudio = isStudioStartReady();
-  const hasVoice = selectedVoice && settings?.voicePhotoMode !== "none" &&
-    (hasSms || Boolean(cameraDestination?.callHref));
+  const showStudio = isStudioStartReady() && await getBrowserStudioEnabled();
+  const hasVoice = selectedVoice && hasSms && settings?.voicePhotoMode !== "none";
   const hasTextDelivery = hasSms || hasVoice;
   const publicOrigin = getPublicOrigin() || "http://localhost:3000";
   const voiceStartUrl = new URL(
     "/start/voice",
     publicOrigin,
   ).toString();
-  const choices: Record<MarketingChannel, StartChoice> = {
-    sms: {
+  const channelChoices: StartChoice[] = [
+    ...(hasSms ? [{
       id: "sms",
       label: "Twilio SMS",
       heading: "Text your photos.",
@@ -77,61 +71,28 @@ export default async function StartPage() {
       qrValue: contact.smsHref ?? "",
       qrTitle: `Scan to text reference photos to ${phoneNumber} with ${COMIC_START_MESSAGE}`,
       qrCaption: "Scan, attach photos, then send.",
-    },
-    whatsapp: {
-      id: "whatsapp",
-      label: "Twilio WhatsApp",
-      heading: "Chat with us.",
-      destination: whatsappNumber,
-      description: "Send a reference photo, then tell the agent your comic idea.",
-      href: contact.whatsappHref ?? "",
-      action: "Open WhatsApp",
-      qrValue: contact.whatsappHref ?? "",
-      qrTitle: `Scan to open WhatsApp with ${COMIC_START_MESSAGE}`,
-      qrCaption: "Scan to open WhatsApp.",
-    },
-    voice: {
+    } satisfies StartChoice] : []),
+    ...(hasVoice ? [{
       id: "voice",
-      label: "Twilio Voice",
+      label: "SMS + Voice",
       heading: "Photos, then call.",
       destination: phoneNumber,
-      description: "Add one or two reference photos before calling from the same number.",
+      description: "Text one or two reference photos, wait for confirmation, then call from the same number.",
       href: "/start/voice",
       action: "Set up photos first",
       qrValue: voiceStartUrl,
       qrTitle: "Scan to add photos before your Voice call",
       qrCaption: "Scan to add photos, then call.",
-    },
-  };
-  const channelChoices = selectedChannels
-    .filter((channel) => channel !== "voice" || hasVoice)
-    .map((channel) => choices[channel])
-    .filter((choice) => Boolean(choice.href));
-  const cameraContinuation = cameraDestination?.smsHref && cameraDestination.callHref
-    ? "text or call"
-    : cameraDestination?.smsHref ? "text" : "call";
+    } satisfies StartChoice] : []),
+  ];
   const activeChoices: StartChoice[] = [
     ...channelChoices,
-    ...(showCamera ? [{
-      id: "camera" as const,
-      label: "Browser photo page",
-      heading: "Add photos in browser.",
-      destination: `Then ${cameraContinuation}`,
-      description: `Verify your mobile number, take or upload one or two photos, then ${cameraContinuation} from that number.`,
-      href: "/start/camera",
-      action: "Open photo page",
-      qrValue: new URL("/start/camera", publicOrigin).toString(),
-      qrTitle: "Scan to open the browser photo page",
-      qrCaption: "Scan to take or upload photos.",
-    }] : []),
     ...(showStudio ? [{
       id: "studio" as const,
       label: "Browser Studio",
       heading: "Create in Studio.",
-      destination: process.env.NODE_ENV === "production"
-        ? "Approved testers only"
-        : "Google sign-in",
-      description: `Sign in with ${process.env.NODE_ENV === "production" ? "an approved Google account" : "Google"}, take or upload one or two photos, add your idea, and create your comic in the browser.`,
+      destination: "No sign-in needed",
+      description: `Take or upload one or two photos, choose a style, and make your comic in the browser. ${hasSms && isVoiceVerificationConfigured() ? "You can also text yourself the finished link." : "View and share the finished comic there."}`,
       href: "/studio",
       action: "Open Studio",
       qrValue: new URL("/studio", publicOrigin).toString(),
@@ -187,7 +148,6 @@ export default async function StartPage() {
                   <div className={styles.cardBand}>
                     <span className={styles.channelIcon} aria-hidden="true">
                       {choice.id === "voice" ? <Phone size={24} />
-                        : choice.id === "camera" ? <Camera size={24} />
                         : choice.id === "studio" ? <BookOpen size={24} />
                         : <MessageCircle size={24} />}
                     </span>
@@ -241,29 +201,16 @@ export default async function StartPage() {
                     Your comic link arrives by text.
                   </li>
                 )}
-                {activeChoices.some((choice) => choice.id === "whatsapp") && (
-                  <li>
-                    <strong>WhatsApp:</strong> Send a photo, then share your idea in chat. The agent sends your
-                    comic link there.
-                  </li>
-                )}
-                {showCamera && (
-                  <li>
-                    <strong>Browser photos:</strong> Verify your phone, take or upload photos, then {cameraContinuation} from that number.
-                  </li>
-                )}
                 {showStudio && (
                   <li>
-                    <strong>Studio:</strong> Sign in with Google, add photos and an idea, then create the comic in your browser.
+                    <strong>Browser:</strong> Take or upload photos, add your idea, choose a style, and create in your browser. Text yourself the link if you want.
                   </li>
                 )}
               </ul>
             </details>
             {channelChoices.length > 0 && (
               <p className={styles.programDisclosure}>
-                {hasTextDelivery
-                  ? "Twilio Comics sends automated replies and comic links by text. "
-                  : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
+                Twilio Comics sends automated replies and comic links by text.{" "}
                 Message frequency varies; message and data rates may apply.{" "}
                 {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
                 Public five-digit comic links can be guessed.{" "}

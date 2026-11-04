@@ -1,75 +1,15 @@
 import type { Metadata } from "next";
-import Image from "next/image";
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
-import { GitHubStarLink } from "@/components/github-star-link";
-import { getCameraDestination } from "@/lib/browser-photo-access";
-import marketingStyles from "../../marketing.module.css";
-import CameraClient from "./camera-client";
-import styles from "./camera.module.css";
+import { redirect } from "next/navigation";
+import { getBrowserStudioEnabled } from "@/lib/browser-studio-settings";
+import { isStudioStartReady } from "@/lib/studio-start-readiness";
 
 export const dynamic = "force-dynamic";
-
 export const metadata: Metadata = {
-  title: "Add photos | Twilio Comics",
-  description: "Verify your phone, add photos, then tell the Twilio Comics agent your idea by text or call.",
+  title: "Browser Studio | Twilio Comics",
+  robots: { index: false, follow: false },
 };
 
+/** Old QR codes now lead to the single browser creation experience. */
 export default async function CameraPage() {
-  const destination = await getCameraDestination();
-  const startAction = destination?.smsHref && destination.callHref
-    ? "text or call"
-    : destination?.smsHref ? "text" : "call";
-
-  return (
-    <div className={`${marketingStyles.page} ${styles.cameraPage}`}>
-      <header className={marketingStyles.siteHeader}>
-        <Link href="/" className={marketingStyles.brand} aria-label="Twilio Comics home">
-          <Image src="/images/twilio-bug.svg" alt="" width={40} height={40} />
-          <span>Twilio Comics</span>
-        </Link>
-        <nav className={marketingStyles.headerNav} aria-label="Main navigation">
-          <Link href="/start" className={styles.backLink} aria-label="Back to start options">
-            <ArrowLeft size={18} aria-hidden="true" />
-            <span className={marketingStyles.navText}>Start options</span>
-          </Link>
-          <GitHubStarLink className={marketingStyles.githubStar} />
-        </nav>
-      </header>
-
-      <main>
-        <section className={styles.hero}>
-          <div className={styles.heroInner}>
-            <p className={styles.kicker}>Reference photo setup</p>
-            <h1>{destination ? "Put yourself in the comic." : "Photo setup is unavailable."}</h1>
-            <p>
-              {destination
-                ? `Verify your number, save one or two reference photos, then ${startAction} from that same number. Share your idea with the agent on your phone.`
-                : "Choose an available way to start your comic."}
-            </p>
-          </div>
-        </section>
-
-        {destination ? (
-          <CameraClient
-            smsHref={destination.smsHref}
-            callHref={destination.callHref}
-            contactNumber={destination.phoneNumber}
-          />
-        ) : (
-          <div className={styles.unavailable}>
-            <Link href="/start">Back to start options</Link>
-          </div>
-        )}
-      </main>
-
-      <footer className={styles.footer}>
-        <p>Photos are kept for your comic and can be deleted on request.</p>
-        <div>
-          <Link href="/privacy">Privacy Policy</Link>
-          <Link href="/terms">Terms of Service</Link>
-        </div>
-      </footer>
-    </div>
-  );
+  redirect(await getBrowserStudioEnabled() && isStudioStartReady() ? "/studio" : "/start");
 }

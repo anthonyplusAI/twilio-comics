@@ -1,7 +1,6 @@
 "use client";
 
-import { Plus, Loader2, Key } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Plus, Loader2 } from "lucide-react";
 import { AccountMenu } from "@/components/auth/account-menu";
 
 interface PageData {
@@ -19,8 +18,8 @@ interface PageSidebarProps {
   onPageSelect: (index: number) => void;
   onAddPage: () => void;
   loadingPageId?: number | null;
-  onApiKeyClick?: () => void;
   isOwner?: boolean;
+  showAccountMenu?: boolean;
 }
 
 export function PageSidebar({
@@ -29,8 +28,8 @@ export function PageSidebar({
   onPageSelect,
   onAddPage,
   loadingPageId,
-  onApiKeyClick,
   isOwner = false,
+  showAccountMenu = true,
 }: PageSidebarProps) {
   return (
     <aside className="hidden md:flex md:flex-col md:items-center w-24 border-r border-border/50 bg-background/50 py-4 gap-2 justify-between h-full">
@@ -91,21 +90,11 @@ export function PageSidebar({
         </div>
       </div>
 
-      <div className="flex flex-col items-center gap-3 pt-2">
-        {isOwner && onApiKeyClick && (
-          <Button
-            onClick={onApiKeyClick}
-            variant="ghost"
-            size="icon"
-            className="w-10 h-10 glass-panel glass-panel-hover text-muted-foreground hover:text-white"
-            title="Manage API Key"
-          >
-            <Key className="w-4 h-4" />
-          </Button>
-        )}
-
-        <AccountMenu side="right" />
-      </div>
+      {showAccountMenu && (
+        <div className="flex flex-col items-center gap-3 pt-2">
+          <AccountMenu side="right" />
+        </div>
+      )}
     </aside>
   );
 }

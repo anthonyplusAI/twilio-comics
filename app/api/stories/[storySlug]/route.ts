@@ -1,9 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
 import { getStoryWithPagesBySlug, updateStory } from "@/lib/db-actions";
 import { db } from "@/lib/db";
 import { stories } from "@/lib/schema";
 import { eq } from "drizzle-orm";
+import { readBoundedStudioJson } from "@/lib/studio-guest-json";
+import { getStudioActor } from "@/lib/studio-guest-session";
 
 function privateJson(body: unknown, status = 200) {
   return NextResponse.json(body, {
@@ -17,8 +19,8 @@ export async function GET(
   { params }: { params: Promise<{ storySlug: string }> }
 ) {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioActor(request);
+    const userId = actor?.userId;
 
     const { storySlug: slug } = await params;
 
@@ -79,6 +81,7 @@ export async function GET(
             },
       ),
       isOwner,
+      ...(isOwner ? { actorKind: actor?.kind } : {}),
     };
     return privateJson(responseData);
   } catch (error) {
@@ -92,11 +95,14 @@ export async function PUT(
   { params }: { params: Promise<{ storySlug: string }> }
 ) {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioActor(request);
+    const userId = actor?.userId;
 
     if (!userId) {
       return privateJson({ error: "Authentication required" }, 401);
+    }
+    if (actor?.kind === "guest" && !photoRequestHasAllowedOrigin(request)) {
+      return privateJson({ error: "Invalid request origin" }, 403);
     }
 
     const { storySlug: slug } = await params;
@@ -116,7 +122,12 @@ export async function PUT(
       return privateJson({ error: "Unauthorized" }, 403);
     }
 
-    const { title } = await request.json();
+    const json = await readBoundedStudioJson(request);
+    if (!json.ok) return privateJson({ error: json.error }, json.status);
+    const fields = json.value && typeof json.value === "object" && !Array.isArray(json.value)
+      ? json.value as Record<string, unknown>
+      : {};
+    const { title } = fields;
 
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       return privateJson({ error: "Title is required and must be a non-empty string" }, 400);

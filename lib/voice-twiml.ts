@@ -48,7 +48,7 @@ export function getConversationRelayUrl(): string | null {
 export function voiceMissingPhotoPrompt(canText: boolean): string {
   return canText
     ? "I can't find a saved reference photo for this call. Text one or two photos to this number from the same phone you're calling on. Wait for the Photo saved reply, then call again."
-    : "I can't find a saved reference photo for this call. Open the photo page from the Twilio Comics start page. Take or upload one or two photos using the same phone number, then call again.";
+    : "I can't find a saved reference photo for this call. Photo setup for calls is unavailable right now. Please try again later.";
 }
 
 function voiceGreeting(readiness: VoiceCallPhotoReadiness): string {
@@ -69,7 +69,7 @@ function voiceGreeting(readiness: VoiceCallPhotoReadiness): string {
     }
     return disclosure +
       "Your finished comic is ready. Say continue to add a new page. " +
-      "For a new comic, hang up and add new photos by text or on the photo page, then call back.";
+      "For a new comic, hang up and text new photos to this number, then call back.";
   }
   return disclosure +
     "I'm still creating your comic. I'll text the link when it's ready. " +
@@ -86,7 +86,7 @@ export function voiceConversationRelayTwiML(
   if (readiness.kind === "missing" ||
       (readiness.kind === "photos" && readiness.count < 1)) {
     return voiceHangupTwiML(
-      "I couldn't find a saved photo for this call. Use the photo setup on our start page, then call again.",
+      "I couldn't find a saved photo for this call. Text a reference photo to this number from your phone, then call again.",
     );
   }
   const greeting = voiceGreeting(readiness);

@@ -3,27 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
-const session = vi.hoisted(() => ({
-  status: "authenticated",
-  data: { user: { id: "google-user", role: "user", studioAuthorized: true } } as
-    | { user: { id: string; role: "user" | "admin"; studioAuthorized: boolean } }
-    | null,
-}));
-vi.mock("next-auth/react", () => ({
-  useSession: () => ({ status: session.status, data: session.data }),
-  signIn: vi.fn(),
-}));
 const toast = vi.hoisted(() => vi.fn());
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast }) }));
-vi.mock("@/hooks/use-api-key", () => ({ useApiKey: () => ["", vi.fn()] }));
 vi.mock("@/hooks/use-keyboard-shortcut", () => ({ useKeyboardShortcut: vi.fn() }));
-const apiModal = vi.hoisted(() => ({ props: null as null | { theme?: string } }));
-vi.mock("@/components/api-key-modal", () => ({
-  ApiKeyModal: (props: { theme?: string }) => {
-    apiModal.props = props;
-    return null;
-  },
-}));
 const camera = vi.hoisted(() => ({
   props: null as null | { onCapture: (file: File) => void; disabled?: boolean },
 }));
@@ -41,8 +23,10 @@ function renderForm(
   prompt = "A fox visits Mars",
   setCharacterFiles = vi.fn(),
   style = "noir",
+  studioReady = true,
 ): string {
   return renderToStaticMarkup(createElement(ComicCreationForm, {
+    studioReady,
     prompt,
     setPrompt: vi.fn(),
     style,
@@ -102,59 +86,24 @@ describe("Studio reference photo requirement", () => {
     ]);
   });
 
-  it("reflects the style controlled by the Studio preview", () => {
+  it("shows style examples and reflects the selected style", () => {
     const manga = renderForm(1, "A fox visits Mars", vi.fn(), "manga");
-    expect(manga).toMatch(/aria-pressed="true">Manga<\/button>/);
-    expect(manga).toMatch(/aria-pressed="false">Noir<\/button>/);
+    expect(manga).toMatch(/aria-pressed="true">[\s\S]*?<img[^>]*src="[^"]*manga\.png[^>]*>[\s\S]*?<span>Manga<\/span><\/button>/);
+    expect(manga).toMatch(/aria-pressed="false">[\s\S]*?<img[^>]*src="[^"]*noir\.jpg[^>]*>[\s\S]*?<span>Noir<\/span><\/button>/);
   });
 
-  it("keeps a visible API key path with the Studio dialog theme", () => {
+  it("uses the app key without asking players for Google or an API key", () => {
     const html = renderForm(1);
-    expect(html).toMatch(/Use my OpenAI key/);
-    expect(apiModal.props?.theme).toBe("studio");
+    expect(html).not.toMatch(/Google|OpenAI key|API key/i);
+    expect(generateButton(html)).not.toMatch(/\sdisabled=""/);
   });
 
-  it("requires sign-in before choosing or taking photos so the selection survives auth", () => {
-    session.status = "unauthenticated";
-    session.data = null;
-    try {
-      const html = renderForm(0);
-      expect(html).toMatch(/Sign in with Google to add photos/);
-      expect(html.indexOf("Sign in with Google to add photos")).toBeLessThan(html.indexOf("Add 1 or 2 reference photos"));
-      expect(camera.props?.disabled).toBe(true);
-      expect(generateButton(html)).toMatch(/\sdisabled=""/);
-    } finally {
-      session.status = "authenticated";
-      session.data = { user: { id: "google-user", role: "user", studioAuthorized: true } };
-    }
-  });
-
-  it("lets an approved Google admin with a Studio identity create a comic", () => {
-    session.data = { user: { id: "google-admin-user", role: "admin", studioAuthorized: true } };
-    try {
-      const html = renderForm(1);
-      expect(camera.props?.disabled).toBe(false);
-      expect(generateButton(html)).not.toMatch(/\sdisabled=""/);
-      expect(html).toMatch(/Use my OpenAI key/);
-    } finally {
-      session.data = { user: { id: "google-user", role: "user", studioAuthorized: true } };
-    }
-  });
-
-  it("blocks password admin and invalid browser sessions from photo upload, generation, and key management", () => {
-    for (const user of [
-      { id: "", role: "admin" as const, studioAuthorized: false },
-      { id: "   ", role: "user" as const, studioAuthorized: true },
-    ]) {
-      session.data = { user };
-      const html = renderForm(1);
-      expect(html).toMatch(/Sign in with Google to add photos/);
-      expect(camera.props?.disabled).toBe(true);
-      expect(html).toMatch(/<input[^>]*aria-label="Choose reference photos"[^>]*disabled=""/);
-      expect(generateButton(html)).toMatch(/\sdisabled=""/);
-      expect(html).not.toMatch(/Use my OpenAI key|Manage OpenAI key/);
-    }
-    session.data = { user: { id: "google-user", role: "user", studioAuthorized: true } };
+  it("waits for an invisible browser session before allowing photos or generation", () => {
+    const html = renderForm(1, "A fox visits Mars", vi.fn(), "noir", false);
+    expect(camera.props?.disabled).toBe(true);
+    expect(html).toMatch(/Preparing Browser Studio/i);
+    expect(html).toMatch(/<input[^>]*aria-label="Choose reference photos"[^>]*disabled=""/);
+    expect(generateButton(html)).toMatch(/\sdisabled=""/);
   });
 
   it.each([

@@ -22,9 +22,10 @@ export default function TermsPage() {
     <LegalShell title="Terms of Service" published={published}>
       <p>
         These terms cover Twilio Comics, operated by{" "}
-        {operatorName ?? "an operator whose name has not yet been configured"}. Texting or
-        calling the comic line asks our AI agent to help make a comic from your idea. The
-        browser studio is available for testing with a Google sign-in.
+        {operatorName ?? "an operator whose name has not yet been configured"}. You can
+        make a comic by text, by texting photos and then calling, or in Browser Studio
+        when that option is open. Every new comic needs at least one reference photo.
+        Browser Studio lets you take or upload photos without a Google account.
       </p>
 
       <section className={styles.legalSection}>
@@ -47,11 +48,21 @@ export default function TermsPage() {
       <section className={styles.legalSection}>
         <h2>Voice calls and comic results</h2>
         <p>
-          Calls are handled by an AI voice agent. If you ask it to create a comic, the result
-          link is sent by SMS to the number you called from. Use a phone that can receive SMS.
-          Your speech is transcribed so the agent can respond and shape the comic with you.
-          Where offered, you may text photos or verify your number to upload photos in your
-          browser before texting or calling. You can also make a comic without photos.
+          Before calling, text one or two reference photos from the phone you will call on.
+          Calls are handled by an AI voice agent. Your speech is transcribed so the agent can
+          respond and shape the comic with you. After you approve the comic, its result link
+          is sent by SMS to the number you called from. Use a phone that can receive SMS.
+        </p>
+      </section>
+
+      <section className={styles.legalSection}>
+        <h2>Browser Studio</h2>
+        <p>
+          When Browser Studio is open, take or upload one or two reference photos and enter
+          your idea there. The finished comic appears in your browser. You may also choose
+          to receive its link by SMS after verifying the phone number you enter. The browser
+          session used to find your comics lasts up to 30 days on that device. Editing and
+          optional texting are available while Browser Studio is open.
         </p>
       </section>
 
