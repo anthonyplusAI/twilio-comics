@@ -476,7 +476,7 @@ if ! az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "
     --cron-expression '0 0 1 1 *' \
     --replica-timeout 900 --replica-retry-limit 0 \
     --replica-completion-count 1 --parallelism 1 \
-    --image "$PLACEHOLDER_IMAGE" --cpu 1 --memory 2Gi \
+    --image "$PLACEHOLDER_IMAGE" --cpu 0.5 --memory 1Gi \
     --command pnpm --args start:worker \
     --mi-user-assigned "$WORKER_ID" "$PULL_ID" --env-vars "${RECOVERY_ENV[@]}" \
     --tags "${TAGS[@]}" --output none

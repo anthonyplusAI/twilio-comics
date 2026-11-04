@@ -123,6 +123,7 @@ describe("stalled SMS agent reply monitoring", () => {
     expect(alert.sql).toContain("message.delivery.alert");
     expect(alert.sql).toContain("stalled");
     expect(alert.sql).toContain("ON CONFLICT (event_key) DO NOTHING");
+    expect(alert.sql).toMatch(/'observedStatus',\s*\$\d+::text/);
     expect(alert.sql).toMatch(/NOT EXISTS[\s\S]*activity_events/i);
     expect(alert.sql).toMatch(/COALESCE\(sent_event\.occurred_at, receipt\.updated_at\) <=/i);
     expect(alert.params).toContain("message:SMoutbound:stalled");

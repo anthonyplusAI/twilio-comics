@@ -327,6 +327,16 @@ set -e
   printf 'Recovery placeholder must remain dormant until first deploy.\n' >&2
   exit 1
 }
+[[ "$(arg_after --cpu)" == 0.5 ]] || {
+  printf 'Recovery Job must be provisioned with 0.5 vCPU.\n' >&2
+  exit 1
+}
+[[ "$(arg_after --memory)" == 1Gi ]] || {
+  printf 'Recovery Job must be provisioned with 1 GiB memory.\n' >&2
+  exit 1
+}
+[[ "$(arg_after --replica-timeout)" == 900 ]]
+[[ "$(arg_after --parallelism)" == 1 ]]
 [[ "$(arg_after --command)" == pnpm ]]
 [[ "$(arg_after --args)" == start:worker ]]
 [[ "$(arg_after --image)" == 'mcr.microsoft.com/dotnet/samples:aspnetapp' ]]
@@ -400,6 +410,7 @@ assert '--cpu 0.25' in step, 'release must size the inbound CPU to 0.25 vCPU'
 assert '--memory 0.5Gi' in step, 'release must size the inbound memory to 0.5 GiB'
 assert '--min-replicas 1' in step, 'release must keep one warm inbound replica'
 assert '--max-replicas "$ACA_INBOUND_MAX_REPLICAS"' in step
+
 PY
 
 # A resumed run waits for an existing ACA environment to finish provisioning
