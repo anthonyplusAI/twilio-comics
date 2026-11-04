@@ -1,4 +1,5 @@
 import { canonicalizeLegacyMediaUrl } from "@/lib/legacy-media-url";
+import { GITHUB_REPO_URL } from "@/lib/github";
 
 const DEFAULT_LIMITS = {
   maxPages: 24,
@@ -153,7 +154,7 @@ export async function buildComicPdf({
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ unit: "mm", format: "a4" });
   const site = new URL(siteUrl);
-  const credit = `Created by Twilio Comics [${site.host}]`;
+  const credit = "Created by Twilio Comics | Star us on GitHub";
   let totalImageBytes = 0;
 
   for (let index = 0; index < images.length; index++) {
@@ -195,7 +196,7 @@ export async function buildComicPdf({
     pdf.setFontSize(12);
     pdf.text(credit, 105, 290, { align: "center" });
     const creditWidth = pdf.getTextWidth(credit);
-    pdf.link(105 - creditWidth / 2, 286, creditWidth, 6, { url: site.origin });
+    pdf.link(105 - creditWidth / 2, 286, creditWidth, 6, { url: GITHUB_REPO_URL });
   }
 
   return {

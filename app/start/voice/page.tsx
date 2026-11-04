@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, CheckCircle2, ImagePlus, MessageCircle, Phone } from "lucide-react";
-import { getMarketingContact } from "@/lib/marketing-contact";
+import { getMarketingContact, VOICE_PHOTO_START_MESSAGE } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import marketingStyles from "../../marketing.module.css";
@@ -26,7 +26,9 @@ export default async function VoiceStartPage() {
   const settings = voiceReady ? await getExperienceSettings() : null;
   const voiceCanUsePhotos = voiceReady && settings?.voicePhotoMode !== "none";
   const hasPhotoPath = voiceCanUsePhotos && smsReady;
-  const photoTextHref = hasPhotoPath && contact.phoneNumber ? `sms:${contact.phoneNumber}` : null;
+  const photoTextHref = hasPhotoPath && contact.phoneNumber
+    ? `sms:${contact.phoneNumber}?body=${encodeURIComponent(VOICE_PHOTO_START_MESSAGE)}`
+    : null;
 
   return (
     <div className={`${marketingStyles.page} ${styles.page}`}>
@@ -57,7 +59,7 @@ export default async function VoiceStartPage() {
               {!voiceReady
                 ? "Choose an available way to make your comic."
                 : hasPhotoPath
-                  ? "Your portraits make the characters yours. Save one or two photos, then call from that same number to tell the agent your story."
+                  ? "Your portraits make the characters yours. Text one photo for one character, or two photos for two different characters. Then call from the same phone to tell the agent your story."
                   : "A personalized Voice comic needs at least one reference photo before the call."}
             </p>
           </div>
@@ -80,15 +82,17 @@ export default async function VoiceStartPage() {
                 </div>
                 <h2 id="photos-step-title">Save your reference photos.</h2>
                 <p>
-                  Attach one or two photos in a text to <strong>{contact.phoneNumber}</strong> from
-                  the phone you&apos;ll call on. Wait for the “Photo saved” reply, then call within 24 hours.
+                  Open Messages from the phone you&apos;ll call on. “{VOICE_PHOTO_START_MESSAGE}” should be ready to send.
+                  If Messages opens blank, type “{VOICE_PHOTO_START_MESSAGE}” before sending. Attach one or two photos,
+                  one per character, and send to <strong>{contact.phoneNumber}</strong>. If you send only the text,
+                  we&apos;ll ask for photos next.
                 </p>
                 <a className={styles.primaryAction} href={photoTextHref ?? undefined}>
                   <MessageCircle size={20} aria-hidden="true" /> Open Messages to attach photos
                   <ArrowUpRight size={20} aria-hidden="true" />
                 </a>
                 <p className={styles.finePrint}>
-                  Send only photos first. Making another comic? Text NEW, then send fresh photos.
+                  Wait for “Photo saved” and a phone number you can tap or dial. Making another comic? Text NEW, then send fresh photos.
                 </p>
               </section>
 
@@ -99,7 +103,7 @@ export default async function VoiceStartPage() {
                 </div>
                 <h2 id="call-step-title">Call from the same number.</h2>
                 <p>
-                  Once your photo is saved, call <strong>{contact.phoneNumber}</strong>.
+                  After the photo reply, tap the number in your text or call <strong>{contact.phoneNumber}</strong> within 24 hours.
                   We&apos;ll text you a six-digit code. Enter it on your phone&apos;s keypad to reach the agent.
                 </p>
                 <a className={styles.callAction} href={contact.callHref ?? undefined}>
@@ -118,8 +122,8 @@ export default async function VoiceStartPage() {
                 </div>
                 <h2 id="idea-step-title">Tell and approve your idea.</h2>
                 <p>
-                  Tell the agent who&apos;s in the comic and what happens. Listen to the recap, correct anything
-                  you want, then say “create it” when you&apos;re ready.
+                  Tell the agent who&apos;s in the comic and what happens. Choose American Modern, Manga, Noir,
+                  or Vintage when asked. Listen to the recap, correct anything you want, then say “create it.”
                 </p>
                 <p className={styles.finePrint}>
                   The agent will confirm when creation starts. You can hang up then; your comic link arrives by text

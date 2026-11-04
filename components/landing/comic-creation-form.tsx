@@ -291,7 +291,7 @@ export function ComicCreationForm({
             <span className={styles.stepNumber} aria-hidden="true">1</span>
             <div className={styles.stepCopy}>
               <h3 id="studio-photos-title">Add 1 or 2 reference photos</h3>
-              <p>First photo required. Add a second for another person or look.</p>
+              <p>First photo required; one person per photo. Add a second photo only for a different person. For two outfits of one person, use one photo.</p>
             </div>
           </div>
 
@@ -308,7 +308,7 @@ export function ComicCreationForm({
                       {previews[index] ? (
                         <Image
                           src={previews[index]}
-                          alt={`Reference photo ${index + 1}`}
+                          alt={`Character ${index + 1} reference photo`}
                           width={300}
                           height={240}
                           unoptimized
@@ -324,7 +324,7 @@ export function ComicCreationForm({
                         </div>
                       )}
                       <span className={styles.photoFileName} title={photoDisplayName(file, index)}>
-                        {photoDisplayName(file, index)}
+                        Character {index + 1} · {photoDisplayName(file, index)}
                       </span>
                       <button
                         type="button"
@@ -339,7 +339,7 @@ export function ComicCreationForm({
                   ) : (
                     <div className={styles.photoEmpty}>
                       <ImagePlus size={28} strokeWidth={1.7} aria-hidden="true" />
-                      <strong>Photo {index + 1}</strong>
+                      <strong>Character {index + 1}</strong>
                       <span>{index === 0 ? "Required" : "Optional"}</span>
                     </div>
                   )}

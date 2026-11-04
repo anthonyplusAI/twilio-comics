@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   startVoiceVerification: vi.fn(),
   checkVoiceVerification: vi.fn(),
   sendSms: vi.fn(),
+  comicDeliveryUrl: vi.fn(),
 }));
 
 vi.mock("@/lib/studio-comic-text", async (original) => ({
@@ -29,6 +30,7 @@ vi.mock("@/lib/voice-verification", () => ({
   checkVoiceVerification: h.checkVoiceVerification,
 }));
 vi.mock("@/lib/twilio", () => ({ sendSms: h.sendSms }));
+vi.mock("@/lib/dub-short-links", () => ({ comicDeliveryUrl: h.comicDeliveryUrl }));
 
 import { createStudioTextChallenge, STUDIO_TEXT_CHALLENGE_COOKIE } from "@/lib/studio-comic-text";
 import { POST as start } from "@/app/api/studio/text-comic/start/route";
@@ -72,6 +74,7 @@ beforeEach(() => {
   h.startVoiceVerification.mockResolvedValue(undefined);
   h.checkVoiceVerification.mockResolvedValue(true);
   h.sendSms.mockResolvedValue(`SM${"b".repeat(32)}`);
+  h.comicDeliveryUrl.mockResolvedValue("https://twil.io/comic-12345");
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -150,7 +153,7 @@ describe("optional browser comic SMS", () => {
     expect(h.sendSms).not.toHaveBeenCalled();
   });
 
-  it("checks the code, then sends only the verified phone a comic link", async () => {
+  it("checks the code, then sends only the verified phone a short comic link", async () => {
     const cookie = challengeCookie();
     h.checkVoiceVerification.mockResolvedValueOnce(false);
     const wrong = await confirm(request("/api/studio/text-comic/confirm", {
@@ -164,9 +167,14 @@ describe("optional browser comic SMS", () => {
     }, cookie));
     expect(approved.status).toBe(200);
     expect(h.checkVoiceVerification).toHaveBeenLastCalledWith(PHONE, "654321");
+    expect(h.comicDeliveryUrl).toHaveBeenCalledExactlyOnceWith(
+      STORY_ID,
+      SLUG,
+      `${ORIGIN}/story/${SLUG}`,
+    );
     expect(h.sendSms).toHaveBeenCalledExactlyOnceWith({
       to: PHONE,
-      body: `Your Twilio Comics comic is ready: ${ORIGIN}/story/${SLUG}`,
+      body: "Your Twilio Comics comic is ready: https://twil.io/comic-12345",
     });
     expect(approved.headers.get("set-cookie")).toMatch(/Max-Age=0/);
   });

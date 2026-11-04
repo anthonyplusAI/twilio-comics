@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { buildComicPdf, safePdfFilename } from "@/lib/client-pdf";
+import { GITHUB_REPO_URL } from "@/lib/github";
 
 const siteUrl = "https://comics.example.com";
 
@@ -53,7 +54,8 @@ describe("browser comic PDF", () => {
     expect(pdf.startsWith("%PDF-")).toBe(true);
     expect(pdf.match(/\/Type \/Page\b/g)).toHaveLength(2);
     expect(pdf.match(/Created by Twilio Comics/g)).toHaveLength(2);
-    expect(pdf).toContain(siteUrl);
+    expect(pdf).toContain(GITHUB_REPO_URL);
+    expect(pdf).not.toContain(siteUrl);
     expect(requestedUrls).toEqual([
       `${siteUrl}/api/media?key=one`,
       `${siteUrl}/api/media?key=two`,

@@ -2,6 +2,8 @@ const E164 = /^\+[1-9]\d{7,14}$/;
 const EXAMPLE_NUMBER = "+15551234567";
 // Suggested opening text, not a required command. An idea or photo-only message can also begin.
 export const COMIC_START_MESSAGE = "Turn me into a comic!";
+/** Distinguishes a photo handoff for a call from the interactive SMS comic flow. */
+export const VOICE_PHOTO_START_MESSAGE = "Photos then call";
 
 export interface MarketingContact {
   phoneNumber: string | null;

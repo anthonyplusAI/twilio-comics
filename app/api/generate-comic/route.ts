@@ -249,6 +249,7 @@ export async function POST(request: NextRequest) {
       prompt,
       style: story.style,
       characterImages,
+      previousPageImageIncluded: referenceImages.length > characterImages.length,
       isContinuation,
       previousContext,
     });

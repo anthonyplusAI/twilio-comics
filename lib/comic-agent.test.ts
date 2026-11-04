@@ -19,6 +19,308 @@ function modelReply(overrides: Partial<Awaited<ReturnType<ComicAgentModel>>> = {
 }
 
 describe("advanceComicAgent", () => {
+  it("requires an explicit SMS style choice before CREATE", async () => {
+    const model = modelReply();
+    const draft = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      { text: IDEA, channel: "sms", imageUrls: ["portrait-1"] },
+      model,
+    );
+
+    expect(draft.collected.styleSelectionPending).toBe(true);
+    expect(draft.reply).toMatch(/1.*modern.*2.*manga.*3.*noir.*4.*vintage/i);
+    expect(draft.reply).not.toMatch(/reply CREATE/i);
+
+    const earlyCreate = await advanceComicAgent(
+      { state: draft.nextState, collected: draft.collected },
+      { text: "CREATE", channel: "sms" },
+      model,
+    );
+    expect(earlyCreate.action).toBe("none");
+    expect(earlyCreate.reply).toMatch(/choose.*style/i);
+
+    const chosen = await advanceComicAgent(
+      { state: draft.nextState, collected: draft.collected },
+      { text: "3", channel: "sms" },
+      model,
+    );
+    expect(chosen.collected.style).toBe("noir");
+    expect(chosen.collected.styleSelectionPending).toBeFalsy();
+    expect(chosen.reply).toMatch(/Noir selected/i);
+    expect(chosen.reply).toMatch(/reply CREATE/i);
+    expect(model).toHaveBeenCalledOnce();
+
+    const submitted = await advanceComicAgent(
+      { state: chosen.nextState, collected: chosen.collected },
+      { text: "CREATE", channel: "sms" },
+      model,
+    );
+    expect(submitted.submission?.style).toBe("noir");
+  });
+
+  it("keeps a photo attached to an early CREATE while waiting for style", async () => {
+    const result = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: { prompt: IDEA, style: "manga", styleSelectionPending: true },
+      },
+      { text: "CREATE", channel: "sms", imageUrls: ["portrait-1"] },
+      modelReply(),
+    );
+
+    expect(result.action).toBe("none");
+    expect(result.collected.characterImageUrls).toEqual(["portrait-1"]);
+    expect(result.reply).toMatch(/choose.*style/i);
+  });
+
+  it("accepts a style stated in the idea instead of asking again", async () => {
+    const draft = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      { text: `${IDEA} in Vintage style`, channel: "sms", imageUrls: ["portrait-1"] },
+      modelReply({ style: "american-modern" }),
+    );
+
+    expect(draft.collected.style).toBe("vintage");
+    expect(draft.collected.styleSelectionPending).toBeFalsy();
+    expect(draft.reply).toMatch(/reply CREATE/i);
+  });
+
+  it("honors a deliberate style change while revising an approved draft", async () => {
+    const revised = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: {
+          prompt: IDEA,
+          style: "noir",
+          styleSelectionPending: false,
+          characterImageUrls: ["portrait-1"],
+        },
+      },
+      { text: "Change the style to Manga and add a tiny robot", channel: "sms" },
+      modelReply({ prompt: `${IDEA} and a tiny robot`, style: "manga" }),
+    );
+
+    expect(revised.collected.style).toBe("manga");
+    expect(revised.collected.styleSelectionPending).toBe(false);
+    expect(revised.reply).toMatch(/reply CREATE/i);
+  });
+
+  it("asks a resumed legacy draft to choose instead of using its model default", async () => {
+    const current = {
+      state: "confirming",
+      collected: {
+        prompt: IDEA,
+        style: "american-modern",
+        characterImageUrls: ["portrait-1"],
+      },
+    };
+    const early = await advanceComicAgent(current, { text: "CREATE", channel: "sms" }, modelReply());
+    expect(early.action).toBe("none");
+    expect(early.reply).toMatch(/choose.*style/i);
+
+    const chosen = await advanceComicAgent(current, { text: "2", channel: "sms" }, modelReply());
+    expect(chosen.collected.style).toBe("manga");
+    expect(chosen.collected.styleSelectionPending).toBe(false);
+    expect(chosen.reply).toMatch(/reply CREATE/i);
+  });
+
+  it("asks for a style if a continuation draft has no inherited style", async () => {
+    const result = await advanceComicAgent(
+      {
+        state: "confirming",
+        activeStoryId: "story-1",
+        collected: { targetStoryId: "story-1", prompt: IDEA },
+      },
+      { text: "CREATE", channel: "sms" },
+      modelReply(),
+    );
+
+    expect(result.action).toBe("none");
+    expect(result.reply).toMatch(/choose.*style/i);
+  });
+
+  it("does not treat a place or occupation in an idea as a style choice", async () => {
+    const draft = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      {
+        text: "A detective in noir Tokyo meets a manga artist",
+        channel: "sms",
+        imageUrls: ["portrait-1"],
+      },
+      modelReply({ style: "american-modern" }),
+    );
+
+    expect(draft.collected.styleSelectionPending).toBe(true);
+    expect(draft.reply).toMatch(/choose.*style/i);
+  });
+
+  it("asks Voice callers to choose a style before spoken approval", async () => {
+    const model = modelReply();
+    const draft = await advanceComicAgent(
+      { state: "collecting", collected: { characterImageUrls: ["portrait-1"] } },
+      { text: IDEA, channel: "voice" },
+      model,
+    );
+    expect(draft.reply).toMatch(/which.*style.*American Modern.*Manga.*Noir.*Vintage/i);
+    expect(draft.reply).not.toMatch(/say ['"]?create it/i);
+
+    const chosen = await advanceComicAgent(
+      { state: draft.nextState, collected: draft.collected },
+      { text: "Noir", channel: "voice" },
+      model,
+    );
+    expect(chosen.collected.style).toBe("noir");
+    expect(chosen.reply).toMatch(/Noir selected/i);
+    expect(chosen.reply).toMatch(/say ['"]?create it/i);
+    expect(model).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a natural spoken style number", async () => {
+    const chosen = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: {
+          prompt: IDEA,
+          style: "noir",
+          styleSelectionPending: true,
+          characterImageUrls: ["portrait-1"],
+        },
+      },
+      { text: "the second one", channel: "voice" },
+      modelReply(),
+    );
+
+    expect(chosen.collected.style).toBe("manga");
+    expect(chosen.collected.styleSelectionPending).toBe(false);
+    expect(chosen.reply).toMatch(/say ['"]?create it/i);
+  });
+
+  it.each([
+    ["I'd like number 3", "noir"],
+    ["I want option 2", "manga"],
+    ["I choose style number 4", "vintage"],
+  ] as const)("accepts a conversational style choice: %s", async (answer, style) => {
+    const model = modelReply();
+    const chosen = await advanceComicAgent(
+      {
+        state: "confirming",
+        collected: {
+          prompt: IDEA,
+          style: "american-modern",
+          styleSelectionPending: true,
+          characterImageUrls: ["portrait-1"],
+        },
+      },
+      { text: answer, channel: "sms" },
+      model,
+    );
+
+    expect(chosen.collected.style).toBe(style);
+    expect(chosen.collected.styleSelectionPending).toBe(false);
+    expect(model).not.toHaveBeenCalled();
+  });
+
+  it("keeps Photos then Call as a photo-only SMS setup, with a call link", async () => {
+    const model = modelReply();
+    const started = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      { text: "Photos then call", channel: "sms", voiceCallHref: "tel:+18669012028" },
+      model,
+    );
+    expect(started.collected.voicePhotoSetup).toBe(true);
+    expect(started.reply).toMatch(/send.*photo/i);
+    expect(started.reply).not.toMatch(/comic idea/i);
+
+    const textOnly = await advanceComicAgent(
+      { state: started.nextState, collected: started.collected },
+      { text: "A dragon adventure", channel: "sms", voiceCallHref: "tel:+18669012028" },
+      model,
+    );
+    expect(textOnly.reply).toMatch(/send.*photo/i);
+    expect(textOnly.collected.prompt).toBeUndefined();
+
+    const photo = await advanceComicAgent(
+      { state: textOnly.nextState, collected: textOnly.collected },
+      { text: "", channel: "sms", imageUrls: ["portrait-1"], voiceCallHref: "tel:+18669012028" },
+      model,
+    );
+    expect(photo.collected.characterImageUrls).toEqual(["portrait-1"]);
+    expect(photo.reply).toMatch(/Photo saved.*call \+18669012028/i);
+    expect(photo.reply).not.toContain("tel:");
+    expect(photo.reply).not.toMatch(/text your idea|comic idea/i);
+    expect(model).not.toHaveBeenCalled();
+  });
+
+  it("does not erase the first call photo when the starter link is tapped again", async () => {
+    const model = modelReply();
+    const repeated = await advanceComicAgent(
+      {
+        state: "collecting",
+        collected: { voicePhotoSetup: true, characterImageUrls: ["portrait-1"] },
+      },
+      {
+        text: "Photos then call",
+        channel: "sms",
+        imageUrls: ["portrait-2"],
+        voiceCallHref: "tel:+18669012028",
+      },
+      model,
+    );
+
+    expect(repeated.freshStart).toBeUndefined();
+    expect(repeated.collected.characterImageUrls).toEqual(["portrait-1", "portrait-2"]);
+    expect(repeated.reply).toMatch(/2 photos saved.*Call \+18669012028/i);
+    expect(model).not.toHaveBeenCalled();
+  });
+
+  it("keeps NEW in Photos then Call and lets the Text starter switch back to SMS", async () => {
+    const voiceSetup = {
+      state: "collecting",
+      collected: { voicePhotoSetup: true, characterImageUrls: ["old-photo"] },
+    };
+    const reset = await advanceComicAgent(
+      voiceSetup,
+      { text: "NEW", channel: "sms", voiceCallHref: "tel:+18669012028" },
+      modelReply(),
+    );
+    expect(reset.collected.voicePhotoSetup).toBe(true);
+    expect(reset.collected.characterImageUrls).toBeUndefined();
+    expect(reset.reply).toMatch(/send.*photo/i);
+
+    const switched = await advanceComicAgent(
+      voiceSetup,
+      { text: COMIC_START_MESSAGE, channel: "sms" },
+      modelReply(),
+    );
+    expect(switched.collected.voicePhotoSetup).toBeUndefined();
+    expect(switched.collected.characterImageUrls).toEqual(["old-photo"]);
+    expect(switched.reply).toMatch(/comic/i);
+    expect(switched.reply).not.toMatch(/call|voice/i);
+  });
+
+  it("does not let a style choice approve a draft that still needs revision", async () => {
+    const model = modelReply({ prompt: IDEA, readyForConfirmation: true });
+    const result = await advanceComicAgent(
+      {
+        state: "collecting",
+        collected: {
+          prompt: IDEA,
+          style: "manga",
+          styleSelectionPending: true,
+          blockedPrompt: IDEA,
+          characterImageUrls: ["portrait-1"],
+        },
+      },
+      { text: "3", channel: "sms" },
+      model,
+    );
+
+    expect(model).toHaveBeenCalledOnce();
+    expect(result.nextState).toBe("collecting");
+    expect(result.action).toBe("none");
+    expect(result.reply).toMatch(/change/i);
+  });
+
   it("saves an initial comic idea and asks for a photo before approval", async () => {
     const model = modelReply();
     const result = await advanceComicAgent(
@@ -104,7 +406,17 @@ describe("advanceComicAgent", () => {
       "https://example.com/1",
       "https://example.com/2",
     ]);
-    expect(result.reply).toMatch(/idea/i);
+    expect(result.reply).toMatch(/2 photos saved.*both characters/i);
+  });
+
+  it("explains that a second photo is for another character", async () => {
+    const result = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      { text: "", channel: "sms", imageUrls: ["portrait-1"] },
+      modelReply(),
+    );
+
+    expect(result.reply).toBe("Photo saved. Text your comic idea, or add a second character photo.");
   });
 
   it("says when a third SMS photo is not retained", async () => {
@@ -169,7 +481,7 @@ describe("advanceComicAgent", () => {
 
       expect(model).not.toHaveBeenCalled();
       expect(result).toMatchObject({ nextState: "collecting", action: "none", collected: {} });
-      expect(result.reply).toMatch(/photos of yourself/i);
+      expect(result.reply).toMatch(/one person per photo/i);
       expect(result.reply).toMatch(/comic idea/i);
     },
   );
@@ -182,6 +494,7 @@ describe("advanceComicAgent", () => {
         collected: {
           prompt: IDEA,
           style: "manga",
+          styleSelectionPending: false,
           characterImageUrls: ["https://example.com/first"],
         },
       },
@@ -235,7 +548,7 @@ describe("advanceComicAgent", () => {
 
   it("allows a reference to be added to a pending draft before approval", async () => {
     const result = await advanceComicAgent(
-      { state: "confirming", collected: { prompt: IDEA, style: "manga" } },
+      { state: "confirming", collected: { prompt: IDEA, style: "manga", styleSelectionPending: false } },
       { text: "", channel: "whatsapp", imageUrls: ["https://example.com/face"] },
       modelReply(),
     );
@@ -513,7 +826,7 @@ describe("advanceComicAgent", () => {
     const result = await advanceComicAgent(
       {
         state: "confirming",
-        collected: { prompt: IDEA, style: "noir", characterImageUrls: ["portrait-1"] },
+        collected: { prompt: IDEA, style: "noir", styleSelectionPending: false, characterImageUrls: ["portrait-1"] },
       },
       { text: "create it", channel: "voice" },
       modelReply(),
@@ -541,13 +854,13 @@ describe("advanceComicAgent", () => {
       modelReply(),
     );
     expect(withPhotos.nextState).toBe("confirming");
-    expect(withPhotos.reply).toMatch(/one reference photo/i);
-    expect(withPhotos.reply).toMatch(/create it/i);
+    expect(withPhotos.reply).toMatch(/which.*comic style/i);
+    expect(withPhotos.reply).not.toMatch(/create it/i);
   });
 
   it("does not submit a new Voice comic without photos on ordinary approval", async () => {
     const result = await advanceComicAgent(
-      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      { state: "confirming", collected: { prompt: IDEA, style: "noir", styleSelectionPending: false } },
       { text: "create it", channel: "voice" },
       modelReply(),
     );
@@ -604,7 +917,7 @@ describe("advanceComicAgent", () => {
 
   it("allows an SMS caller to add a reference to a saved idea before approval", async () => {
     const added = await advanceComicAgent(
-      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      { state: "confirming", collected: { prompt: IDEA, style: "noir", styleSelectionPending: false } },
       { text: "", channel: "sms", imageUrls: ["portrait-1"] },
       modelReply(),
     );

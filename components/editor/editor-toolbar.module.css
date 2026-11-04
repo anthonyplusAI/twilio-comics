@@ -1,0 +1,246 @@
+.toolbar {
+  flex: none;
+  border-bottom: 2px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px 32px;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 16px clamp(20px, 4vw, 64px);
+}
+
+.identity {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.sectionLabel {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.title {
+  overflow: hidden;
+  margin: 0;
+  font-family: var(--font-space-grotesk), sans-serif;
+  font-size: clamp(20px, 2vw, 28px);
+  font-weight: 800;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleEdit {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+}
+
+.titleEdit span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleEdit svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.titleEdit:hover svg {
+  color: var(--blue);
+}
+
+.titleInput {
+  width: min(100%, 520px);
+  min-height: 36px;
+  border: 0;
+  border-bottom: 2px solid var(--blue);
+  border-radius: 0;
+  background: var(--pale-blue);
+  padding: 2px 6px;
+  color: var(--ink);
+  font: 800 clamp(20px, 2vw, 28px)/1.2 var(--font-space-grotesk), sans-serif;
+}
+
+.notice {
+  max-width: 620px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.actions button,
+.actions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 2px solid var(--ink);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+
+.actions button:hover:not(:disabled),
+.actions a:hover {
+  transform: translate(1px, 1px);
+}
+
+.actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.actions .secondaryAction {
+  border-color: transparent;
+  background: transparent;
+}
+
+.actions .secondaryAction:hover:not(:disabled) {
+  background: var(--pale-blue);
+}
+
+.actions .primaryAction {
+  background: var(--red-action);
+  box-shadow: 3px 3px 0 var(--ink);
+  color: var(--paper);
+}
+
+.actions .primaryAction:hover:not(:disabled) {
+  background: var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.actions button[data-comic-text-action] {
+  background: var(--pale-blue);
+}
+
+.actions button[data-comic-text-action]:hover {
+  background: #d0edff;
+}
+
+.actions .githubLink {
+  min-height: 38px;
+  border: 0;
+  background: transparent;
+  padding: 6px 1px 6px 11px;
+  color: var(--blue);
+  font-size: 13px;
+}
+
+.actions .githubLink:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.toolbar button:focus-visible,
+.toolbar a:focus-visible,
+.toolbar input:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1100px) {
+  .inner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .identity {
+    width: 100%;
+    flex: none;
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 600px) {
+  .inner {
+    gap: 13px;
+    padding: 12px 16px 15px;
+  }
+
+  .title {
+    font-size: 21px;
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+  }
+
+  .actions button,
+  .actions a {
+    width: 100%;
+    min-width: 0;
+    padding: 8px;
+    font-size: 13px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .actions button svg,
+  .actions a svg {
+    flex: none;
+  }
+
+  .actions .githubLink {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    width: max-content;
+    min-height: 28px;
+    padding: 3px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .actions button,
+  .actions a {
+    transition: none;
+  }
+}

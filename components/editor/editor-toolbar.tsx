@@ -1,16 +1,10 @@
 "use client";
 
-import {
-  ArrowLeft,
-  Share,
-  Plus,
-  Download,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { GitHubStarLink } from "@/components/github-star-link";
-import { useRouter } from "next/navigation";
+import { Download, Link2, Pencil, Plus } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useState, useRef, useEffect } from "react";
+import { GitHubStarLink } from "@/components/github-star-link";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import styles from "./editor-toolbar.module.css";
 
 interface EditorToolbarProps {
   title: string;
@@ -19,6 +13,8 @@ interface EditorToolbarProps {
   isGeneratingPDF?: boolean;
   isOwner?: boolean;
   onTitleUpdate?: (newTitle: string) => void;
+  textAction?: ReactNode;
+  notice?: string;
 }
 
 export function EditorToolbar({
@@ -28,12 +24,14 @@ export function EditorToolbar({
   isGeneratingPDF = false,
   isOwner = false,
   onTitleUpdate,
+  textAction,
+  notice,
 }: EditorToolbarProps) {
-  const router = useRouter();
   const { toast } = useToast();
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editingTitle, setEditingTitle] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cancelEditRef = useRef(false);
 
   useEffect(() => {
     setEditingTitle(title);
@@ -46,159 +44,143 @@ export function EditorToolbar({
     }
   }, [isEditingTitle]);
 
-  const handleTitleClick = () => {
-    if (isOwner && onTitleUpdate) {
-      setIsEditingTitle(true);
-    }
-  };
-
   const handleTitleSave = async () => {
-    const newTitle = editingTitle.trim();
-    if (newTitle && newTitle !== title) {
-      try {
-        const response = await fetch(
-          `/api/stories/${window.location.pathname.split("/").pop()}`,
-          {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ title: newTitle }),
-          }
-        );
-
-        if (!response.ok) {
-          throw new Error("Failed to update title");
-        }
-
-        onTitleUpdate?.(newTitle);
-        toast({
-          title: "Title updated",
-          description: "Story title has been updated successfully.",
-          duration: 2000,
-        });
-      } catch (error) {
-        console.error("Error updating title:", error);
-        toast({
-          title: "Failed to update title",
-          description: "Could not update the story title.",
-          variant: "destructive",
-          duration: 3000,
-        });
-        setEditingTitle(title); // Reset to original
-      }
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      setEditingTitle(title);
+      setIsEditingTitle(false);
+      return;
     }
+
+    const newTitle = editingTitle.trim();
     setIsEditingTitle(false);
+    if (!newTitle || newTitle === title) {
+      setEditingTitle(title);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `/api/stories/${window.location.pathname.split("/").pop()}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: newTitle }),
+        },
+      );
+
+      if (!response.ok) throw new Error("Failed to update title");
+      onTitleUpdate?.(newTitle);
+      toast({
+        title: "Title updated",
+        description: "Your comic title has been updated.",
+        duration: 2000,
+      });
+    } catch (error) {
+      console.error("Error updating title:", error);
+      toast({
+        title: "Could not update title",
+        description: "Try changing the title again.",
+        variant: "destructive",
+        duration: 3000,
+      });
+      setEditingTitle(title);
+    }
   };
 
-  const handleTitleCancel = () => {
-    setEditingTitle(title);
-    setIsEditingTitle(false);
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    } else if (event.key === "Escape") {
+      cancelEditRef.current = true;
+      event.currentTarget.blur();
+    }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      handleTitleSave();
-    } else if (e.key === "Escape") {
-      handleTitleCancel();
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      toast({ title: "Link copied", description: "Your comic link is ready to share.", duration: 2000 });
+    } catch (error) {
+      console.error("Failed to copy URL:", error);
+      toast({
+        title: "Could not copy link",
+        description: "Try copying the address from your browser.",
+        variant: "destructive",
+        duration: 3000,
+      });
     }
   };
 
   return (
-    <header className="h-14 max-[419px]:h-auto border-b border-border/50 bg-background/80 backdrop-blur-md flex max-[419px]:flex-wrap items-center justify-between max-[419px]:gap-y-1 px-3 sm:px-4 max-[419px]:py-2">
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 max-[419px]:basis-full">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => (isOwner ? router.push("/stories") : router.push("/"))}
-          className="hover:bg-secondary text-muted-foreground hover:text-white shrink-0"
-        >
-          <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5" />
-        </Button>
+    <section className={styles.toolbar} aria-label="Comic controls">
+      <div className={styles.inner}>
+        <div className={styles.identity}>
+          <span className={styles.sectionLabel}>Your comic</span>
+          {isEditingTitle ? (
+            <input
+              ref={inputRef}
+              type="text"
+              aria-label="Comic title"
+              value={editingTitle}
+              onChange={(event) => setEditingTitle(event.target.value)}
+              onBlur={() => void handleTitleSave()}
+              onKeyDown={handleKeyDown}
+              className={styles.titleInput}
+            />
+          ) : (
+            <h1 className={styles.title}>
+              {isOwner && onTitleUpdate ? (
+                <button
+                  type="button"
+                  className={styles.titleEdit}
+                  onClick={() => setIsEditingTitle(true)}
+                  aria-label={`Edit title: ${title}`}
+                  title="Edit comic title"
+                >
+                  <span>{title}</span>
+                  <Pencil size={17} aria-hidden="true" />
+                </button>
+              ) : title}
+            </h1>
+          )}
+          {notice && <p className={styles.notice}>{notice}</p>}
+        </div>
 
-        {isEditingTitle ? (
-          <input
-            ref={inputRef}
-            type="text"
-            value={editingTitle}
-            onChange={(e) => setEditingTitle(e.target.value)}
-            onBlur={handleTitleSave}
-            onKeyDown={handleKeyDown}
-            className="text-sm sm:text-base text-white font-normal tracking-[-0.02em] bg-transparent border-none outline-none truncate min-w-0 flex-1"
-            style={{ width: `${editingTitle.length}ch` }}
+        <div className={styles.actions}>
+          <button type="button" className={styles.secondaryAction} onClick={() => void copyLink()}>
+            <Link2 size={18} aria-hidden="true" />
+            <span>Copy link</span>
+          </button>
+
+          {onDownloadPDF && (
+            <button
+              type="button"
+              className={styles.primaryAction}
+              onClick={onDownloadPDF}
+              disabled={isGeneratingPDF}
+            >
+              <Download size={18} aria-hidden="true" />
+              <span>{isGeneratingPDF ? "Preparing PDF…" : "Download PDF"}</span>
+            </button>
+          )}
+
+          {textAction}
+
+          {isOwner && onContinueStory && (
+            <button type="button" className={styles.secondaryAction} onClick={onContinueStory}>
+              <Plus size={18} aria-hidden="true" />
+              <span>Add a page</span>
+            </button>
+          )}
+
+          <GitHubStarLink
+            className={styles.githubLink}
+            fullLabel="Star this project"
+            compactLabel="Star project"
           />
-        ) : (
-          <h1
-            className={`text-base sm:text-xl text-white font-heading font-semibold  truncate ${
-              isOwner && onTitleUpdate
-                ? "cursor-pointer hover:text-gray-300"
-                : ""
-            }`}
-            onClick={handleTitleClick}
-          >
-            {title}
-          </h1>
-        )}
+        </div>
       </div>
-
-      <div className="flex items-center gap-1 sm:gap-2 shrink-0 max-[419px]:w-full max-[419px]:justify-end">
-        <GitHubStarLink
-          compactLabel={null}
-          className="h-8 sm:h-9 rounded-md px-2 sm:px-3 glass-panel glass-panel-hover text-xs text-muted-foreground hover:text-white whitespace-nowrap transition-colors"
-        />
-        <Button
-          variant="ghost"
-          className="hover:bg-secondary text-muted-foreground hover:text-white gap-1.5 sm:gap-2 text-xs h-8 sm:h-9 px-2 sm:px-3 hidden md:flex"
-          onClick={async () => {
-            const url = window.location.href;
-            try {
-              await navigator.clipboard.writeText(url);
-              toast({
-                title: "Link copied!",
-                description: "Story URL has been copied to your clipboard.",
-                duration: 2000,
-              });
-            } catch (err) {
-              console.error("Failed to copy URL:", err);
-              toast({
-                title: "Failed to copy",
-                description: "Could not copy the URL to clipboard.",
-                variant: "destructive",
-                duration: 3000,
-              });
-            }
-          }}
-        >
-          <Share className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-          <span>Share</span>
-        </Button>
-
-        {onDownloadPDF && (
-          <Button
-            variant="ghost"
-            className="hover:bg-secondary text-muted-foreground hover:text-white gap-1.5 sm:gap-2 text-xs h-8 sm:h-9 px-2 sm:px-3"
-            onClick={onDownloadPDF}
-            disabled={isGeneratingPDF}
-          >
-            <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span>{isGeneratingPDF ? "Generating..." : "Download PDF"}</span>
-          </Button>
-        )}
-
-        {isOwner && onContinueStory && (
-          <Button
-            onClick={onContinueStory}
-            className="relative gap-1.5 sm:gap-2 text-xs bg-white hover:bg-neutral-200 text-black h-8 sm:h-9 px-3 sm:px-4"
-          >
-            <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span className="hidden sm:inline">
-              Continue story{" "}
-              <span className="text-gray-500 text-[10px]">(C)</span>
-            </span>
-            <span className="sm:hidden">Add</span>
-          </Button>
-        )}
-      </div>
-    </header>
+    </section>
   );
 }

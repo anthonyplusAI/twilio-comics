@@ -59,7 +59,7 @@ function voiceGreeting(readiness: VoiceCallPhotoReadiness): string {
   if (readiness.kind === "photos") {
     return disclosure +
       `I found ${readiness.count >= 2 ? "two saved reference photos" : "one saved reference photo"}. ` +
-      "Tell me who is in your comic and what happens. I'll recap your idea; correct anything, then say create it to start.";
+      "Tell me who is in your comic and what happens. I'll ask which style you want, then recap your idea. You can correct anything, then say create it when you're ready.";
   }
   if (readiness.kind === "continuation") {
     if (readiness.phase === "draft") {
