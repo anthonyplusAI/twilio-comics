@@ -36,6 +36,11 @@ function externalIdFor(storyId: string): string {
   return `twilio-comics-${storyId}`;
 }
 
+/** Dub stores the bare ID on create, but requires ext_ when looking it up. */
+function lookupExternalIdFor(storyId: string): string {
+  return `ext_${externalIdFor(storyId)}`;
+}
+
 /** Dub is optional, but a partial deployment must be visible to operators. */
 export function dubConfigFromEnv(env: Record<string, string | undefined> = process.env): DubConfig | null {
   const apiKey = env.DUB_API_KEY?.trim();
@@ -145,7 +150,7 @@ export async function createOrRecoverDubLink(
     if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
     const byExternalId = await requestLinkInfo(
       input,
-      new URLSearchParams({ externalId }),
+      new URLSearchParams({ externalId: lookupExternalIdFor(input.storyId) }),
       fetcher,
     );
     if (byExternalId) return parseOwnedLink(byExternalId, input);
@@ -256,7 +261,7 @@ export async function comicDeliveryUrl(
         const input = { config, storyId, key: latest.dubKey, url: canonicalUrl };
         const existing = await requestLinkInfo(
           input,
-          new URLSearchParams({ externalId: externalIdFor(storyId) }),
+          new URLSearchParams({ externalId: lookupExternalIdFor(storyId) }),
           fetch,
         );
         if (existing) {

@@ -130,7 +130,7 @@ describe("comic delivery URL persistence", () => {
     });
     expect(fetcher).toHaveBeenCalledOnce();
     expect(fetcher.mock.calls[0][0]).toBe(
-      `https://api.dub.co/links/info?externalId=${encodeURIComponent(`twilio-comics-${storyId}`)}`,
+      `https://api.dub.co/links/info?externalId=${encodeURIComponent(`ext_twilio-comics-${storyId}`)}`,
     );
     expect(fetcher.mock.calls[0][1].method).toBe("GET");
     expect(h.insert).not.toHaveBeenCalled();
