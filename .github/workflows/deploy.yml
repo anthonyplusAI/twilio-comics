@@ -227,6 +227,8 @@ jobs:
             --cpu 0.25 --memory 0.5Gi \
             --min-replicas 1 \
             --max-replicas "$ACA_INBOUND_MAX_REPLICAS"
+      - name: Speed inbound queue scale checks
+        run: bash scripts/set-inbound-polling-interval.sh
       - name: Wait for the released inbound worker
         run: |
           for attempt in $(seq 1 30); do
