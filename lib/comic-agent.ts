@@ -325,7 +325,7 @@ export async function advanceComicAgent(
         ? turn.imageUrls?.length && !newPhotoRetained
           ? "I can use up to two photos. Tell me your comic idea.\n\nSend NEW for a fresh set."
           : `${newPhotoRetained ? "Photo saved." : "I have your photos."} Tell me what should happen in your comic.`
-        : "Send one or two photos of yourself, then tell me your comic idea. A reference photo is required.";
+        : "Send 1 or 2 photos of yourself or a character, then text your comic idea.";
     return result(startingFresh ? "collecting" : state, draft, startingFresh ? null : activeStoryId, reply);
   }
 
