@@ -1,5 +1,6 @@
 import { type NextRequest, type NextResponse } from "next/server";
 import { getStoryWithPagesBySlug } from "@/lib/db-actions";
+import { comicDeliveryUrl } from "@/lib/dub-short-links";
 import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
 import { getStudioActor } from "@/lib/studio-guest-session";
 import { finishStudioTextBudget, getStudioTextSourceId, reserveStudioTextBudget } from "@/lib/studio-comic-text-budget";
@@ -110,7 +111,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       }, sendBudget.reason === "rate_limit" ? 429 : 503));
     }
 
-    const comicUrl = new URL(`/story/${encodeURIComponent(slug)}`, origin).toString();
+    const canonicalUrl = new URL(`/story/${encodeURIComponent(slug)}`, origin).toString();
+    const comicUrl = await comicDeliveryUrl(result.story.id, slug, canonicalUrl);
     let messageSid: string;
     try {
       messageSid = await sendSms({

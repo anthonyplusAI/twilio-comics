@@ -39,57 +39,6 @@
   background: var(--surface);
 }
 
-.editorShell > header {
-  flex: none;
-  border-bottom: 2px solid var(--ink);
-  background: var(--paper);
-  backdrop-filter: none;
-}
-
-.editorShell > header h1,
-.editorShell > header input {
-  color: var(--ink);
-  font-family: var(--font-space-grotesk), sans-serif;
-  font-weight: 700;
-}
-
-.editorShell > header button,
-.editorShell > header a {
-  color: var(--ink);
-}
-
-.editorShell > header button:hover,
-.editorShell > header a:hover {
-  background: var(--pale-blue);
-  color: var(--ink);
-}
-
-.editorShell[data-owner="true"] > header > div:last-child > button:last-child {
-  border: 2px solid var(--ink);
-  border-radius: 2px;
-  background: var(--red-action);
-  color: var(--paper);
-  font-weight: 800;
-}
-
-.editorShell[data-owner="true"] > header > div:last-child > button:last-child:hover {
-  background: var(--ink);
-  color: var(--paper);
-}
-
-.guestNote {
-  flex: none;
-  margin: 0;
-  border-bottom: 2px solid var(--ink);
-  background: var(--pale-blue);
-  padding: 8px 16px;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.35;
-  text-align: center;
-}
-
 .editorViewport {
   display: flex;
   flex: 1;
@@ -126,8 +75,8 @@
 }
 
 .editorViewport button:focus-visible,
-.editorShell > header button:focus-visible,
-.editorShell > header a:focus-visible {
+.editorShell > section button:focus-visible,
+.editorShell > section a:focus-visible {
   outline: 3px solid var(--blue);
   outline-offset: 3px;
 }
@@ -155,7 +104,26 @@
   .resultHeader { height: auto; min-height: 64px; flex-wrap: wrap; gap: 2px; padding: 9px 16px; }
   .resultNav { width: 100%; justify-content: space-between; gap: 10px; font-size: 13px; }
   .resultHeader :global(img) { width: 32px; height: 32px; }
-  .guestNote { padding: 7px 12px; font-size: 12px; }
+}
+
+/* Let the page scroll when stacked controls would squeeze the comic below a useful size. */
+@media (max-width: 600px), (max-height: 700px) {
+  .resultPage {
+    height: auto;
+    min-height: 100svh;
+    overflow: visible;
+  }
+
+  .editorShell,
+  .editorViewport {
+    flex: none;
+    overflow: visible;
+  }
+
+  .editorViewport > main {
+    min-width: 0;
+    overflow: visible;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

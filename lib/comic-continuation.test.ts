@@ -79,6 +79,8 @@ describe("createComicContinuationPage", () => {
     ]);
     expect(imageArgs.prompt).toContain(firstPage.prompt);
     expect(imageArgs.prompt).toContain("The dragon finds an alien city");
+    expect(imageArgs.prompt).toMatch(/reference image 1: previous comic page/i);
+    expect(imageArgs.prompt).toMatch(/reference image 2: character 1 portrait/i);
     expect(result).toMatchObject({
       story: { id: story.id, slug: story.slug },
       page: { id: "job-2", pageNumber: 2 },

@@ -63,7 +63,7 @@ vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserv
 import { EarlierInboundTurnsPendingError, processInboundMessage } from "@/lib/process-inbound-message";
 import { ComicAgentModelUnavailableError } from "@/lib/comic-agent-model";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
-import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
+import { COMIC_START_MESSAGE, VOICE_PHOTO_START_MESSAGE } from "@/lib/marketing-contact";
 
 type Receipt = {
   messageSid: string;
@@ -760,7 +760,7 @@ describe("ordered inbound messaging processor", () => {
     expect(sends[0].channel).toBe("whatsapp");
   });
 
-  it("offers a same-number call for sms,voice without worker Auth or Verify settings", async () => {
+  it("keeps photo-only SMS replies on the Text path even when Voice is enabled", async () => {
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
     vi.stubEnv("AUTH_SECRET", "");
     vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", "");
@@ -777,10 +777,11 @@ describe("ordered inbound messaging processor", () => {
 
     await processInboundMessage("SM1");
 
-    expect(sends[0].body).toMatch(/Photo saved.*Text your idea.*call us from this phone.*voice/i);
+    expect(sends[0].body).toBe("Photo saved. What's your comic idea?");
+    expect(sends[0].body).not.toMatch(/call|voice/i);
   });
 
-  it("fits the first photo-only MMS reply with Voice guidance in one GSM-7 segment", async () => {
+  it("fits the first photo-only Text reply in one GSM-7 segment", async () => {
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
     receipts.SM1.body = "";
     receipts.SM1.mediaUrls = [REFERENCE];
@@ -795,9 +796,84 @@ describe("ordered inbound messaging processor", () => {
     const body = sends[0].body;
     expectOneGsm7Segment(body);
     expect(body).toMatch(/^Twilio Comics\n\nPhoto saved\./);
-    expect(body).toMatch(/Text your idea.*call.*this phone.*voice/i);
+    expect(body).toMatch(/comic idea/i);
+    expect(body).not.toMatch(/call|voice/i);
     expect(body).toMatch(/Reply HELP.*STOP.*Msg & data rates may apply/i);
     expect(conversation.collected.characterImageUrls).toEqual([REFERENCE]);
+  });
+
+  it("keeps Photos then Call photo-only and texts a tappable phone number", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
+    vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example");
+    // The production private worker receives the selected channel list, but
+    // never receives web Auth, Verify, or ConversationRelay configuration.
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", "");
+    vi.stubEnv("CONVERSATION_RELAY_WS_URL", "");
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    h.getStagedCameraPhotoReferences.mockResolvedValue(["blob:uploads/old-camera"]);
+    receipts.SM1.body = VOICE_PHOTO_START_MESSAGE;
+    const agent = await vi.importActual<typeof import("@/lib/comic-agent")>("@/lib/comic-agent");
+    h.advanceComicAgent.mockImplementation(agent.advanceComicAgent);
+
+    await processInboundMessage("SM1");
+
+    expectOneGsm7Segment(sends[0].body);
+    expect(sends[0].body).toMatch(/send 1 or 2 photos/i);
+    expect(conversation.collected).toMatchObject({ voicePhotoSetup: true });
+    expect(conversation.collected.characterImageUrls).toBeUndefined();
+    expect(h.reserveMessageAgentTurn).not.toHaveBeenCalled();
+    expect(h.getStagedCameraPhotoReferences).toHaveBeenCalled();
+
+    receipts.SM2 = receipt("SM2", "A dragon adventure", "2026-10-01T00:00:02Z");
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 2, firstMessage: false });
+    await processInboundMessage("SM2");
+    expect(sends[1].body).toMatch(/send 1 or 2 photos/i);
+    expect(conversation.collected.prompt).toBeUndefined();
+
+    receipts.SM3 = receipt("SM3", "", "2026-10-01T00:00:03Z", {
+      mediaUrls: [REFERENCE],
+      mediaContentTypes: ["image/jpeg"],
+    });
+    await processInboundMessage("SM3");
+    expect(sends[2].body).toMatch(/Photo saved.*call \+15553334444/i);
+    expect(sends[2].body).not.toContain("tel:");
+    expect(sends[2].body).not.toMatch(/text your idea|comic idea/i);
+    expect(conversation.collected).toMatchObject({
+      voicePhotoSetup: true,
+      characterImageUrls: [REFERENCE],
+    });
+  });
+
+  it("keeps a first Photos then Call MMS reply in one SMS segment", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    receipts.SM1.body = VOICE_PHOTO_START_MESSAGE;
+    receipts.SM1.mediaUrls = [REFERENCE];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    const agent = await vi.importActual<typeof import("@/lib/comic-agent")>("@/lib/comic-agent");
+    h.advanceComicAgent.mockImplementation(agent.advanceComicAgent);
+
+    await processInboundMessage("SM1");
+
+    expectOneGsm7Segment(sends[0].body);
+    expect(sends[0].body).toMatch(/Photo saved.*call \+15553334444/i);
+    expect(conversation.collected.characterImageUrls).toEqual([REFERENCE]);
+  });
+
+  it("does not invite a call when Photos then Call is no longer enabled", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms");
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    receipts.SM1.body = VOICE_PHOTO_START_MESSAGE;
+    const agent = await vi.importActual<typeof import("@/lib/comic-agent")>("@/lib/comic-agent");
+    h.advanceComicAgent.mockImplementation(agent.advanceComicAgent);
+
+    await processInboundMessage("SM1");
+
+    expectOneGsm7Segment(sends[0].body);
+    expect(sends[0].body).toMatch(/calling is unavailable/i);
+    expect(sends[0].body).not.toMatch(/tel:/i);
+    expect(conversation.collected.voicePhotoSetup).toBeUndefined();
   });
 
   it("keeps the photo acknowledgement when voice is disabled", async () => {

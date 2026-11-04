@@ -63,6 +63,10 @@ describe("Studio reference photo requirement", () => {
     const empty = renderForm(0);
     const full = renderForm(2);
 
+    expect(empty).toMatch(/one person per photo/i);
+    expect(empty).toMatch(/second photo.*different person/i);
+    expect(empty).toMatch(/<strong>Character 1<\/strong>/);
+    expect(empty).toMatch(/<strong>Character 2<\/strong>/);
     expect(empty).toMatch(/Choose photo/i);
     expect(empty).toMatch(/Take photo/i);
     expect(empty).toMatch(/0 of 2 photos added/i);

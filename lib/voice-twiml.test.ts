@@ -22,6 +22,7 @@ describe("Voice call guidance", () => {
       const spoken = await greeting({ kind: "photos", count });
       expect(spoken).toContain(expected);
       expect(spoken).toMatch(/tell me.+comic.+happens/i);
+      expect(spoken).toMatch(/ask.+style/i);
       expect(spoken).toMatch(/recap.+correct.+say create it/i);
     },
   );

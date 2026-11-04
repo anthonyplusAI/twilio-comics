@@ -90,7 +90,9 @@ function harness(overrides: {
   let row: Stored = {
     id: "voice-conversation",
     state: "collecting",
-    collected: { characterImageUrls: [PORTRAIT] },
+    // Most tests focus on job admission, retries, and call races after a
+    // previously chosen style. A fresh caller's style prompt is tested below.
+    collected: { characterImageUrls: [PORTRAIT], style: "manga", styleSelectionPending: false },
     activeStoryId: null,
     updatedAt: new Date(1_000),
     ...overrides.initial,
@@ -218,6 +220,43 @@ function resultCode(messages: Array<Record<string, unknown>>): string | undefine
 }
 
 describe("ConversationRelay voice conversation", () => {
+  it("requires a new caller to choose a style before spoken CREATE", async () => {
+    const h = harness({ initial: { collected: { characterImageUrls: [PORTRAIT] } } });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const idea = await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+    expect(idea).toEqual([{
+      type: "text",
+      token: expect.stringMatching(/which comic style.*American Modern.*Manga.*Noir.*Vintage/i),
+      last: true,
+    }]);
+    expect(h.row.state).toBe("confirming");
+    expect(h.row.collected.styleSelectionPending).toBe(true);
+    expect(h.submitted).toHaveLength(0);
+
+    const earlyCreate = await session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 3_000);
+    expect(earlyCreate).toEqual([{
+      type: "text",
+      token: expect.stringMatching(/which comic style/i),
+      last: true,
+    }]);
+    expect(h.submitted).toHaveLength(0);
+
+    const chosen = await session.handle({ type: "prompt", last: true, voicePrompt: "Noir" }, 4_000);
+    expect(chosen).toEqual([{
+      type: "text",
+      token: expect.stringMatching(/say 'create it'/i),
+      last: true,
+    }]);
+    expect(h.row.collected.style).toBe("noir");
+    expect(h.row.collected.styleSelectionPending).toBeFalsy();
+
+    const approved = await session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 5_000);
+    expect(resultCode(approved)).toBe("queued");
+    expect(h.submitted).toEqual([expect.objectContaining({ style: "noir", characterImageUrls: [PORTRAIT] })]);
+  });
+
   it("authorizes the exact call before loading any saved draft or recording a call", async () => {
     const h = harness({ authorizeCall: () => false });
     const session = h.create();
@@ -604,6 +643,8 @@ describe("ConversationRelay voice conversation", () => {
       initial: {
         collected: {
           characterImageUrls: [PORTRAIT],
+          style: "manga",
+          styleSelectionPending: false,
           ignoredCameraReferences: ["camera-old"],
         },
       },

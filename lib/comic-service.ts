@@ -454,6 +454,7 @@ export async function createComicContinuationPage({
     prompt,
     style: story.style,
     characterImages: characterImageUrls,
+    previousPageImageIncluded: Boolean(lastImage),
     isAddPage: true,
     previousPages: previousPages.map((candidate) => ({ prompt: candidate.prompt })),
   });

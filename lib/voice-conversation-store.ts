@@ -106,7 +106,9 @@ export async function saveVoiceFreshStart(
                 COALESCE(${conversations.collected}->>'phoneRestartedAt', ''),
                 ${reset.requestedAt}
               )${newerPhotosSql}
-            ) END`,
+            ) || CASE WHEN ${conversations.collected}->>'voicePhotoSetup' = 'true'
+              THEN '{"voicePhotoSetup":true}'::jsonb ELSE '{}'::jsonb END
+            END`,
           activeStoryId: sql`CASE WHEN ${conversations.state} = 'generating'
             THEN ${conversations.activeStoryId} ELSE NULL END`,
           updatedAt: nextRevision,

@@ -78,22 +78,17 @@ export function TextComicAction({ storySlug }: { storySlug: string }) {
 
   return (
     <>
-      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-b-2 border-[#000d25] bg-[#e4f7ff] px-4 py-2 text-center text-[#000d25] sm:justify-between sm:text-left">
-        <p className="m-0 text-sm font-bold sm:text-base">
-          {phase === "sent" ? "Your comic link is on its way." : "Want your comic link on your phone?"}
-        </p>
-        <Button
-          type="button"
-          onClick={() => {
-            if (phase === "sent") changeNumber();
-            setOpen(true);
-          }}
-          className="h-9 border-2 border-[#000d25] bg-[#db132a] px-3 font-bold text-white hover:bg-[#b80f23]"
-        >
-          <MessageSquareText aria-hidden="true" />
-          {phase === "sent" ? "Text another number" : "Text me the comic"}
-        </Button>
-      </div>
+      <button
+        data-comic-text-action
+        type="button"
+        onClick={() => {
+          if (phase === "sent") changeNumber();
+          setOpen(true);
+        }}
+      >
+        <MessageSquareText size={18} aria-hidden="true" />
+        {phase === "sent" ? "Text another number" : "Text me the comic"}
+      </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="border-2 border-[#000d25] bg-white text-[#000d25] shadow-[8px_8px_0_#000d25]">

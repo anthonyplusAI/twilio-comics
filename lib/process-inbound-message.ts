@@ -13,7 +13,7 @@ import { submitGenerationJob } from "@/lib/generation-jobs";
 import { isDailyGenerationCapacityRejection } from "@/lib/generation-policy";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import { reserveMessageAgentTurn } from "@/lib/message-agent-budget";
-import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
+import { getEnabledChannels, getMarketingContact, VOICE_PHOTO_START_MESSAGE } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import {
   checkpointInboundTurn,
@@ -188,6 +188,9 @@ async function processOneMessage(
     firstSmsReply = message.channel === "sms" && position.firstMessage;
     const command = normalizedCommand(message.body);
     const freshStartCommand = ["NEW", "RESET", "RESTART"].includes(command);
+    const voicePhotoStartCommand = message.channel === "sms" &&
+      command === normalizedCommand(VOICE_PHOTO_START_MESSAGE);
+    const voicePhotoNewStart = voicePhotoStartCommand && !savedCollected.voicePhotoSetup;
     const rateLimited = position.dailyCount > MAX_DAILY_MESSAGE_TURNS;
     if (rateLimited) {
       // Repeating a paid SMS for every message in a flood would turn the
@@ -205,7 +208,7 @@ async function processOneMessage(
     } else {
       // NEW is deterministic and never calls the model. Keep the separate
       // daily inbound cap, but do not make a restart depend on AI turn quota.
-      const budget = freshStartCommand
+      const budget = freshStartCommand || voicePhotoStartCommand
         ? { allowed: true as const, duplicate: false }
         : await reserveMessageAgentTurn({
             messageSid: message.messageSid,
@@ -223,7 +226,7 @@ async function processOneMessage(
         let completedStoryStatusId: string | null = null;
         const statusRequested = isStatusCommand(message.body);
         const resetOrDiscard = message.channel === "sms" &&
-          (freshStartCommand || command === "DISCARD");
+          (freshStartCommand || voicePhotoNewStart || command === "DISCARD");
         // Read the stage before the reset turn. A new upload made while the
         // turn runs must not be cleared with the old photo set.
         const resetStageRefs = resetOrDiscard &&
@@ -245,6 +248,19 @@ async function processOneMessage(
             const approval = message.channel === "sms" &&
               ["CREATE", "CREATE IT"].includes(command);
             const smsSettings = message.channel === "sms" ? await getExperienceSettings() : null;
+            const contact = message.channel === "sms" && smsSettings?.voicePhotoMode !== "none"
+              ? getMarketingContact(
+                  process.env.TWILIO_PHONE_NUMBER,
+                  process.env.TWILIO_WHATSAPP_NUMBER,
+                )
+              : null;
+            // The private SMS worker intentionally does not carry web Auth,
+            // Verify, or Relay secrets. Deployment copies the web channel
+            // selection to this worker, so use that selection here.
+            const voiceCallHref = contact && getEnabledChannels(
+              contact,
+              process.env.TWILIO_ENABLED_CHANNELS,
+            ).includes("voice") ? contact.callHref : null;
             // Snapshot the staged set before CREATE. The conditional clear
             // below must not erase a fresh upload made during this turn.
             const stagedForSubmission = approval && !attachedPhotos.length
@@ -253,7 +269,7 @@ async function processOneMessage(
                   channelUserId(message.fromAddress),
                 )
               : null;
-            let agentCollected = conversation.collected || {};
+            let agentCollected = (conversation.collected || {}) as AgentCollected;
             // An MMS takes priority over kiosk photos already added to this SMS
             // draft. The user is choosing a new photo source by sending it.
             if (message.channel === "sms" && attachedPhotos.length &&
@@ -262,6 +278,7 @@ async function processOneMessage(
             }
             let turnPhotos = attachedPhotos;
             if (message.channel === "sms" && !attachedPhotos.length && !resetOrDiscard &&
+                !agentCollected.voicePhotoSetup &&
                 (conversation.state === "done" || !agentCollected.characterImageUrls?.length)) {
               turnPhotos = stagedForSubmission ?? await getStagedCameraPhotoReferences(
                 message.fromAddress,
@@ -278,22 +295,10 @@ async function processOneMessage(
                 text: message.body,
                 channel: message.channel,
                 imageUrls: turnPhotos,
+                ...(voiceCallHref ? { voiceCallHref } : {}),
               },
             );
             replyBody = advance.reply;
-            if (message.channel === "sms" && !message.body.trim() &&
-                attachedPhotos.some((photo) =>
-                  advance.collected.characterImageUrls?.includes(photo) &&
-                  !conversation.collected?.characterImageUrls?.includes(photo)) &&
-                advance.nextState === "collecting" && smsSettings?.voicePhotoMode !== "none") {
-              const contact = getMarketingContact(
-                process.env.TWILIO_PHONE_NUMBER,
-                process.env.TWILIO_WHATSAPP_NUMBER,
-              );
-              if (getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes("voice")) {
-                replyBody = "Photo saved. Text your idea or call us from this phone to say it by voice.";
-              }
-            }
             if (unsupportedAttachment) {
               replyBody = `${replyBody.trim()}\n\n${SKIPPED_ATTACHMENT_NOTICE}`.trim();
             }
@@ -304,7 +309,7 @@ async function processOneMessage(
             activeStoryIdAfterCheckpoint = advance.activeStoryId;
             nextState = advance.nextState;
             advancedSuccessfully = true;
-            if (freshStartCommand) {
+            if (freshStartCommand || (voicePhotoNewStart && advance.freshStart)) {
               collectedAfterCheckpoint = {
                 ...collectedAfterCheckpoint,
                 phoneRestartedAt: message.createdAt.toISOString(),

@@ -15,6 +15,7 @@ export function buildComicPrompt({
   previousContext = "",
   isAddPage = false,
   previousPages = [],
+  previousPageImageIncluded = false,
 }: {
   prompt: string;
   style?: string;
@@ -25,6 +26,7 @@ export function buildComicPrompt({
   previousPages?: Array<{
     prompt: string;
   }>;
+  previousPageImageIncluded?: boolean;
 }): string {
   const styleInfo = COMIC_STYLES.find((s) => s.id === style);
   const styleDesc = styleInfo?.prompt || COMIC_STYLES[2].prompt;
@@ -68,28 +70,22 @@ export function buildComicPrompt({
     }
   }
 
-  let characterSection = "";
-  if (characterImages.length > 0) {
-    if (characterImages.length === 1) {
-      characterSection = `
-CRITICAL FACE CONSISTENCY INSTRUCTIONS:
-- REFERENCE CHARACTER: Use the uploaded image as EXACT reference for the protagonist's face and appearance
-- FACE MATCHING: The character's face must be IDENTICAL to the reference image - same eyes, nose, mouth, hair, facial structure
-- APPEARANCE PRESERVATION: Maintain exact skin tone, hair color/style, eye color, and distinctive facial features
-- CHARACTER CONSISTENCY: This exact same character must appear in ALL 5 panels with the same face throughout
-- STYLE APPLICATION: Apply ${style} comic art style to the body/pose/action but KEEP THE FACE EXACTLY AS IN THE REFERENCE IMAGE
-- NO VARIATION: Do not alter, modify, or change the character's face in any way from the reference`;
-    } else if (characterImages.length === 2) {
-      characterSection = `
-CRITICAL DUAL CHARACTER FACE CONSISTENCY INSTRUCTIONS:
-- CHARACTER 1 REFERENCE: Use the FIRST uploaded image as EXACT reference for Character 1's face and appearance
-- CHARACTER 2 REFERENCE: Use the SECOND uploaded image as EXACT reference for Character 2's face and appearance
-- FACE MATCHING: Both characters' faces must be IDENTICAL to their respective reference images
-- VISUAL DISTINCTION: Keep both characters clearly visually distinct with their unique faces, hair, and features
-- CONSISTENT PRESENCE: Both characters must appear together in at least 4 of the 5 panels
-- STYLE APPLICATION: Apply ${style} comic art style while maintaining EXACT facial features from references
-- NO FACE VARIATION: Never alter or modify either character's face from their reference images`;
-    }
+  const firstPortraitImageNumber = previousPageImageIncluded ? 2 : 1;
+  const previousPageReference = previousPageImageIncluded
+    ? "REFERENCE IMAGE 1: PREVIOUS COMIC PAGE. Use it for story, layout, and style continuity; the previous comic page is not a new character or a character portrait.\n"
+    : "";
+  let characterSection = previousPageReference;
+  if (characterImages.length === 1) {
+    characterSection += `REFERENCE IMAGE ${firstPortraitImageNumber}: CHARACTER 1 PORTRAIT. Use the main person in this photo as the comic's reference character.
+- Preserve their recognizable face, skin tone, hair, and distinctive features in the comic style.
+- Keep the same person across panels even when clothing, pose, expression, or camera angle changes.
+- A different outfit or view of this person does not create another character. Do not invent a second portrait-based character.`;
+  } else if (characterImages.length >= 2) {
+    characterSection += `REFERENCE IMAGE ${firstPortraitImageNumber}: CHARACTER 1 PORTRAIT. Use the main person in this photo for Character 1.
+REFERENCE IMAGE ${firstPortraitImageNumber + 1}: CHARACTER 2 PORTRAIT. Use the main person in this photo for Character 2.
+- These photos are intended to show two different people, one person per photo. Keep their faces and identities distinct and consistent across panels.
+- Clothing, pose, and camera angle are not character identities. Do not make extra doubles or swap the two people's faces.
+- If the photos clearly show the same person in different outfits, depict one person rather than two characters or twins; use the first photo for identity and the second only as an alternate look.`;
   }
 
   const systemPrompt = `Professional comic book page illustration.
@@ -97,10 +93,9 @@ ${continuationContext}
 ${characterSection}
 
 CHARACTER CONSISTENCY RULES (HIGHEST PRIORITY):
-- If reference images are provided, the characters' FACES must be 100% identical to the reference images
-- Never change hair color, eye color, facial structure, or distinctive features
-- Apply comic style to body/pose/action but preserve exact facial appearance
-- Same character must look identical across all panels they appear in
+- Match the people in the reference portraits as closely as the comic style allows.
+- Preserve each person's facial structure, complexion, hair, and distinctive features.
+- Keep each person's identity consistent wherever they appear, even when clothes or poses change.
 
 TEXT AND LETTERING (CRITICAL):
 - All text in speech bubbles must be PERFECTLY CLEAR, LEGIBLE, and correctly spelled
@@ -119,7 +114,6 @@ PAGE LAYOUT:
 
 ART STYLE:
 ${styleDesc}
-${characterSection}
 
 COMPOSITION:
 - Vary camera angles across panels: close-up, medium shot, wide establishing shot

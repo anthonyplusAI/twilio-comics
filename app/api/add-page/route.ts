@@ -257,6 +257,7 @@ export async function POST(request: NextRequest) {
       prompt,
       style: story.style,
       characterImages: effectiveCharacterImages,
+      previousPageImageIncluded: referenceImages.length > effectiveCharacterImages.length,
       isAddPage: true,
       previousPages,
     });

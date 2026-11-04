@@ -43,11 +43,12 @@ describe("SMS + Voice preparation page", () => {
   it("leads with texted photos even when legacy browser staging is enabled", async () => {
     const html = await renderPage({ cameraEnabled: true });
     expect(html).toMatch(/Add photos before (you|your) call/i);
-    expect(html).toContain('href="sms:' + PHONE + '"');
-    expect(html).toMatch(/wait for .*photo saved.*reply/i);
+    expect(html).toContain('href="sms:' + PHONE + '?body=Photos%20then%20call"');
+    expect(html).toMatch(/if messages opens blank.*type.*photos then call/i);
+    expect(html).toMatch(/wait for .*photo saved.*(phone number|number)/i);
     expect(html).toMatch(/within 24 hours/i);
     expect(html).not.toContain('href="/start/camera"');
-    expect(html.indexOf('href="sms:' + PHONE + '"')).toBeLessThan(
+    expect(html.indexOf('href="sms:' + PHONE + '?body=Photos%20then%20call"')).toBeLessThan(
       html.indexOf('href="tel:' + PHONE + '"'),
     );
   });

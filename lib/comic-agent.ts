@@ -1,6 +1,6 @@
 import { COMIC_STYLES } from "@/lib/constants";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
-import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
+import { COMIC_START_MESSAGE, VOICE_PHOTO_START_MESSAGE } from "@/lib/marketing-contact";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
 import { proposeComicTurn } from "@/lib/comic-agent-model";
 
@@ -14,7 +14,12 @@ export interface AgentCollected {
   prompt?: string;
   blockedPrompt?: string;
   style?: string;
+  /** A safe draft is waiting for the player to choose its art style. */
+  styleSelectionPending?: boolean;
+  pendingStyleSummary?: string;
   characterImageUrls?: string[];
+  /** This SMS thread is collecting photos for the separate phone-call experience. */
+  voicePhotoSetup?: boolean;
   /** Camera staging timestamps keyed by reference, used to honor NEW cutoffs. */
   cameraReferenceSavedAt?: Record<string, number>;
   photoHandoffFingerprint?: string;
@@ -60,6 +65,7 @@ export interface ComicAgentTurn {
   text: string;
   channel: ComicAgentChannel;
   imageUrls?: string[];
+  voiceCallHref?: string | null;
 }
 
 export interface ComicAgentSubmission {
@@ -111,17 +117,80 @@ function styleOrDefault(value: string | undefined): ComicStyle {
   return isStyle(value) ? value : "noir";
 }
 
+function styleQuestion(channel: ComicAgentChannel): string {
+  return channel === "voice"
+    ? "Which comic style would you like: American Modern, Manga, Noir, or Vintage?"
+    : "Choose a style: 1 Modern, 2 Manga, 3 Noir, 4 Vintage. Reply 1-4.";
+}
+
+function styleFromLabel(value: string): ComicStyle | null {
+  const label = value.trim().toLowerCase().replace(/[-_]+/g, " ")
+    .replace(/^the\s+/u, "").replace(/\s+one$/u, "").replace(/\s+/g, " ");
+  if (["1", "one", "first", "modern", "american modern"].includes(label)) return "american-modern";
+  if (["2", "two", "second", "manga"].includes(label)) return "manga";
+  if (["3", "three", "third", "noir"].includes(label)) return "noir";
+  if (["4", "four", "fourth", "vintage"].includes(label)) return "vintage";
+  return null;
+}
+
+function pureStyleChoice(text: string): ComicStyle | null {
+  const cleaned = text.normalize("NFKC").trim().toLowerCase()
+    .replace(/[.!?,;:…。！？]+$/gu, "").trim()
+    .replace(/^(?:i(?:'d| would)? (?:like|want|choose|pick)|let's do|please|use|choose|pick|make it|switch to|change to)\s+(?:the\s+)?/u, "")
+    .replace(/^(?:the\s+)?(?:(?:option|number|style)\s+(?:the\s+)?)+/u, "")
+    .replace(/\s+(?:style|please)$/u, "").trim();
+  return styleFromLabel(cleaned);
+}
+
+/** Only a deliberate art-style phrase in an idea overrides the model's provisional style. */
+function statedStyle(text: string): ComicStyle | null {
+  const pure = pureStyleChoice(text);
+  if (pure) return pure;
+  const change = text.match(/\b(?:change|switch|set|update)\s+(?:(?:the|my|its)\s+)?(?:(?:art|comic)\s+)?(?:style|look)\s+to\s+(american[\s-]+modern|manga|noir|vintage)\b/iu);
+  if (change) return styleFromLabel(change[1]);
+  const match = text.match(/\b(?:in|with|as|use|choose|pick|want|prefer|make it)\s+(?:an?\s+|the\s+)?(american[\s-]+modern|manga|noir|vintage)\s+(?:comic\s+)?(?:style|look)\b/iu);
+  return match ? styleFromLabel(match[1]) : null;
+}
+
+function needsStyleChoice(collected: AgentCollected): boolean {
+  if (collected.targetStoryId && isStyle(collected.style)) return false;
+  return collected.styleSelectionPending !== false || !isStyle(collected.style);
+}
+
+function safeCallHref(value: string | null | undefined): string | null {
+  return value && /^tel:\+[1-9]\d{7,14}$/.test(value) ? value : null;
+}
+
+function voicePhotoSetupReply(referenceCount: number, callHref: string): string {
+  const callNumber = callHref.slice("tel:".length);
+  if (referenceCount === 0) {
+    return "Send 1 or 2 photos, one per character. I'll text the call number.";
+  }
+  if (referenceCount === 1) {
+    return `Photo saved. Add a second character photo or call ${callNumber}.`;
+  }
+  return `2 photos saved. Call ${callNumber} to tell your idea.`;
+}
+
+function savedPhotoReply(referenceCount: number, channel: ComicAgentChannel): string {
+  if (channel === "voice") return "Photo saved. Tell me your comic idea.";
+  return referenceCount >= 2
+    ? "2 photos saved. Text your comic idea for both characters."
+    : "Photo saved. Text your comic idea, or add a second character photo.";
+}
+
 function approvalInstruction(channel: ComicAgentChannel, collected: AgentCollected): string {
+  const referenceCount = mergeReferences(collected.characterImageUrls, undefined).length;
+  if (!collected.targetStoryId && referenceCount === 0) {
+    return channel === "voice"
+      ? "I have no reference photos for this call. Hang up and text one or two photos to this number from the phone you're calling on. Wait for the Photo saved reply, then call back. Your idea is saved."
+      : "Send at least one character photo before replying CREATE. Your idea is saved.";
+  }
+  if (needsStyleChoice(collected)) return styleQuestion(channel);
   if (collected.targetStoryId) {
     return channel === "voice"
       ? "I can use your previous comic page as a reference. Say 'create it' when you're ready, or tell me what to change."
       : "Reply CREATE when you're ready, or tell me what to change.";
-  }
-  const referenceCount = mergeReferences(collected.characterImageUrls, undefined).length;
-  if (referenceCount === 0) {
-    return channel === "voice"
-      ? "I have no reference photos for this call. Hang up and text one or two photos to this number from the phone you're calling on. Wait for the Photo saved reply, then call back. Your idea is saved."
-      : "Send at least one character photo before replying CREATE. Your idea is saved.";
   }
   return channel === "voice"
     ? `I have ${referenceCount === 1 ? "one reference photo" : "two reference photos"}. Say 'create it' when you're ready, or tell me what to change.`
@@ -278,9 +347,37 @@ export async function advanceComicAgent(
     );
   }
 
+  if (turn.channel === "sms" && command === normalizedCommand(VOICE_PHOTO_START_MESSAGE)) {
+    const existingSetup = state === "collecting" && existing.voicePhotoSetup === true;
+    const freshAfterHandoff = Boolean(existingSetup && existing.photoHandoffFingerprint &&
+      turn.imageUrls?.some((url) => !existing.characterImageUrls?.includes(url)));
+    const references = mergeReferences(
+      existingSetup && !freshAfterHandoff ? existing.characterImageUrls : undefined,
+      turn.imageUrls,
+    );
+    const callHref = safeCallHref(turn.voiceCallHref);
+    const draft: AgentCollected = existingSetup
+      ? { ...existing, characterImageUrls: references }
+      : { ...(references.length ? { characterImageUrls: references } : {}) };
+    if (freshAfterHandoff) delete draft.photoHandoffFingerprint;
+    if (callHref) draft.voicePhotoSetup = true;
+    else delete draft.voicePhotoSetup;
+    return result(
+      "collecting",
+      draft,
+      existingSetup ? activeStoryId : null,
+      callHref
+        ? voicePhotoSetupReply(references.length, callHref)
+        : "Calling is unavailable. Text photos and your idea here.",
+      !existingSetup,
+    );
+  }
+
   if (command === "STATUS") {
     const reply =
-      state === "done"
+      turn.channel === "sms" && existing.voicePhotoSetup && safeCallHref(turn.voiceCallHref)
+        ? voicePhotoSetupReply(mergeReferences(existing.characterImageUrls, undefined).length, turn.voiceCallHref!)
+        : state === "done"
         ? withInstruction(
             "Your comic is ready.",
             `${commandVerb(turn.channel)} CONTINUE within ${CONVERSATION_RESUME_DAYS} days to make another page, or NEW for a new story.`,
@@ -312,6 +409,7 @@ export async function advanceComicAgent(
   if (turn.channel !== "voice" && command === normalizedCommand(COMIC_START_MESSAGE)) {
     const startingFresh = state === "done";
     const draft = startingFresh ? emptyAgentCollected() : { ...existing };
+    delete draft.voicePhotoSetup;
     const previousReferences = Array.isArray(draft.characterImageUrls) ? draft.characterImageUrls : [];
     const references = mergeReferences(draft.characterImageUrls, turn.imageUrls);
     if (references.length) draft.characterImageUrls = references;
@@ -324,8 +422,10 @@ export async function advanceComicAgent(
       : references.length
         ? turn.imageUrls?.length && !newPhotoRetained
           ? "I can use up to two photos. Tell me your comic idea.\n\nSend NEW for a fresh set."
-          : `${newPhotoRetained ? "Photo saved." : "I have your photos."} Tell me what should happen in your comic.`
-        : "Send 1 or 2 photos of yourself or a character, then text your comic idea.";
+          : newPhotoRetained
+            ? savedPhotoReply(references.length, turn.channel)
+            : "I have your photos. Tell me what should happen in your comic."
+        : "Send 1 or 2 photos, one person per photo, then text your comic idea.";
     return result(startingFresh ? "collecting" : state, draft, startingFresh ? null : activeStoryId, reply);
   }
 
@@ -346,6 +446,10 @@ export async function advanceComicAgent(
     const fresh = freshAgentCollected(existing, turn.channel);
     const references = mergeReferences(undefined, turn.imageUrls);
     if (references.length) fresh.characterImageUrls = references;
+    const callHref = existing.voicePhotoSetup && turn.channel === "sms"
+      ? safeCallHref(turn.voiceCallHref)
+      : null;
+    if (callHref) fresh.voicePhotoSetup = true;
     const photoReply = references.length
       ? turn.imageUrls && turn.imageUrls.length > references.length
         ? "I saved the first two photos. "
@@ -355,9 +459,11 @@ export async function advanceComicAgent(
       "collecting",
       fresh,
       null,
-      `Let's make a new comic. ${photoReply}${references.length && turn.channel !== "voice"
-        ? "Tell me your comic idea."
-        : freshPhotoInvitation(turn.channel)}`,
+      callHref
+        ? `New call setup. ${voicePhotoSetupReply(references.length, callHref)}`
+        : `Let's make a new comic. ${photoReply}${references.length && turn.channel !== "voice"
+          ? "Tell me your comic idea."
+          : freshPhotoInvitation(turn.channel)}`,
       true,
     );
   }
@@ -390,9 +496,60 @@ export async function advanceComicAgent(
         ...freshAgentCollected(existing, turn.channel),
         targetStoryId: activeStoryId,
         style: isStyle(existing.style) ? existing.style : undefined,
+        styleSelectionPending: isStyle(existing.style) ? false : undefined,
       },
       activeStoryId,
       "What should happen on the next page?",
+    );
+  }
+
+  if (turn.channel === "sms" && existing.voicePhotoSetup) {
+    const callHref = safeCallHref(turn.voiceCallHref);
+    const freshAfterHandoff = Boolean(
+      existing.photoHandoffFingerprint && turn.imageUrls?.some((url) =>
+        !existing.characterImageUrls?.includes(url)),
+    );
+    const references = mergeReferences(
+      freshAfterHandoff ? undefined : existing.characterImageUrls,
+      turn.imageUrls,
+    );
+    const draft: AgentCollected = { ...existing, characterImageUrls: references };
+    if (freshAfterHandoff) delete draft.photoHandoffFingerprint;
+    if (!callHref) {
+      delete draft.voicePhotoSetup;
+      return result(
+        "collecting",
+        draft,
+        null,
+        "Calling is unavailable. Text your comic idea here.",
+      );
+    }
+    return result("collecting", draft, null, voicePhotoSetupReply(references.length, callHref));
+  }
+
+  const selectedStyle = pureStyleChoice(text);
+  if (selectedStyle && !isCurrentBlockedPrompt(existing) &&
+      (state === "confirming" || !existing.prompt?.trim())) {
+    const references = mergeReferences(existing.characterImageUrls, turn.imageUrls);
+    const draft: AgentCollected = {
+      ...existing,
+      style: selectedStyle,
+      ...(references.length ? { characterImageUrls: references } : {}),
+    };
+    draft.styleSelectionPending = false;
+    delete draft.pendingStyleSummary;
+    const styleName = COMIC_STYLES.find((style) => style.id === selectedStyle)?.name || selectedStyle;
+    return result(
+      existing.prompt?.trim() ? "confirming" : "collecting",
+      draft,
+      activeStoryId,
+      existing.prompt?.trim()
+        ? withInstruction(
+            `${styleName} selected. ${existing.pendingStyleSummary || ""}`.trim(),
+            approvalInstruction(turn.channel, draft),
+            turn.channel,
+          )
+        : `${styleName} selected. ${ideaInvitation(turn.channel)}`,
     );
   }
 
@@ -407,6 +564,18 @@ export async function advanceComicAgent(
             ? "The image service declined this idea. Tell me what to change before we try again."
             : "Tell me what to add or change first. I'll summarize the revised idea for approval."
           : "Tell me your comic idea first. I'll summarize it for you to approve.",
+      );
+    }
+    if (needsStyleChoice(existing)) {
+      const references = mergeReferences(existing.characterImageUrls, turn.imageUrls);
+      const pendingDraft = references.length
+        ? { ...existing, characterImageUrls: references }
+        : existing;
+      return result(
+        "confirming",
+        pendingDraft,
+        activeStoryId,
+        approvalInstruction(turn.channel, pendingDraft),
       );
     }
     const references = mergeReferences(existing.characterImageUrls, turn.imageUrls);
@@ -464,7 +633,7 @@ export async function advanceComicAgent(
               turn.channel,
             )
           : newPhotoRetained
-            ? "Photo saved. What's your comic idea?"
+            ? savedPhotoReply(references.length, turn.channel)
             : "I can use up to two photos. Tell me your idea.\n\nSend NEW for a fresh set.";
       return result(state === "done" ? "collecting" : state, draft, draftStoryId, reply);
     }
@@ -480,7 +649,7 @@ export async function advanceComicAgent(
   const proposal = await model({
     history,
     prompt: draft.prompt,
-    style: draft.style,
+    style: draft.styleSelectionPending ? undefined : draft.style,
     name: draft.name,
     hasReference: references.length > 0,
     targetStoryId: draft.targetStoryId,
@@ -498,18 +667,38 @@ export async function advanceComicAgent(
   const stillBlocked = Boolean(draft.blockedPrompt && nextPrompt &&
     sameDraftPrompt(nextPrompt, draft.blockedPrompt));
   const ready = Boolean(proposal.readyForConfirmation && nextPrompt && !stillBlocked);
+  const explicitStyle = statedStyle(text);
+  const retainedStyle = isStyle(draft.style) && !needsStyleChoice(draft)
+    ? draft.style
+    : null;
+  const chosenStyle = explicitStyle || retainedStyle;
+  const requiresStyleSelection = ready && !chosenStyle;
+  const updatedDraft: AgentCollected = {
+    ...draft,
+    prompt: nextPrompt,
+    style: chosenStyle || proposal.style,
+  };
+  if (requiresStyleSelection) {
+    updatedDraft.styleSelectionPending = true;
+    updatedDraft.pendingStyleSummary = proposal.reply.trim();
+  } else if (chosenStyle) {
+    updatedDraft.styleSelectionPending = false;
+    delete updatedDraft.pendingStyleSummary;
+  } else if (!ready) {
+    delete updatedDraft.pendingStyleSummary;
+  }
   const reply = stillBlocked
     ? "The image service declined this idea. Tell me what to change before we try again."
     : ready
-      ? withInstruction(proposal.reply, approvalInstruction(turn.channel, draft), turn.channel)
+      ? requiresStyleSelection && references.length > 0
+        ? styleQuestion(turn.channel)
+        : withInstruction(proposal.reply, approvalInstruction(turn.channel, updatedDraft), turn.channel)
       : proposal.reply.trim() || "Tell me a little more about your comic idea.";
-  if (ready) delete draft.blockedPrompt;
+  if (ready) delete updatedDraft.blockedPrompt;
   return result(
     ready ? "confirming" : "collecting",
     {
-      ...draft,
-      prompt: nextPrompt,
-      style: proposal.style,
+      ...updatedDraft,
       messages: appendMessage(history, { role: "assistant", content: reply }),
     },
     draftStoryId,

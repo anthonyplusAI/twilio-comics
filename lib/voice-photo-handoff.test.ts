@@ -452,13 +452,32 @@ describe("Voice photo handoff", () => {
     );
     expect(nextSmsComic.action).toBe("none");
     expect(nextSmsComic.reply).toMatch(/send at least one.*photo/i);
-    const refreshedSmsComic = await advanceComicAgent(
+    const refreshedSmsDraft = await advanceComicAgent(
       {
         state: nextSmsIdea.nextState,
         collected: nextSmsIdea.collected,
         activeStoryId: nextSmsIdea.activeStoryId,
       },
       { text: "CREATE", channel: "sms", imageUrls: [PHOTO_2] },
+    );
+    expect(refreshedSmsDraft.action).toBe("none");
+    expect(refreshedSmsDraft.collected.characterImageUrls).toEqual([PHOTO_2]);
+    expect(refreshedSmsDraft.reply).toMatch(/choose.*style/i);
+    const styledSmsDraft = await advanceComicAgent(
+      {
+        state: refreshedSmsDraft.nextState,
+        collected: refreshedSmsDraft.collected,
+        activeStoryId: refreshedSmsDraft.activeStoryId,
+      },
+      { text: "3", channel: "sms" },
+    );
+    const refreshedSmsComic = await advanceComicAgent(
+      {
+        state: styledSmsDraft.nextState,
+        collected: styledSmsDraft.collected,
+        activeStoryId: styledSmsDraft.activeStoryId,
+      },
+      { text: "CREATE", channel: "sms" },
     );
     expect(refreshedSmsComic.submission?.characterImageUrls).toEqual([PHOTO_2]);
     expect(planConsumedSmsPhotoStage(markedStage, [PHOTO_2])).toBeNull();

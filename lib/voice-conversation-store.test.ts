@@ -133,4 +133,22 @@ describe("spoken NEW persistence", () => {
     expect(collected.params).toContain(JSON.stringify([freshPhoto]));
     expect(collected.params).not.toContain(JSON.stringify(["old-photo", freshPhoto]));
   });
+
+  it("keeps Photos then Call mode after spoken NEW clears the old SMS draft", async () => {
+    h.smsRow = {
+      ...h.smsRow,
+      collected: {
+        prompt: "Old SMS idea",
+        characterImageUrls: ["old-photo"],
+        voicePhotoSetup: true,
+      },
+    };
+
+    await saveVoiceFreshStart(previous, update);
+
+    const collected = dialect.sqlToQuery(h.updates[1].collected as SQL);
+    expect(collected.sql).toMatch(/voicePhotoSetup/);
+    expect(collected.sql).toMatch(/voicePhotoSetup'\s*=\s*'true'/);
+    expect(collected.sql).not.toMatch(/'prompt',/);
+  });
 });

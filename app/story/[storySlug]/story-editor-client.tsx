@@ -467,17 +467,13 @@ export function StoryEditorClient({ canTextComic = false }: { canTextComic?: boo
         isGeneratingPDF={isGeneratingPDF}
         isOwner={isOwner}
         onTitleUpdate={handleTitleUpdate}
+        textAction={isOwner && canTextComic && pages.some((page) => Boolean(page.image))
+          ? <TextComicAction storySlug={story.slug} />
+          : undefined}
+        notice={isGuestOwner
+          ? "Save this link. You can edit this comic in this browser for 30 days."
+          : undefined}
       />
-
-      {isOwner && canTextComic && pages.some((page) => Boolean(page.image)) && (
-        <TextComicAction storySlug={story.slug} />
-      )}
-
-      {isGuestOwner && (
-        <p className={styles.guestNote}>
-          This browser can edit your comic while Studio is open, for up to 30 days. Save its link to keep reading and sharing it.
-        </p>
-      )}
 
       {pdfProgress && (
         <div
