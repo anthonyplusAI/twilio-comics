@@ -4,6 +4,7 @@ import Image from "next/image";
 import { QRCodeSVG } from "qrcode.react";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { ArrowUpRight, Camera, Check, ImagePlus, MessageCircle, Phone } from "lucide-react";
+import { CameraCaptureButton } from "@/components/camera/camera-capture";
 import styles from "./camera.module.css";
 
 type CameraStatus = {
@@ -18,9 +19,9 @@ const CLEAR_SESSION_URL = "/api/voice/photos/session/clear";
 const KIOSK_IDLE_MS = 5 * 60 * 1000;
 type CameraStep = "loading" | "blocked" | "number" | "code" | "photos" | "finished";
 
-export function cameraStepAfterClear(finished: boolean, cleared: boolean): CameraStep {
+export function cameraStepAfterClear(finished: boolean, cleared: boolean, hadPhotos: boolean): CameraStep {
   if (!cleared) return "blocked";
-  return finished ? "finished" : "number";
+  return finished && hadPhotos ? "finished" : "number";
 }
 
 export function cameraActionsAvailable(step: CameraStep): boolean {
@@ -41,19 +42,56 @@ export function CameraFinishPrompt({
   busySlot: number | null;
   onFinish: () => void;
 }) {
+  const canFinish = photoCount > 0 && busySlot === null;
   return (
     <div className={styles.finishSetup}>
       <div>
-        <strong>{photoCount === 0 ? "No photo? You can still start." : "Ready to continue?"}</strong>
+        <strong>{photoCount === 0 ? "Add your first photo to continue." : "Ready to continue?"}</strong>
         <p>
           {photoCount === 0
-            ? "You can continue without photos. Finish closes your verified session on this screen."
+            ? "At least one reference photo is required for your comic. Save a photo before finishing setup."
             : "Tap Finish before you leave. Your saved photos stay ready for your phone for 24 hours."}
         </p>
       </div>
-      <button type="button" disabled={busySlot !== null} onClick={onFinish}>
+      <button type="button" disabled={!canFinish} onClick={() => { if (canFinish) onFinish(); }}>
         Finish photo setup
       </button>
+    </div>
+  );
+}
+
+export function CameraPhotoControls({
+  slot,
+  disabled,
+  onTakePhoto,
+  onChoosePhoto,
+}: {
+  slot: number;
+  disabled: boolean;
+  onTakePhoto: (file: File) => void;
+  onChoosePhoto: (event: ChangeEvent<HTMLInputElement>) => void;
+}) {
+  return (
+    <div className={styles.photoInputs}>
+      <CameraCaptureButton
+        title={`Take photo ${slot + 1}`}
+        fileName={`camera-photo-${slot + 1}.jpg`}
+        className={styles.takePhotoButton}
+        disabled={disabled}
+        onCapture={onTakePhoto}
+      >
+        <Camera size={16} aria-hidden="true" /> Take photo
+      </CameraCaptureButton>
+      <label>
+        <ImagePlus size={16} aria-hidden="true" /> Choose photo
+        <input
+          aria-label={`Choose photo ${slot + 1}`}
+          type="file"
+          accept="image/*"
+          disabled={disabled}
+          onChange={onChoosePhoto}
+        />
+      </label>
     </div>
   );
 }
@@ -166,17 +204,15 @@ export default function CameraClient({
       });
       if (!response.ok) throw new Error("Could not clear the previous photo session");
       if (version === sessionVersionRef.current) {
-        setStep(cameraStepAfterClear(finished, true));
-        if (finished) {
-          setNotice(hadPhotos
-            ? "Photo setup finished. Your saved photos remain ready for your phone. Scan or tap below to start."
-            : "Photo setup finished. Continue without photos by scanning or tapping below.");
+        setStep(cameraStepAfterClear(finished, true, hadPhotos));
+        if (finished && hadPhotos) {
+          setNotice("Photo setup finished. Your saved photos remain ready for your phone. Scan or tap below to start.");
         }
       }
     } catch {
       if (version === sessionVersionRef.current) {
         setError("Could not prepare a new photo session. Check your connection and retry.");
-        setStep(cameraStepAfterClear(finished, false));
+        setStep(cameraStepAfterClear(finished, false, hadPhotos));
       }
     }
   }, []);
@@ -263,7 +299,7 @@ export default function CameraClient({
       if (!response.ok) throw new Error(data.error || "Could not verify that code");
       setVerifiedPhone(data.phoneNumber || verifiedPhone);
       setStep("photos");
-      setNotice("Number verified. Add up to two photos, or continue without one.");
+      setNotice("Number verified. Add one or two reference photos to continue.");
     } catch (caught) {
       if (version === sessionVersionRef.current) {
         setError(caught instanceof Error ? caught.message : "Could not verify that code");
@@ -274,10 +310,8 @@ export default function CameraClient({
     }
   }
 
-  async function uploadPhoto(event: ChangeEvent<HTMLInputElement>, slot: number) {
-    const file = event.currentTarget.files?.[0];
-    event.currentTarget.value = "";
-    if (!file || busySlot !== null) return;
+  async function savePhoto(file: File, slot: number) {
+    if (busySlot !== null) return;
     const version = sessionVersionRef.current;
     const controller = new AbortController();
     pendingRequestRef.current = controller;
@@ -313,6 +347,12 @@ export default function CameraClient({
       if (pendingRequestRef.current === controller) pendingRequestRef.current = null;
       if (version === sessionVersionRef.current) setBusySlot(null);
     }
+  }
+
+  function uploadPhoto(event: ChangeEvent<HTMLInputElement>, slot: number) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (file) void savePhoto(file, slot);
   }
 
   return (
@@ -408,7 +448,7 @@ export default function CameraClient({
           <h2 id="photos-title">Add your photos.</h2>
           <p>
             {photoCount === 0
-              ? "Take a selfie or choose a photo. Add a second person if you like."
+              ? "Take a selfie or choose a reference photo. At least one photo is required; a second person is optional."
               : `${photoCount} of 2 photos added for ${verifiedPhone}.`}
           </p>
           <div className={styles.photoGrid}>
@@ -431,40 +471,25 @@ export default function CameraClient({
                 </div>
                 <strong>Photo {slot + 1}</strong>
                 <span>{slot < photoCount ? "Added" : slot === 0 ? "Start here" : "Optional"}</span>
-                <div className={styles.photoInputs}>
-                  <label>
-                    <Camera size={16} aria-hidden="true" /> Take photo
-                    <input
-                      type="file"
-                      accept="image/*"
-                      capture="user"
-                      disabled={busySlot !== null || slot > photoCount}
-                      onChange={(event) => { void uploadPhoto(event, slot); }}
-                    />
-                  </label>
-                  <label>
-                    <ImagePlus size={16} aria-hidden="true" /> Choose photo
-                    <input
-                      type="file"
-                      accept="image/*"
-                      disabled={busySlot !== null || slot > photoCount}
-                      onChange={(event) => { void uploadPhoto(event, slot); }}
-                    />
-                  </label>
-                </div>
+                <CameraPhotoControls
+                  slot={slot}
+                  disabled={busySlot !== null || slot > photoCount}
+                  onTakePhoto={(file) => { void savePhoto(file, slot); }}
+                  onChoosePhoto={(event) => uploadPhoto(event, slot)}
+                />
                 {busySlot === slot && <small>Saving photo…</small>}
               </div>
             ))}
           </div>
           <p className={styles.smallCopy}>
             {photoCount === 0
-              ? <>For a comic without photos, finish setup and {actionVerb} from <strong>{verifiedPhone}</strong>. Give the agent your idea on your phone.</>
+              ? <>Save at least one photo before you {actionVerb} from <strong>{verifiedPhone}</strong>. Give the agent your idea on your phone.</>
               : <>To use these photos, {actionVerb} from <strong>{verifiedPhone}</strong> within 24 hours. Give the agent your idea on your phone.</>}
           </p>
           <CameraFinishPrompt
             photoCount={photoCount}
             busySlot={busySlot}
-            onFinish={() => { void resetSession(true, photoCount > 0); }}
+            onFinish={() => { void resetSession(true, true); }}
           />
         </section>
       )}

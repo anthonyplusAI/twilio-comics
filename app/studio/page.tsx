@@ -1,67 +1,92 @@
 "use client";
 
-import { Navbar } from "@/components/landing/navbar";
-import { Footer } from "@/components/landing/footer";
-import { LandingHero } from "@/components/landing/hero-section";
+import Image from "next/image";
+import Link from "next/link";
+import { signOut, useSession } from "next-auth/react";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import { useState } from "react";
+import { SignInButton } from "@/components/auth/sign-in-button";
 import { ComicCreationForm } from "@/components/landing/comic-creation-form";
 import { ComicPreview } from "@/components/landing/comic-preview";
-import { useState, useEffect } from "react";
+import { Footer } from "@/components/landing/footer";
+import marketingStyles from "../marketing.module.css";
+import styles from "./studio.module.css";
 
 export default function StudioPage() {
-  const [currentPage, setCurrentPage] = useState(1);
   const [prompt, setPrompt] = useState("");
   const [style, setStyle] = useState("noir");
   const [characterFiles, setCharacterFiles] = useState<File[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-
-  // Auto-loop through pages every 6 seconds
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentPage((prev) => (prev === 4 ? 1 : prev + 1));
-    }, 6000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const goToPage = (page: number) => {
-    setCurrentPage(page);
-  };
+  const { data: session, status } = useSession();
+  const hasStudioSession = status === "authenticated" &&
+    session?.user?.studioAuthorized === true && Boolean(session.user.id?.trim());
 
   return (
-    <div className="min-h-screen bg-background flex flex-col overflow-hidden relative">
-      {/* Background gradient blurs */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo/10 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[120px]" />
-      </div>
+    <div className={`${marketingStyles.page} ${styles.studioPage}`}>
+      <header className={marketingStyles.siteHeader}>
+        <Link href="/" className={marketingStyles.brand} aria-label="Twilio Comics home">
+          <Image src="/images/twilio-bug.svg" alt="" width={40} height={40} />
+          <span>Twilio Comics</span>
+        </Link>
+        <nav className={`${marketingStyles.headerNav} ${styles.headerNav}`} aria-label="Studio navigation">
+          <Link href="/start" className={styles.backLink}>
+            <ArrowLeft size={17} aria-hidden="true" /> Start options
+          </Link>
+          {hasStudioSession ? (
+            <>
+              <Link href="/stories">My comics</Link>
+              <button type="button" className={styles.headerButton}
+                onClick={() => void signOut({ redirectTo: "/start" })}>
+                Sign out
+              </button>
+            </>
+          ) : status !== "loading" ? (
+            <SignInButton className={styles.headerButton}>Sign in with Google</SignInButton>
+          ) : (
+            <span className={styles.signInPending} aria-live="polite">Checking sign-in…</span>
+          )}
+        </nav>
+      </header>
 
-      <Navbar />
-
-      <main className="flex-1 flex flex-col lg:flex-row min-h-[calc(100vh-6rem)]">
-        {/* Left: Controls & Input */}
-        <div className="w-full lg:w-1/2 flex flex-col justify-center px-4 sm:px-6 lg:px-12 xl:px-20 py-4 sm:py-6 relative">
-          <div className="max-w-xl mx-auto lg:mx-0 w-full z-10">
-            <LandingHero />
-
-            <div className="space-y-4 sm:space-y-5 mt-4 sm:mt-5">
-              <div className="opacity-0 animate-fade-in-up animation-delay-100">
-                <ComicCreationForm
-                  prompt={prompt}
-                  setPrompt={setPrompt}
-                  style={style}
-                  setStyle={setStyle}
-                  characterFiles={characterFiles}
-                  setCharacterFiles={setCharacterFiles}
-                  isLoading={isLoading}
-                  setIsLoading={setIsLoading}
-                />
-              </div>
+      <main>
+        <section className={styles.hero} aria-labelledby="studio-title">
+          <div className={styles.heroInner}>
+            <div>
+              <p className={styles.kicker}>Twilio Comics / Browser Studio</p>
+              <h1 id="studio-title">Your photo.<br />Your comic.</h1>
+              <p className={styles.heroCopy}>
+                {hasStudioSession ? "Take or upload" : "Sign in with Google, then take or upload"} one or two
+                reference photos, describe your idea, and choose a style. Twilio Comics creates your page in the browser.
+              </p>
+              {process.env.NODE_ENV === "production" && (
+                <p className={styles.accessNote}>Browser Studio is currently for approved Google testers.</p>
+              )}
+            </div>
+            <div className={styles.heroNote}>
+              <span className={styles.heroNoteLabel}>Start with yourself</span>
+              <p>Your reference photos guide the characters in your comic.</p>
+              <ArrowUpRight size={28} aria-hidden="true" />
             </div>
           </div>
-        </div>
+        </section>
 
-        {/* Right: Visual Preview / Canvas */}
-        <ComicPreview currentPage={currentPage} goToPage={goToPage} />
+        <section className={styles.workspace} aria-label="Create a comic in Browser Studio">
+          <div className={styles.workspaceInner}>
+            <div className={styles.formColumn}>
+              <ComicCreationForm
+                prompt={prompt}
+                setPrompt={setPrompt}
+                style={style}
+                setStyle={setStyle}
+                characterFiles={characterFiles}
+                setCharacterFiles={setCharacterFiles}
+                isLoading={isLoading}
+                setIsLoading={setIsLoading}
+              />
+            </div>
+            <ComicPreview style={style} onSelectStyle={setStyle} disabled={isLoading} />
+          </div>
+        </section>
       </main>
 
       <Footer />

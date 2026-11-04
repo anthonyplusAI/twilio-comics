@@ -13,6 +13,7 @@ const TO = "+15557654321";
 const SMS_FROM = "+15550001111";
 const STORY_ID = "11111111-1111-4111-8111-111111111111";
 const JOB_ID = "22222222-2222-4222-8222-222222222222";
+const PORTRAIT = "https://example.com/portrait.jpg";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -71,7 +72,12 @@ const model: ComicAgentModel = async (input) => {
 function harness(overrides: {
   initial?: Partial<Stored>;
   model?: ComicAgentModel;
-  beforeSave?: (next: Pick<Stored, "state" | "collected" | "activeStoryId">) => Promise<void>;
+  cameraStage?: string[];
+  cameraCleanupFails?: boolean;
+  beforeSave?: (
+    next: Pick<Stored, "state" | "collected" | "activeStoryId">,
+    stagePhoto: (reference: string) => void,
+  ) => Promise<void>;
   submit?: (input: Record<string, unknown>) => Promise<{
     accepted: boolean;
     job: { id: string; status: string; lastError?: string | null };
@@ -79,19 +85,24 @@ function harness(overrides: {
   lookupJob?: (key: string) => Promise<{ status: string; lastError?: string | null } | null>;
   onTurn?: (event: Record<string, unknown>) => Promise<void>;
   authorizeCall?: (input: Record<string, unknown>) => boolean | Promise<boolean>;
+  onSavedFreshStart?: (freshStart: { phoneNumber: string; requestedAt: string }) => void;
 } = {}) {
   let row: Stored = {
     id: "voice-conversation",
     state: "collecting",
-    collected: {},
+    collected: { characterImageUrls: [PORTRAIT] },
     activeStoryId: null,
     updatedAt: new Date(1_000),
     ...overrides.initial,
   };
   const submitted: Array<Record<string, unknown>> = [];
   const atSubmit: Stored[] = [];
+  const savedUpdates: Array<Record<string, unknown>> = [];
   const activity: Array<Record<string, unknown>> = [];
   const authorizations: Array<Record<string, unknown>> = [];
+  let cameraStage = [...(overrides.cameraStage || [])];
+  const resetEvents: string[] = [];
+  const preparedAt: number[] = [];
   const activeModel = overrides.model || model;
   const deps = {
     expectedAccountSid: ACCOUNT_SID,
@@ -105,10 +116,17 @@ function harness(overrides: {
       row.updatedAt = new Date(row.updatedAt.getTime() + 1);
       return structuredClone(row);
     },
-    save: async (previous: Stored, next: Pick<Stored, "state" | "collected" | "activeStoryId">) => {
-      await overrides.beforeSave?.(next);
+    save: async (
+      previous: Stored,
+      next: Pick<Stored, "state" | "collected" | "activeStoryId"> & {
+        freshStart?: { phoneNumber: string; requestedAt: string };
+      },
+    ) => {
+      savedUpdates.push(structuredClone(next));
+      await overrides.beforeSave?.(next, (reference) => { cameraStage.push(reference); });
       if (previous.updatedAt.getTime() !== row.updatedAt.getTime()) return null;
       row = { ...row, ...next, updatedAt: new Date(row.updatedAt.getTime() + 1) };
+      if (next.freshStart) overrides.onSavedFreshStart?.(next.freshStart);
       return structuredClone(row);
     },
     advance: (current: { state: string; collected: AgentCollected; activeStoryId: string | null }, turn: { text: string; channel: "voice" }) =>
@@ -123,6 +141,20 @@ function harness(overrides: {
       return overrides.submit ? overrides.submit(input) : { accepted: true, job: { id: JOB_ID, status: "queued" } };
     },
     lookupJob: overrides.lookupJob || (async () => null),
+    prepareFreshStart: async (from: string, receivedAt: number) => {
+      expect(from).toBe(FROM);
+      preparedAt.push(receivedAt);
+      const beforeReset = [...cameraStage];
+      resetEvents.push(`prepared:${beforeReset.join(",")}`);
+      return {
+        references: beforeReset,
+        cleanup: async () => {
+          if (overrides.cameraCleanupFails) throw new Error("camera cleanup unavailable");
+          resetEvents.push(`cleared:${row.state}:${beforeReset.join(",")}`);
+          cameraStage = cameraStage.filter((reference) => !beforeReset.includes(reference));
+        },
+      };
+    },
     onCallStart: async (event: Record<string, unknown>) => {
       activity.push({ type: "started", ...event });
     },
@@ -140,14 +172,37 @@ function harness(overrides: {
     create,
     submitted,
     atSubmit,
+    savedUpdates,
     activity,
     authorizations,
+    resetEvents,
+    preparedAt,
+    get cameraStage() { return [...cameraStage]; },
     completeExternally: () => {
       row = {
         ...row,
         state: "done",
         collected: {},
         activeStoryId: STORY_ID,
+        updatedAt: new Date(row.updatedAt.getTime() + 1),
+      };
+    },
+    queueFreshStartExternally: (requestedAt = "2026-10-01T00:00:01.000Z") => {
+      row = {
+        ...row,
+        collected: {
+          ...row.collected,
+          newDraftRequestedAt: requestedAt,
+        },
+        updatedAt: new Date(row.updatedAt.getTime() + 1),
+      };
+    },
+    resetExternally: (requestedAt: string) => {
+      row = {
+        ...row,
+        state: "collecting",
+        collected: { photoHandoffResetAt: requestedAt },
+        activeStoryId: null,
         updatedAt: new Date(row.updatedAt.getTime() + 1),
       };
     },
@@ -207,6 +262,249 @@ describe("ConversationRelay voice conversation", () => {
       expect.objectContaining({ type: "turn", role: "caller", callSid: CALL_SID, sequence: 1, content: "A robot detective" }),
       expect.objectContaining({ type: "turn", role: "agent", callSid: CALL_SID, sequence: 1, content: expect.stringMatching(/robot detective/i) }),
     ]);
+  });
+
+  it("clears only camera photos staged before a saved spoken NEW", async () => {
+    const oldCameraPhoto = "camera-old";
+    const newCameraPhoto = "camera-new";
+    const h = harness({
+      initial: {
+        state: "done",
+        activeStoryId: STORY_ID,
+        collected: { prompt: "Old comic", characterImageUrls: [PORTRAIT] },
+      },
+      cameraStage: [oldCameraPhoto],
+      beforeSave: async (next, stagePhoto) => {
+        if (next.state === "collecting" && !next.collected.prompt) stagePhoto(newCameraPhoto);
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, 2_000);
+
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.activeStoryId).toBeNull();
+    expect(h.row.collected.characterImageUrls).toBeUndefined();
+    expect(h.savedUpdates[0].freshStart).toEqual({
+      phoneNumber: FROM,
+      requestedAt: h.row.collected.photoHandoffResetAt,
+    });
+    expect(h.cameraStage).toEqual([newCameraPhoto]);
+    expect(h.resetEvents).toEqual([
+      `prepared:${oldCameraPhoto}`,
+      `cleared:collecting:${oldCameraPhoto}`,
+    ]);
+    expect(resultCode(response)).toBe("new_draft");
+    expect(await session.handle({ type: "prompt", last: true, voicePrompt: "Old idea" }, 3_000)).toEqual([]);
+  });
+
+  it("clears old camera staging after a spoken NEW queues behind a generating job", async () => {
+    const h = harness({
+      initial: {
+        state: "generating",
+        collected: {
+          prompt: "Old comic",
+          characterImageUrls: [PORTRAIT],
+          generationRequestKey: "twilio-call:old",
+        },
+      },
+      cameraStage: ["camera-old"],
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, 2_000);
+
+    expect(h.row.state).toBe("generating");
+    expect(h.row.collected.generationRequestKey).toBe("twilio-call:old");
+    expect(Date.parse(h.row.collected.newDraftRequestedAt || "")).not.toBeNaN();
+    expect(h.cameraStage).toEqual([]);
+    expect(h.resetEvents).toEqual(["prepared:camera-old", "cleared:generating:camera-old"]);
+    expect(h.submitted).toHaveLength(0);
+    expect(resultCode(response)).toBe("new_draft_queued");
+  });
+
+  it("remembers old camera references if cleanup fails after spoken NEW", async () => {
+    const h = harness({
+      initial: { state: "confirming", collected: { prompt: "Old comic", characterImageUrls: [PORTRAIT] } },
+      cameraStage: ["camera-old"],
+      cameraCleanupFails: true,
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, 2_000);
+
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.collected.ignoredCameraReferences).toEqual(["camera-old"]);
+    expect(h.cameraStage).toEqual(["camera-old"]);
+    expect(resultCode(response)).toBe("new_draft");
+  });
+
+  it.each(["CANCEL", "DISCARD"])("ends a call after spoken %s durably discards the draft", async (command) => {
+    const h = harness({
+      initial: { state: "confirming", collected: { prompt: "Old comic", characterImageUrls: [PORTRAIT] } },
+      cameraStage: ["camera-old"],
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: command }, 2_000);
+
+    expect(resultCode(response)).toBe("draft_cancelled");
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.collected.prompt).toBeUndefined();
+    expect(h.row.collected.characterImageUrls).toBeUndefined();
+    expect(h.savedUpdates[0].freshStart).toBeUndefined();
+    expect(h.cameraStage).toEqual([]);
+    expect(await session.handle({ type: "prompt", last: true, voicePrompt: "Old idea" }, 3_000)).toEqual([]);
+  });
+
+  it("reapplies spoken NEW if the old worker completes before the Voice save", async () => {
+    let completeOldJob = () => {};
+    let completed = false;
+    const h = harness({
+      initial: {
+        state: "generating",
+        collected: {
+          prompt: "Old comic",
+          characterImageUrls: [PORTRAIT],
+          generationRequestKey: "twilio-call:old",
+        },
+      },
+      cameraStage: ["camera-old"],
+      beforeSave: async (next) => {
+        if (!completed && next.collected.newDraftRequestedAt) {
+          completed = true;
+          completeOldJob();
+        }
+      },
+    });
+    completeOldJob = h.completeExternally;
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, 2_000);
+
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.activeStoryId).toBeNull();
+    expect(h.row.collected.prompt).toBeUndefined();
+    expect(h.row.collected.characterImageUrls).toBeUndefined();
+    expect(h.cameraStage).toEqual([]);
+    expect(h.resetEvents).toEqual(["prepared:camera-old", "cleared:collecting:camera-old"]);
+    expect(resultCode(response)).toBe("new_draft");
+    expect(h.activity.filter((event) => event.role === "caller")).toHaveLength(1);
+  });
+
+  it("keeps the original spoken NEW time if a later texted NEW forces a Voice save retry", async () => {
+    const laterTextResetAt = new Date(Date.now() + 10_000).toISOString();
+    let resetVoice: (requestedAt: string) => void = () => {};
+    let raced = false;
+    const h = harness({
+      beforeSave: async (next) => {
+        if (!raced && next.collected.photoHandoffResetAt) {
+          raced = true;
+          resetVoice(laterTextResetAt);
+        }
+      },
+    });
+    resetVoice = h.resetExternally;
+    const session = h.create();
+    await session.handle(setup, 1_000);
+
+    const response = await session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, 2_000);
+
+    expect(resultCode(response)).toBe("new_draft");
+    expect(h.savedUpdates).toHaveLength(2);
+    expect(h.savedUpdates[1].freshStart).toEqual(h.savedUpdates[0].freshStart);
+    expect(h.row.collected.photoHandoffResetAt).toBe(laterTextResetAt);
+  });
+
+  it("preserves a later SMS NEW and photo when caller history delays spoken NEW", async () => {
+    const spokenAt = Date.now() - 5_000;
+    const laterTextResetAt = new Date(spokenAt + 1_000).toISOString();
+    const freshPhoto = "https://example.com/new-sms-photo.jpg";
+    const smsDraft = {
+      phoneRestartedAt: laterTextResetAt,
+      characterImageUrls: [freshPhoto],
+    };
+    const recordingStarted = deferred<void>();
+    const finishRecording = deferred<void>();
+    const h = harness({
+      initial: {
+        state: "confirming",
+        collected: { prompt: "Old comic", characterImageUrls: [PORTRAIT] },
+      },
+      onTurn: async (event) => {
+        if (event.role === "caller" && event.content === "NEW") {
+          recordingStarted.resolve();
+          await finishRecording.promise;
+        }
+      },
+      onSavedFreshStart: ({ requestedAt }) => {
+        // saveVoiceFreshStart keeps the SMS draft only when its reset is newer.
+        if (Date.parse(requestedAt) >= Date.parse(smsDraft.phoneRestartedAt)) {
+          smsDraft.characterImageUrls = [];
+        }
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, spokenAt - 1_000);
+
+    const spoken = session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, spokenAt);
+    await recordingStarted.promise;
+    h.resetExternally(laterTextResetAt);
+    finishRecording.resolve();
+
+    expect(resultCode(await spoken)).toBe("new_draft");
+    expect(h.savedUpdates).toHaveLength(2);
+    expect(h.savedUpdates.map((update) => update.freshStart)).toEqual([
+      { phoneNumber: FROM, requestedAt: new Date(spokenAt).toISOString() },
+      { phoneNumber: FROM, requestedAt: new Date(spokenAt).toISOString() },
+    ]);
+    expect(h.row.collected.photoHandoffResetAt).toBe(laterTextResetAt);
+    expect(h.preparedAt).toEqual([spokenAt]);
+    expect(smsDraft.characterImageUrls).toEqual([freshPhoto]);
+  });
+
+  it("keeps a newer queued reset marker when caller history delays spoken NEW during generation", async () => {
+    const spokenAt = Date.now() - 5_000;
+    const laterTextResetAt = new Date(spokenAt + 1_000).toISOString();
+    const recordingStarted = deferred<void>();
+    const finishRecording = deferred<void>();
+    const h = harness({
+      initial: {
+        state: "generating",
+        collected: {
+          prompt: "Old comic",
+          characterImageUrls: [PORTRAIT],
+          generationRequestKey: "twilio-call:old",
+        },
+      },
+      onTurn: async (event) => {
+        if (event.role === "caller" && event.content === "NEW") {
+          recordingStarted.resolve();
+          await finishRecording.promise;
+        }
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, spokenAt - 1_000);
+
+    const spoken = session.handle({ type: "prompt", last: true, voicePrompt: "NEW" }, spokenAt);
+    await recordingStarted.promise;
+    h.queueFreshStartExternally(laterTextResetAt);
+    finishRecording.resolve();
+
+    expect(resultCode(await spoken)).toBe("new_draft_queued");
+    expect(h.savedUpdates).toHaveLength(2);
+    expect(h.savedUpdates.map((update) => update.freshStart)).toEqual([
+      { phoneNumber: FROM, requestedAt: new Date(spokenAt).toISOString() },
+      { phoneNumber: FROM, requestedAt: new Date(spokenAt).toISOString() },
+    ]);
+    expect(h.row.collected.newDraftRequestedAt).toBe(laterTextResetAt);
+    expect(h.row.collected.generationRequestKey).toBe("twilio-call:old");
   });
 
   it("ends a call before another model turn after ten minutes", async () => {
@@ -297,6 +595,42 @@ describe("ConversationRelay voice conversation", () => {
     expect(resultCode(await approval)).toBe("checking");
     expect(h.row.state).toBe("generating");
     expect(session.timeout()).toEqual([]);
+  });
+
+  it("finishes a queued NEW when Voice job admission fails before any job exists", async () => {
+    const submitStarted = deferred<void>();
+    const failSubmit = deferred<void>();
+    const h = harness({
+      initial: {
+        collected: {
+          characterImageUrls: [PORTRAIT],
+          ignoredCameraReferences: ["camera-old"],
+        },
+      },
+      submit: async () => {
+        submitStarted.resolve();
+        await failSubmit.promise;
+        throw new Error("Queue unavailable before job insert");
+      },
+    });
+    const session = h.create();
+    await session.handle(setup, 1_000);
+    await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000);
+
+    const approval = session.handle({ type: "prompt", last: true, voicePrompt: "create it" }, 3_000);
+    await submitStarted.promise;
+    h.queueFreshStartExternally();
+    failSubmit.resolve();
+    const response = await approval;
+
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.activeStoryId).toBeNull();
+    expect(h.row.collected.prompt).toBeUndefined();
+    expect(h.row.collected.characterImageUrls).toBeUndefined();
+    expect(h.row.collected.photoHandoffResetAt).toBe("2026-10-01T00:00:01.000Z");
+    expect(h.row.collected.ignoredCameraReferences).toEqual(["camera-old"]);
+    expect(h.row.collected.generationRequestKey).toBeUndefined();
+    expect(resultCode(response)).toBe("new_draft");
   });
 
   it("sends only the limit handoff after an in-flight draft save finishes", async () => {
@@ -442,8 +776,31 @@ describe("ConversationRelay voice conversation", () => {
       senderAddress: SMS_FROM,
       prompt: "A robot detective and a dragon chase a thief in the rain",
       style: "manga",
-      characterImageUrls: [],
+      characterImageUrls: [PORTRAIT],
     })]);
+  });
+
+  it("ends setup if an intervening reset removed the reference photo", async () => {
+    const h = harness({ initial: { collected: {} } });
+    const session = h.create();
+    const response = await session.handle(setup, 1_000);
+
+    expect(resultCode(response)).toBe("missing_photo");
+    expect(await session.handle({ type: "prompt", last: true, voicePrompt: "A robot detective" }, 2_000))
+      .toEqual([]);
+    expect(h.row.state).toBe("collecting");
+    expect(h.row.collected.prompt).toBeUndefined();
+    expect(h.submitted).toHaveLength(0);
+  });
+
+  it("allows a verified continuation or generating status call without a new photo", async () => {
+    const finished = harness({ initial: { state: "done", activeStoryId: STORY_ID, collected: {} } });
+    expect(await finished.create().handle(setup, 1_000)).toEqual([]);
+
+    const generating = harness({
+      initial: { state: "generating", collected: { prompt: "Old comic", generationRequestKey: "old-job" } },
+    });
+    expect(await generating.create().handle(setup, 1_000)).toEqual([]);
   });
 
   it("ignores partial prompts and duplicate final transcripts", async () => {

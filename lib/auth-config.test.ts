@@ -69,7 +69,7 @@ describe("administrator Auth.js role", () => {
       session: { user: { id: "prior", name: "operator" }, expires: "tomorrow" },
       token,
     });
-    expect(session.user).toMatchObject({ role: "admin", id: "" });
+    expect(session.user).toMatchObject({ role: "admin", id: "", studioAuthorized: false });
   });
 
   it("does not promote an OAuth user that carries an admin-looking field", async () => {
@@ -166,9 +166,9 @@ describe("administrator Auth.js role", () => {
       token,
     });
 
-    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "db-google-user" });
+    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "db-google-user", studioAuthorized: true });
     vi.stubEnv("STUDIO_TESTER_EMAILS", "someone-else@example.com");
-    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "" });
+    expect((await sessionFor()).user).toMatchObject({ role: "admin", id: "", studioAuthorized: false });
   });
 
   it("rejects expired admin claims and claims signed before password rotation", async () => {
@@ -326,6 +326,11 @@ describe("administrator Auth.js role", () => {
 
     expect(token).toMatchObject({ role: "user", studioEmail: "tester@example.com" });
     expect(await cb.jwt({ token })).toMatchObject({ role: "user" });
+    const session = await cb.session({
+      session: { user: { id: "prior" }, expires: "tomorrow" },
+      token,
+    });
+    expect(session.user).toMatchObject({ id: "google-user", studioAuthorized: true });
 
     vi.stubEnv("STUDIO_TESTER_EMAILS", "someone-else@example.com");
     expect(await cb.jwt({ token })).toBeNull();

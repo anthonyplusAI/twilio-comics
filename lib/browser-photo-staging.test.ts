@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  beginVerifiedCameraPhotoSession,
   clearStagedCameraPhotoReferences,
   currentCameraReferences,
   newCameraBlobKey,
   planCameraStage,
+  stageCameraPhoto,
 } from "@/lib/browser-photo-staging";
 import { channelUserId } from "@/lib/channel-identities";
 import { VOICE_PHOTO_HANDOFF_WINDOW_MS } from "@/lib/voice-photo-handoff";
@@ -19,14 +21,33 @@ const SECOND = `uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000002.jpg
 const REPLACEMENT = `uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000003.jpg`;
 const NOW = Date.parse("2026-10-22T12:00:00Z");
 const FRESH = new Date(NOW - 1000);
+const FIRST_SESSION = "00000000-0000-4000-8000-000000000011";
+const SECOND_SESSION = "00000000-0000-4000-8000-000000000012";
 
-function cameraStageDb(initialReferences: string[]) {
+function cameraStageDb(
+  initialReferences: string[],
+  session?: { nonce: string; issued: number },
+) {
   const row = {
     id: "camera-conversation",
-    collected: { characterImageUrls: [...initialReferences] },
-    updatedAt: new Date(),
+    collected: {
+      characterImageUrls: [...initialReferences],
+      ...(session ? {
+        cameraSessionNonce: session.nonce,
+        cameraSessionIssuedAt: session.issued,
+      } : {}),
+    } as {
+      characterImageUrls?: string[];
+      cameraSessionNonce?: string;
+      cameraSessionIssuedAt?: number;
+      cameraReferenceSavedAt?: Record<string, number>;
+    },
+    updatedAt: new Date(session?.issued ?? NOW - 1000),
   };
   const tx = {
+    insert: vi.fn(() => ({
+      values: () => ({ onConflictDoNothing: async () => undefined }),
+    })),
     select: vi.fn(() => ({
       from: () => ({ where: () => ({ for: () => ({
         limit: async () => [{ ...row, collected: structuredClone(row.collected) }],
@@ -107,7 +128,8 @@ describe("verified browser photo staging", () => {
     const { row } = cameraStageDb([`blob:${FIRST}`, `blob:${REPLACEMENT}`]);
 
     expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`])).toBe(true);
-    expect(row.collected).toEqual({ characterImageUrls: [`blob:${REPLACEMENT}`] });
+    expect(row.collected).toMatchObject({ characterImageUrls: [`blob:${REPLACEMENT}`] });
+    expect(row.collected.cameraReferenceSavedAt?.[`blob:${REPLACEMENT}`]).toBeTypeOf("number");
   });
 
   it("clears any staged set for an explicit reset and rejects malformed input", async () => {
@@ -120,5 +142,52 @@ describe("verified browser photo staging", () => {
     expect(tx.update).not.toHaveBeenCalled();
     expect(await clearStagedCameraPhotoReferences(PHONE)).toBe(true);
     expect(row.collected).toEqual({});
+  });
+
+  it("starts an empty stage after a newly verified phone and keeps old photos until then", async () => {
+    const { row } = cameraStageDb([`blob:${FIRST}`, `blob:${SECOND}`]);
+
+    expect(row.collected.characterImageUrls).toEqual([`blob:${FIRST}`, `blob:${SECOND}`]);
+    expect(await beginVerifiedCameraPhotoSession(PHONE, { phone: PHONE, nonce: FIRST_SESSION, issued: NOW }))
+      .toBe(true);
+    expect(row.collected).toEqual({
+      cameraSessionNonce: FIRST_SESSION,
+      cameraSessionIssuedAt: NOW,
+    });
+
+    expect(await stageCameraPhoto(PHONE, OWNER, REPLACEMENT, 0, FIRST_SESSION))
+      .toEqual({ count: 1, replaced: false });
+    expect(row.collected.characterImageUrls).toEqual([`blob:${REPLACEMENT}`]);
+    expect(row.collected.cameraReferenceSavedAt?.[`blob:${REPLACEMENT}`]).toBeTypeOf("number");
+  });
+
+  it("does not let an older verification or upload erase a newer session's photos", async () => {
+    const { row, tx } = cameraStageDb([`blob:${SECOND}`], {
+      nonce: SECOND_SESSION,
+      issued: NOW + 1000,
+    });
+
+    expect(await beginVerifiedCameraPhotoSession(PHONE, { phone: PHONE, nonce: FIRST_SESSION, issued: NOW }))
+      .toBe(false);
+    expect(await stageCameraPhoto(PHONE, OWNER, REPLACEMENT, 0, FIRST_SESSION))
+      .toBeNull();
+    expect(row.collected.characterImageUrls).toEqual([`blob:${SECOND}`]);
+    expect(row.collected.cameraSessionNonce).toBe(SECOND_SESSION);
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the active session marker when SMS consumes its staged photos", async () => {
+    const { row } = cameraStageDb([`blob:${FIRST}`], {
+      nonce: FIRST_SESSION,
+      issued: NOW,
+    });
+
+    expect(await clearStagedCameraPhotoReferences(PHONE, [`blob:${FIRST}`])).toBe(true);
+    expect(row.collected).toEqual({
+      cameraSessionNonce: FIRST_SESSION,
+      cameraSessionIssuedAt: NOW,
+    });
+    expect(await stageCameraPhoto(PHONE, OWNER, REPLACEMENT, 0, FIRST_SESSION))
+      .toEqual({ count: 1, replaced: false });
   });
 });

@@ -4,7 +4,7 @@ import { SessionProvider } from "@/components/auth/session-provider";
 
 export const metadata: Metadata = {
   title: "Comic Studio | Twilio Comics",
-  description: "Browser studio for testing comic creation.",
+  description: "Take or upload reference photos, add your idea, and create a personalized comic in Twilio Comics Browser Studio.",
   robots: {
     index: false,
     follow: false,

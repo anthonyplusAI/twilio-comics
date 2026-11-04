@@ -4,8 +4,11 @@ import next from "next";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
 import { recordVoiceCallStart, recordVoiceTurn } from "@/lib/activity-events";
-import { clearStagedCameraPhotoReferences } from "@/lib/browser-photo-staging";
-import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
+import {
+  clearStagedCameraPhotoReferences,
+  getStagedCameraPhotoReferences,
+} from "@/lib/browser-photo-staging";
+import { channelUserId, getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import { advanceComicAgent, emptyAgentCollected } from "@/lib/comic-agent";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { db } from "@/lib/db";
@@ -20,6 +23,7 @@ import {
   type VoiceConversationUpdate,
   type VoiceRelayInbound,
 } from "@/lib/voice-conversation";
+import { saveVoiceFreshStart } from "@/lib/voice-conversation-store";
 import { verifyVoiceCallAuthorization } from "@/lib/voice-call-authorization";
 import { getConversationRelayUrl } from "@/lib/voice-twiml";
 import {
@@ -28,6 +32,7 @@ import {
   planConsumedSmsPhotoStage,
   selectVoicePhotoHandoff,
   VOICE_PHOTO_HANDOFF_WINDOW_MS,
+  voiceSmsMediaCutoff,
   withoutVoicePhotoReferences,
   type VoicePhotoHandoffCandidate,
 } from "@/lib/voice-photo-handoff";
@@ -89,13 +94,28 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
 
   const cutoff = new Date(Date.now() - VOICE_PHOTO_HANDOFF_WINDOW_MS);
   return db.transaction(async (tx) => {
+    // SMS NEW checkpoints its SMS row before updating Voice. Lock photo
+    // sources first here too, so a concurrent text restart cannot deadlock
+    // against call setup's photo handoff.
+    const lockedSources = new Map<(typeof sourceChannels)[number], Conversation>();
+    for (const sourceChannel of sourceChannels) {
+      const [source] = await tx.select().from(conversations)
+        .where(and(
+          eq(conversations.channel, sourceChannel),
+          eq(conversations.phoneNumber, from),
+          gte(conversations.updatedAt, cutoff),
+        ))
+        .for("update")
+        .limit(1);
+      if (source) lockedSources.set(sourceChannel, source);
+    }
+
     // Read the latest Voice revision, not the row returned by the earlier
     // upsert: another call could have progressed between those statements.
     const [voice] = await tx.select().from(conversations)
       .where(eq(conversations.id, row.id)).for("update").limit(1);
     if (!voice) throw new Error("Voice conversation disappeared during photo handoff");
     if (voice.state === "generating") return snapshot(voice);
-    if (voice.collected.suppressPhotoHandoff && sourceChannels.length > 0) return snapshot(voice);
 
     if (sourceChannels.length === 0) {
       const cleared = withoutVoicePhotoReferences(snapshot(voice));
@@ -109,15 +129,9 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
     }
 
     const candidates: VoicePhotoHandoffCandidate<Conversation>[] = [];
+    const smsReceiptCutoff = voiceSmsMediaCutoff({ collected: voice.collected }, cutoff);
     for (const sourceChannel of sourceChannels) {
-      const [source] = await tx.select().from(conversations)
-        .where(and(
-          eq(conversations.channel, sourceChannel),
-          eq(conversations.phoneNumber, from),
-          gte(conversations.updatedAt, cutoff),
-        ))
-        .for("update")
-        .limit(1);
+      const source = lockedSources.get(sourceChannel);
       if (!source) continue;
 
       const recentSmsMediaUrls = sourceChannel === "sms"
@@ -127,7 +141,7 @@ async function loadVoiceConversation(from: string): Promise<VoiceConversationSna
           .where(and(
             eq(twilioInboundMessages.channel, "sms"),
             eq(twilioInboundMessages.fromAddress, from),
-            gte(twilioInboundMessages.createdAt, cutoff),
+            gte(twilioInboundMessages.createdAt, smsReceiptCutoff),
             sql`jsonb_array_length(${twilioInboundMessages.mediaUrls}) > 0`,
           ))
           .orderBy(desc(twilioInboundMessages.createdAt))
@@ -203,6 +217,7 @@ async function saveVoiceConversation(
   previous: VoiceConversationSnapshot,
   update: VoiceConversationUpdate,
 ): Promise<VoiceConversationSnapshot | null> {
+  if (update.freshStart) return saveVoiceFreshStart(previous, update);
   const [row] = await db
     .update(conversations)
     .set({
@@ -317,6 +332,21 @@ async function main(): Promise<void> {
         return submission;
       },
       lookupJob: getGenerationJobByIdempotencyKey,
+      prepareFreshStart: async (from, receivedAt) => {
+        const oldCameraReferences = await getStagedCameraPhotoReferences(
+          from,
+          channelUserId(from),
+          receivedAt,
+        );
+        return {
+          references: oldCameraReferences,
+          cleanup: async () => {
+            if (oldCameraReferences.length) {
+              await clearStagedCameraPhotoReferences(from, oldCameraReferences);
+            }
+          },
+        };
+      },
       onCallStart: async ({ callSid, from, to }) => {
         try {
           await identity(from);

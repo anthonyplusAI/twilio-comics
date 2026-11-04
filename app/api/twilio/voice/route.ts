@@ -1,12 +1,15 @@
 import { type NextRequest } from "next/server";
+import { getCameraDestination } from "@/lib/browser-photo-access";
 import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
+import { getVoiceCallPhotoReadiness } from "@/lib/voice-call-photo-readiness";
 import { validateTwilioSignature } from "@/lib/twilio";
 import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
 import {
   finishVoiceVerificationStart,
   reserveVoiceVerificationStart,
 } from "@/lib/voice-verification-budget";
-import { getConversationRelayUrl, voiceHangupTwiML, voiceVerificationGatherTwiML } from "@/lib/voice-twiml";
+import { getConversationRelayUrl, voiceHangupTwiML, voiceMissingPhotoPrompt, voiceVerificationGatherTwiML } from "@/lib/voice-twiml";
 import { isVoiceVerificationConfigured, startVoiceVerification } from "@/lib/voice-verification";
 
 export const runtime = "nodejs";
@@ -39,8 +42,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     process.env.TWILIO_PHONE_NUMBER,
     process.env.TWILIO_WHATSAPP_NUMBER,
   );
-  const configuredNumber = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS)
-    .includes("voice") ? contact.phoneNumber : null;
+  const enabledChannels = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS);
+  const configuredNumber = enabledChannels.includes("voice") ? contact.phoneNumber : null;
   if (!configuredNumber || !process.env.TWILIO_ACCOUNT_SID ||
       !isVoiceVerificationConfigured() || !process.env.AUTH_SECRET ||
       !getConversationRelayUrl()) {
@@ -56,6 +59,38 @@ export async function POST(request: NextRequest): Promise<Response> {
     return voiceHangupTwiML(
       "Please call from a phone number that can receive text messages, then try again.",
     );
+  }
+
+  let photoMode: Awaited<ReturnType<typeof getExperienceSettings>>;
+  let browserPhotosReady = false;
+  try {
+    photoMode = await getExperienceSettings();
+    if (photoMode.voicePhotoMode !== "none" &&
+        !enabledChannels.includes("sms") && photoMode.cameraEnabled) {
+      browserPhotosReady = Boolean((await getCameraDestination(photoMode))?.callHref);
+    }
+  } catch (error) {
+    console.error("Voice photo availability check failed", error instanceof Error ? error.name : "unknown");
+    return new Response("Voice service unavailable", { status: 503 });
+  }
+  if (photoMode.voicePhotoMode === "none") {
+    return voiceHangupTwiML(
+      "Voice comics are paused because a reference photo is required. Please use a photo-enabled option on our start page.",
+    );
+  }
+  try {
+    const readiness = await getVoiceCallPhotoReadiness(params.From, photoMode);
+    if (readiness.kind === "missing") {
+      if (!enabledChannels.includes("sms") && !browserPhotosReady) {
+        return voiceHangupTwiML(
+          "A reference photo is required before a comic can be created, but photo setup is unavailable right now. Please try again later.",
+        );
+      }
+      return voiceHangupTwiML(voiceMissingPhotoPrompt(enabledChannels.includes("sms")));
+    }
+  } catch (error) {
+    console.error("Voice photo readiness check failed", error instanceof Error ? error.name : "unknown");
+    return voiceHangupTwiML("I couldn't check your photos right now. Please try your call again later.");
   }
 
   const reservation = await reserveVoiceVerificationStart({

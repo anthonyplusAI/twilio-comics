@@ -8,8 +8,13 @@ const SITE_ORIGIN = "https://comics.example";
 
 afterEach(() => vi.unstubAllEnvs());
 
-function renderPage(channels: string | undefined): string {
-  vi.stubEnv("PUBLIC_BASE_URL", `${SITE_ORIGIN}/`);
+function renderPage(
+  channels: string | undefined,
+  origin = `${SITE_ORIGIN}/`,
+  startMode?: string,
+): string {
+  vi.stubEnv("PUBLIC_BASE_URL", origin);
+  vi.stubEnv("HOME_START_ENTRY_MODE", startMode);
   vi.stubEnv("TWILIO_PHONE_NUMBER", "+14155552671");
   vi.stubEnv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+447700900123");
   vi.stubEnv("TWILIO_ENABLED_CHANNELS", channels);
@@ -42,6 +47,10 @@ function expectSingleChooserEntry(html: string): void {
   expect(html).toMatch(/<svg\b[^>]*role="img"[^>]*>\s*<title>[^<]*(?:scan|start|choose)/i);
 }
 
+function hasStartButton(html: string): boolean {
+  return /<a\b[^>]*class="[^"]*startAction[^"]*"[^>]*href="\/start"/.test(html);
+}
+
 describe("marketing homepage entry point", () => {
   it.each([
     "sms",
@@ -71,12 +80,44 @@ describe("marketing homepage entry point", () => {
     expect(html).toContain('href="https://www.twilio.com/en-us/legal/tos"');
   });
 
-  it("places the start QR beside the main action before the comic preview", () => {
+  it("defaults to a tappable QR as the only home start control", () => {
     const html = renderPage("sms,voice");
 
-    expect(html.indexOf("Scan to choose how to start"))
-      .toBeGreaterThan(html.indexOf("Choose how to start"));
+    expect(html.match(/href="\/start"/g)).toHaveLength(1);
+    expect(hasStartButton(html)).toBe(false);
+    expect(html).toMatch(/<a\b[^>]*href="\/start"[^>]*>[\s\S]*?<svg\b[^>]*role="img"/);
     expect(html.indexOf("Scan to choose how to start"))
       .toBeLessThan(html.indexOf("Imagine what yours could be"));
+  });
+
+  it("supports a button without a QR", () => {
+    const html = renderPage("sms,voice", `${SITE_ORIGIN}/`, "button");
+
+    expect(hasStartButton(html)).toBe(true);
+    expect(qrForegroundPath(html)).toBeUndefined();
+    expect(html.match(/href="\/start"/g)).toHaveLength(1);
+  });
+
+  it("supports both a button and a tappable QR", () => {
+    const html = renderPage("sms,voice", `${SITE_ORIGIN}/`, "both");
+
+    expect(hasStartButton(html)).toBe(true);
+    expect(qrForegroundPath(html)).toBeDefined();
+    expect(html.match(/href="\/start"/g)).toHaveLength(2);
+  });
+
+  it("introduces reference photos before the story idea", () => {
+    const html = renderPage("sms,voice");
+
+    expect(html).toContain("Add a reference photo");
+    expect(html.indexOf("Add a reference photo")).toBeLessThan(html.indexOf("Share your idea"));
+  });
+
+  it("keeps the start link usable when the public QR origin is invalid", () => {
+    const html = renderPage("sms", "not-a-url");
+
+    expect(html).toContain('href="/start"');
+    expect(hasStartButton(html)).toBe(true);
+    expect(html).not.toContain("Scan to choose how to start");
   });
 });

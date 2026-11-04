@@ -15,14 +15,17 @@ import {
 } from "@/components/ui/dialog"
 import { OPENAI_LINK } from "@/lib/utils"
 import { useApiKey } from "@/hooks/use-api-key"
+import styles from "./api-key-modal.module.css"
 
 interface ApiKeyModalProps {
+  theme?: "studio"
   isOpen: boolean
   onClose: () => void
   onSubmit: (key: string) => void
 }
 
-export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
+export function ApiKeyModal({ theme, isOpen, onClose, onSubmit }: ApiKeyModalProps) {
+  const isStudio = theme === "studio"
   const [apiKeyInput, setApiKeyInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +92,7 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="border border-border/50 rounded-xl bg-background max-w-sm p-6 overflow-hidden">
+      <DialogContent className={isStudio ? styles.studioDialog : "border border-border/50 rounded-xl bg-background max-w-sm p-6 overflow-hidden"}>
         <AnimatePresence>
           {success && (
             <motion.div
@@ -98,21 +101,21 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
-              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background rounded-xl"
+              className={isStudio ? styles.studioSuccess : "absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background rounded-xl"}
             >
               <motion.div
                 initial={{ scale: 0.5, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ type: "spring", stiffness: 300, damping: 20, delay: 0.05 }}
-                className="w-14 h-14 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center"
+                className={isStudio ? styles.studioSuccessMark : "w-14 h-14 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center"}
               >
-                <Check className="w-7 h-7 text-emerald-400" strokeWidth={2.5} />
+                <Check className={isStudio ? styles.studioSuccessIcon : "w-7 h-7 text-emerald-400"} strokeWidth={2.5} />
               </motion.div>
               <motion.p
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.15, duration: 0.2 }}
-                className="text-sm font-medium text-white"
+                className={isStudio ? styles.studioSuccessTitle : "text-sm font-medium text-white"}
               >
                 API key saved
               </motion.p>
@@ -120,24 +123,26 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.2, duration: 0.2 }}
-                className="text-xs text-muted-foreground"
+                className={isStudio ? styles.studioSuccessText : "text-xs text-muted-foreground"}
               >
                 You're all set for unlimited generation
               </motion.p>
             </motion.div>
           )}
         </AnimatePresence>
-        <DialogHeader className="mb-4">
+        <DialogHeader className={isStudio ? styles.studioHeader : "mb-4"}>
           <div className="flex items-center gap-2 mb-1">
-            <Key className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <DialogTitle className="text-base font-semibold text-white leading-none">
+            <Key className={isStudio ? styles.studioKeyIcon : "w-4 h-4 text-muted-foreground flex-shrink-0"} />
+            <DialogTitle className={isStudio ? styles.studioTitle : "text-base font-semibold text-white leading-none"}>
               {existingKey ? "Your API key" : "Add your API key"}
             </DialogTitle>
           </div>
-          <DialogDescription className="text-sm text-muted-foreground leading-snug pl-6">
+          <DialogDescription className={isStudio ? styles.studioDescription : "text-sm text-muted-foreground leading-snug pl-6"}>
             {existingKey
               ? "Update or remove your OpenAI key."
-              : "You've used all your free credits. Add your key for unlimited use."}
+              : isStudio
+                ? "Use your own OpenAI key for comic generation. You can add it at any time."
+                : "You've used all your free credits. Add your key for unlimited use."}
           </DialogDescription>
         </DialogHeader>
 
@@ -151,9 +156,9 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.18, ease: "easeOut" }}
-                  className="absolute bottom-full left-0 mb-1.5 text-xs text-red-400 flex items-center gap-1.5 pointer-events-none"
+                  className={isStudio ? styles.studioError : "absolute bottom-full left-0 mb-1.5 text-xs text-red-400 flex items-center gap-1.5 pointer-events-none"}
                 >
-                  <span className="inline-block w-1 h-1 rounded-full bg-red-400 flex-shrink-0" />
+                  <span className={isStudio ? styles.studioErrorDot : "inline-block w-1 h-1 rounded-full bg-red-400 flex-shrink-0"} />
                   {error}
                 </motion.p>
               )}
@@ -167,16 +172,19 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
             >
               <Input
                 type="password"
+                aria-label="OpenAI API key"
                 value={apiKeyInput}
                 onChange={(e) => { setApiKeyInput(e.target.value); setError(null) }}
                 placeholder="sk-••••••••••••••••"
-                className={`bg-secondary border-border/50 text-white placeholder-muted-foreground/40 py-5 pr-10 font-mono text-sm transition-colors duration-200 ${error ? "border-red-500/60 focus-visible:ring-red-500/20" : ""}`}
+                className={isStudio
+                  ? `${styles.studioInput} ${error ? styles.studioInputError : ""}`
+                  : `bg-secondary border-border/50 text-white placeholder-muted-foreground/40 py-5 pr-10 font-mono text-sm transition-colors duration-200 ${error ? "border-red-500/60 focus-visible:ring-red-500/20" : ""}`}
               />
               {apiKeyInput && (
                 <button
                   type="button"
                   onClick={() => setApiKeyInput("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-white transition-colors"
+                  className={isStudio ? styles.studioClear : "absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-white transition-colors"}
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -188,7 +196,7 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
             href={OPENAI_LINK}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-white transition-colors"
+            className={isStudio ? styles.studioLink : "inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-white transition-colors"}
           >
             Get an OpenAI API key
             <ExternalLink className="h-3 w-3" />
@@ -199,25 +207,27 @@ export function ApiKeyModal({ isOpen, onClose, onSubmit }: ApiKeyModalProps) {
               type="button"
               variant="outline"
               onClick={existingKey ? handleDelete : onClose}
-              className={`flex-1 border-border/50 hover:border-border transition-colors ${
-                existingKey
-                  ? "text-red-400 border-red-500/30 hover:bg-red-500/10 hover:border-red-500/50 hover:text-red-300"
-                  : "text-muted-foreground hover:text-white hover:bg-secondary"
-              }`}
+              className={isStudio
+                ? `${styles.studioSecondaryButton} ${existingKey ? styles.studioDeleteButton : ""}`
+                : `flex-1 border-border/50 hover:border-border transition-colors ${
+                    existingKey
+                      ? "text-red-400 border-red-500/30 hover:bg-red-500/10 hover:border-red-500/50 hover:text-red-300"
+                      : "text-muted-foreground hover:text-white hover:bg-secondary"
+                  }`}
             >
               {existingKey ? "Delete" : "Later"}
             </Button>
             <Button
               type="submit"
               disabled={!apiKeyInput.trim() || isLoading}
-              className="flex-[2] gap-2 bg-white hover:bg-neutral-200 text-black font-medium"
+              className={isStudio ? styles.studioPrimaryButton : "flex-[2] gap-2 bg-white hover:bg-neutral-200 text-black font-medium"}
             >
               {isLoading ? "Checking…" : "Save key"}
               {!isLoading && <ArrowRight className="w-4 h-4" />}
             </Button>
           </div>
 
-          <p className="text-xs text-muted-foreground/50 text-center pt-1">
+          <p className={isStudio ? styles.studioFinePrint : "text-xs text-muted-foreground/50 text-center pt-1"}>
             Stored locally and sent only when validating or generating
           </p>
         </form>

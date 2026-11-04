@@ -103,6 +103,45 @@ describe("ConversationRelay action callback", () => {
     expect(xml).not.toMatch(/free comic limit/i);
   });
 
+  it.each([
+    ["new_draft", /new comic.*ready/i],
+    ["new_draft_queued", /wait for.*result text/i],
+    ["draft_cancelled", /draft.*cancelled/i],
+  ] as const)("gives photo instructions after %s closes the call", async (result, lead) => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice,sms");
+    const { POST } = await import("@/app/api/twilio/voice/action/route");
+    const response = await POST(signedAction({
+      CallSid: CALL_SID,
+      CallStatus: "in-progress",
+      From: "+15551234567",
+      To: "+14155552671",
+      HandoffData: JSON.stringify({ result, turn: 2 }),
+    }));
+    const xml = await response.text();
+
+    expect(xml).toMatch(lead);
+    expect(xml).toMatch(/text one or two fresh reference photos/i);
+    expect(xml).toMatch(/wait for.*Photo saved.*call again from the same number/i);
+    expect(xml).toContain("<Hangup/>");
+    if (result === "draft_cancelled") expect(xml).toMatch(/text NEW to this number/i);
+    expect(h.recordVoiceCallEnd).toHaveBeenCalledWith(expect.objectContaining({ status: result }));
+  });
+
+  it("sends a caller to browser photo setup when Relay finds no photo and SMS is off", async () => {
+    const { POST } = await import("@/app/api/twilio/voice/action/route");
+    const response = await POST(signedAction({
+      CallSid: CALL_SID,
+      CallStatus: "in-progress",
+      HandoffData: JSON.stringify({ result: "missing_photo" }),
+    }));
+    const xml = await response.text();
+
+    expect(xml).toMatch(/photo page on our website/i);
+    expect(xml).toMatch(/one or two.*reference photos/i);
+    expect(xml).toMatch(/call again from the same number/i);
+    expect(xml).toContain("<Hangup/>");
+  });
+
   it("explains an unexpected socket disconnect without promising a new comic", async () => {
     const { POST } = await import("@/app/api/twilio/voice/action/route");
     const response = await POST(signedAction({

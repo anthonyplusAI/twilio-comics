@@ -18,6 +18,17 @@ export interface VoicePhotoDraft {
   activeStoryId: string | null;
 }
 
+/** Old MMS receipts do not become fresh just because later SMS text touched the draft. */
+export function voiceSmsMediaCutoff(
+  voice: Pick<VoicePhotoDraft, "collected">,
+  windowStart: Date,
+): Date {
+  const resetAt = Date.parse(voice.collected.photoHandoffResetAt || "");
+  return Number.isFinite(resetAt)
+    ? new Date(Math.max(windowStart.getTime(), resetAt))
+    : windowStart;
+}
+
 const CAMERA_REFERENCE = /^blob:uploads\/twilio_[a-f0-9]{32}\/camera\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.jpg$/;
 
 export type PhotoHandoffSourceChannel = "sms" | "camera";
@@ -137,6 +148,9 @@ export function planVoicePhotoHandoff({
   }
 
   const recentSmsUrls = new Set(recentSmsMediaUrls);
+  const ignoredCameraReferences = new Set(voice.collected.ignoredCameraReferences || []);
+  const resetAt = Date.parse(voice.collected.photoHandoffResetAt || "");
+  const cameraSavedAt = source.collected.cameraReferenceSavedAt;
   const stagedReferences = Array.isArray(source.collected?.characterImageUrls)
     ? source.collected.characterImageUrls
     : [];
@@ -144,22 +158,34 @@ export function planVoicePhotoHandoff({
     .filter((reference): reference is string => typeof reference === "string" &&
       (sourceChannel === "sms"
         ? isTwilioMediaUrl(reference) && recentSmsUrls.has(reference)
-        : CAMERA_REFERENCE.test(reference)))
+        : CAMERA_REFERENCE.test(reference) && !ignoredCameraReferences.has(reference) &&
+          (!Number.isFinite(resetAt) ||
+            (typeof cameraSavedAt?.[reference] === "number" && cameraSavedAt[reference] >= resetAt))))
     .slice(0, 2);
   if (references.length === 0) return null;
 
   const fingerprint = photoFingerprint(sourceChannel, references);
   if (voice.collected.photoHandoffFingerprint === fingerprint) return "unchanged";
 
-  const resetAt = Date.parse(voice.collected.photoHandoffResetAt || "");
-  if (Number.isFinite(resetAt) && source.updatedAt.getTime() <= resetAt) return null;
+  // An MMS attached to the texted NEW can share its millisecond timestamp.
+  // The receipt cutoff still excludes earlier media from that SMS source.
+  if (Number.isFinite(resetAt) && source.updatedAt.getTime() < resetAt) return null;
 
   // A finished Voice comic is preserved until the person stages new photos.
   // New photos signal a fresh comic, while an unfinished call keeps its idea.
   if (voice.state === "done") {
     return {
       state: "collecting",
-      collected: { characterImageUrls: references, photoHandoffFingerprint: fingerprint },
+      collected: {
+        ...(voice.collected.photoHandoffResetAt
+          ? { photoHandoffResetAt: voice.collected.photoHandoffResetAt }
+          : {}),
+        ...(voice.collected.ignoredCameraReferences?.length
+          ? { ignoredCameraReferences: voice.collected.ignoredCameraReferences }
+          : {}),
+        characterImageUrls: references,
+        photoHandoffFingerprint: fingerprint,
+      },
       activeStoryId: null,
     };
   }

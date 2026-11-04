@@ -3,10 +3,13 @@ import { NextRequest } from "next/server";
 import twilio from "twilio";
 import { POST } from "@/app/api/twilio/voice/route";
 
-const { startVoiceVerification, reserveVoiceVerificationStart, finishVoiceVerificationStart } = vi.hoisted(() => ({
+const { startVoiceVerification, reserveVoiceVerificationStart, finishVoiceVerificationStart, getExperienceSettings, getCameraDestination, getVoiceCallPhotoReadiness } = vi.hoisted(() => ({
   startVoiceVerification: vi.fn(),
   reserveVoiceVerificationStart: vi.fn(),
   finishVoiceVerificationStart: vi.fn(),
+  getExperienceSettings: vi.fn(),
+  getCameraDestination: vi.fn(),
+  getVoiceCallPhotoReadiness: vi.fn(),
 }));
 vi.mock("@/lib/voice-verification", () => ({
   isVoiceVerificationConfigured: () => Boolean(process.env.TWILIO_VERIFY_SERVICE_SID),
@@ -16,6 +19,9 @@ vi.mock("@/lib/voice-verification-budget", () => ({
   reserveVoiceVerificationStart,
   finishVoiceVerificationStart,
 }));
+vi.mock("@/lib/photo-experience-settings", () => ({ getExperienceSettings }));
+vi.mock("@/lib/browser-photo-access", () => ({ getCameraDestination }));
+vi.mock("@/lib/voice-call-photo-readiness", () => ({ getVoiceCallPhotoReadiness }));
 
 const BASE = "https://comics.example";
 const TOKEN = "test-twilio-auth-token";
@@ -49,6 +55,9 @@ beforeEach(() => {
   startVoiceVerification.mockResolvedValue(undefined);
   reserveVoiceVerificationStart.mockResolvedValue({ allowed: true, sendCode: true });
   finishVoiceVerificationStart.mockResolvedValue(undefined);
+  getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
+  getCameraDestination.mockResolvedValue(null);
+  getVoiceCallPhotoReadiness.mockResolvedValue({ kind: "photos", count: 1 });
   vi.stubEnv("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
   vi.stubEnv("TWILIO_AUTH_TOKEN", TOKEN);
   vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", `VA${"d".repeat(32)}`);
@@ -62,12 +71,64 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("inbound voice verification", () => {
+  it("asks a caller without a saved photo to text photos before sending a code", async () => {
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "missing" });
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    const xml = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(xml).toMatch(/text one or two photos/i);
+    expect(xml).toMatch(/photo saved/i);
+    expect(xml).toMatch(/call again/i);
+    expect(xml).toContain("<Hangup");
+    expect(reserveVoiceVerificationStart).not.toHaveBeenCalled();
+    expect(startVoiceVerification).not.toHaveBeenCalled();
+  });
+
+  it("lets a caller verify to continue a finished comic without a new photo", async () => {
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "continuation", phase: "finished" });
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    expect(await response.text()).toContain("<Gather");
+    expect(startVoiceVerification).toHaveBeenCalledOnce();
+  });
+
+  it("directs a browser-only caller to the photo page before verification", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
+    getExperienceSettings.mockResolvedValueOnce({ voicePhotoMode: "camera", cameraEnabled: true });
+    getCameraDestination.mockResolvedValueOnce({
+      phoneNumber: PHONE_NUMBER,
+      smsHref: null,
+      callHref: `tel:${PHONE_NUMBER}`,
+    });
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "missing" });
+
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    const xml = await response.text();
+    expect(xml).toMatch(/photo page/i);
+    expect(xml).toContain("<Hangup");
+    expect(xml).not.toMatch(/Text one or two photos/i);
+    expect(startVoiceVerification).not.toHaveBeenCalled();
+  });
+
+  it("speaks a retry message if saved photo status cannot be checked", async () => {
+    getVoiceCallPhotoReadiness.mockRejectedValueOnce(new Error("Database unavailable"));
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    const xml = await response.text();
+    expect(xml).toMatch(/check your photos/i);
+    expect(xml).toContain("<Hangup");
+    expect(startVoiceVerification).not.toHaveBeenCalled();
+  });
+
   it("starts SMS verification for the signed caller before collecting keypad digits", async () => {
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
     const xml = await response.text();
 
     expect(response.status).toBe(200);
     expect(startVoiceVerification).toHaveBeenCalledExactlyOnceWith(CALL_PARAMS.From);
+    expect(getVoiceCallPhotoReadiness).toHaveBeenCalledExactlyOnceWith(
+      CALL_PARAMS.From,
+      { voicePhotoMode: "sms", cameraEnabled: false },
+    );
     expect(reserveVoiceVerificationStart).toHaveBeenCalledWith({
       callSid: CALL_SID,
       fromAddress: CALL_PARAMS.From,
@@ -86,6 +147,44 @@ describe("inbound voice verification", () => {
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS, false));
     expect(response.status).toBe(403);
     expect(startVoiceVerification).not.toHaveBeenCalled();
+    expect(getExperienceSettings).not.toHaveBeenCalled();
+  });
+
+  it("hangs up before Verify when Voice photo use is paused", async () => {
+    getExperienceSettings.mockResolvedValueOnce({ voicePhotoMode: "none", cameraEnabled: true });
+
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    const xml = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(xml).toMatch(/reference photos?|photo setup/i);
+    expect(xml).toContain("<Hangup");
+    expect(getCameraDestination).not.toHaveBeenCalled();
+    expect(reserveVoiceVerificationStart).not.toHaveBeenCalled();
+    expect(startVoiceVerification).not.toHaveBeenCalled();
+  });
+
+  it("hangs up before Verify when Voice has neither MMS nor browser photo intake", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "missing" });
+
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    const xml = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(xml).toMatch(/reference photos?|photo setup/i);
+    expect(xml).toContain("<Hangup");
+    expect(reserveVoiceVerificationStart).not.toHaveBeenCalled();
+    expect(startVoiceVerification).not.toHaveBeenCalled();
+  });
+
+  it("resumes a saved Voice photo draft even after new photo intake is disabled", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "photos", count: 1 });
+
+    const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
+    expect(await response.text()).toContain("<Gather");
+    expect(startVoiceVerification).toHaveBeenCalledOnce();
   });
 
   it("rejects a signed call from another Twilio account", async () => {
@@ -129,11 +228,18 @@ describe("inbound voice verification", () => {
     expect(startVoiceVerification).not.toHaveBeenCalled();
   });
 
-  it("starts a selected Voice call when inbound SMS is disabled", async () => {
+  it("starts a selected Voice call with browser photo intake when inbound SMS is disabled", async () => {
     vi.stubEnv("TWILIO_ENABLED_CHANNELS", "voice");
+    getExperienceSettings.mockResolvedValueOnce({ voicePhotoMode: "camera", cameraEnabled: true });
+    getCameraDestination.mockResolvedValueOnce({
+      phoneNumber: PHONE_NUMBER,
+      smsHref: null,
+      callHref: `tel:${PHONE_NUMBER}`,
+    });
     const response = await POST(signedRequest("/api/twilio/voice", CALL_PARAMS));
     expect(response.status).toBe(200);
     expect(startVoiceVerification).toHaveBeenCalledOnce();
+    expect(getCameraDestination).toHaveBeenCalledWith({ voicePhotoMode: "camera", cameraEnabled: true });
   });
 
   it("rejects a signed call to an unrelated number or with a malformed caller", async () => {

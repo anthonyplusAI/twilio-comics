@@ -27,6 +27,8 @@ import {
 import { createComicStory, ComicServiceError } from "@/lib/comic-service";
 import { generateComicRequestSchema } from "@/lib/browser-generation-request";
 
+const PHOTO_REQUIRED_MESSAGE = "Add at least one reference photo before generating your comic.";
+
 export async function POST(request: NextRequest) {
   let quotaClaimKey: string | null = null;
   async function releasePendingQuota(): Promise<void> {
@@ -51,9 +53,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const session = await auth();
-    const userId = session?.user?.id;
+    const userId = session?.user?.id?.trim();
 
-    if (!userId) {
+    if (!userId || session?.user?.studioAuthorized !== true) {
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 },
@@ -84,6 +86,10 @@ export async function POST(request: NextRequest) {
       isContinuation,
       previousContext,
     } = parsed.data;
+
+    if (!storyId && characterImages.length === 0) {
+      return NextResponse.json({ error: PHOTO_REQUIRED_MESSAGE }, { status: 400 });
+    }
 
     const keyChoice = chooseGenerationApiKey(apiKey, process.env.OPENAI_API_KEY);
     if (!keyChoice.valid) {
@@ -140,6 +146,12 @@ export async function POST(request: NextRequest) {
       } catch (error) {
         await releasePendingQuota();
         if (error instanceof ComicServiceError) {
+          if (error.type === "missing_reference") {
+            return NextResponse.json(
+              { error: PHOTO_REQUIRED_MESSAGE, errorType: "missing_reference" },
+              { status: 400 },
+            );
+          }
           if (error.type === "content_policy") {
             return NextResponse.json(
               { error: getContentPolicyErrorMessage(), errorType: "content_policy" },

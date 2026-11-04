@@ -2,18 +2,20 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Upload, X, Check, ArrowRight, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import Image from "next/image";
+import { Camera, ImagePlus, X, ArrowRight, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadFileToBlob } from "@/lib/blob-upload-client";
 import { signIn, useSession } from "next-auth/react";
 import { SignInButton } from "@/components/auth/sign-in-button";
+import { CameraCaptureButton } from "@/components/camera/camera-capture";
 import { COMIC_STYLES } from "@/lib/constants";
 import { useKeyboardShortcut } from "@/hooks/use-keyboard-shortcut";
 import { useApiKey } from "@/hooks/use-api-key";
 import { isContentPolicyViolation } from "@/lib/utils";
 import { ApiKeyModal } from "@/components/api-key-modal";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
+import styles from "./comic-creation-form.module.css";
 
 interface ComicCreationFormProps {
   prompt: string;
@@ -28,12 +30,40 @@ interface ComicCreationFormProps {
 
 const DEFAULT_STYLE = 'noir';
 const STYLE_STORAGE_KEY = 'comic-style-preference';
+const PROMPT_STORAGE_KEY = 'comic-prompt-draft';
+const MAX_REFERENCE_PHOTOS = 2;
+const MAX_REFERENCE_PHOTO_SIZE = 5 * 1024 * 1024;
+const SUPPORTED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+]);
+const SUPPORTED_IMAGE_EXTENSION = /\.(?:jpe?g|png|webp|heic|heif)$/i;
+
+function isSupportedReferencePhoto(file: File): boolean {
+  const mime = file.type.toLowerCase();
+  const hasSupportedType = SUPPORTED_IMAGE_TYPES.has(mime) ||
+    ((mime === "" || mime === "application/octet-stream") && SUPPORTED_IMAGE_EXTENSION.test(file.name));
+  return hasSupportedType && file.size > 0 && file.size <= MAX_REFERENCE_PHOTO_SIZE;
+}
+
+function isHeifPhoto(file: File): boolean {
+  const mime = file.type.toLowerCase();
+  return mime === "image/heic" || mime === "image/heif" || /\.(?:heic|heif)$/i.test(file.name);
+}
+
+function photoDisplayName(file: File, index: number): string {
+  return file.name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120) || `Reference photo ${index + 1}`;
+}
 
 export function ComicCreationForm({
   prompt,
   setPrompt,
-  style: initialStyle,
-  setStyle: setParentStyle,
+  style,
+  setStyle,
   characterFiles,
   setCharacterFiles,
   isLoading,
@@ -42,37 +72,19 @@ export function ComicCreationForm({
   const router = useRouter();
   const [loadingStep, setLoadingStep] = useState(0);
   const { toast } = useToast();
-  const { status } = useSession();
+  const { data: session, status } = useSession();
   const isLoaded = status !== "loading";
-  const isSignedIn = status === "authenticated";
+  const hasStudioSession = status === "authenticated" &&
+    session?.user?.studioAuthorized === true &&
+    typeof session.user.id === "string" &&
+    session.user.id.trim().length > 0;
   const [apiKey, setApiKey] = useApiKey();
   const hasApiKey = !!apiKey;
-  const [previews, setPreviews] = useState<string[]>([]);
-  const [showPreview, setShowPreview] = useState<number | null>(null);
-  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
+  const [previews, setPreviews] = useState<(string | null)[]>([]);
   const [creditsRemaining, setCreditsRemaining] = useState<number | "unlimited" | null>(null);
   const [showApiModal, setShowApiModal] = useState(false);
-
-  // Initialize style with initial value, load from localStorage after mount
-  const [style, setStyle] = useState(initialStyle || DEFAULT_STYLE);
+  const [stylePreferenceLoaded, setStylePreferenceLoaded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const PROMPT_STORAGE_KEY = 'comic-prompt-draft';
-
-
-  useEffect(() => {
-    if (isLoading) {
-      setShowStyleDropdown(false);
-    }
-  }, [isLoading]);
-
-  useEffect(() => {
-    // Auto-focus the textarea when component mounts
-    if (textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, []);
 
   // Persist prompt to localStorage
   useEffect(() => {
@@ -94,20 +106,35 @@ export function ComicCreationForm({
   // Load style preference from localStorage on mount
   useEffect(() => {
     const saved = localStorage.getItem(STYLE_STORAGE_KEY);
-    if (saved) {
+    if (saved && COMIC_STYLES.some((option) => option.id === saved)) {
       setStyle(saved);
     }
-  }, []);
+    setStylePreferenceLoaded(true);
+  }, [setStyle]);
 
-  // Save style to localStorage and sync with parent
+  // The parent owns the selected style so preview controls and generation stay in sync.
   useEffect(() => {
-    localStorage.setItem(STYLE_STORAGE_KEY, style);
-    setParentStyle(style);
-  }, [style, setParentStyle]);
+    if (stylePreferenceLoaded) {
+      localStorage.setItem(STYLE_STORAGE_KEY, style || DEFAULT_STYLE);
+    }
+  }, [style, stylePreferenceLoaded]);
+
+  useEffect(() => {
+    const urls = characterFiles.map((file) => {
+      if (isHeifPhoto(file)) return null;
+      try {
+        return URL.createObjectURL(file);
+      } catch {
+        return null;
+      }
+    });
+    setPreviews(urls);
+    return () => urls.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+  }, [characterFiles]);
 
   // Fetch credits on mount
   useEffect(() => {
-    if (isSignedIn && !hasApiKey) {
+    if (hasStudioSession && !hasApiKey) {
       const fetchCredits = async () => {
         try {
           const response = await fetch('/api/check-credits', {
@@ -129,72 +156,51 @@ export function ComicCreationForm({
     } else if (hasApiKey) {
       setCreditsRemaining(null); // Unlimited
     }
-  }, [isSignedIn, hasApiKey]);
+  }, [hasStudioSession, hasApiKey]);
 
   // Keyboard shortcut for form submission
   useKeyboardShortcut(() => {
-    if (!isLoading && prompt.trim()) {
-      if (!isSignedIn) {
+    if (!isLoading && prompt.trim() && characterFiles.length > 0) {
+      if (!hasStudioSession) {
         void signIn("google", { redirectTo: window.location.href });
       } else {
-        handleCreate();
+        void handleCreate();
       }
     }
   }, { disabled: isLoading || !isLoaded });
 
-  const handleFiles = (newFiles: FileList | null) => {
-    if (!newFiles) return;
+  const addPhotos = (files: File[]) => {
+    if (!hasStudioSession || isLoading) return;
+    const supported = files.filter(isSupportedReferencePhoto);
+    if (supported.length !== files.length) {
+      toast({
+        title: "Choose a supported photo",
+        description: "Use a JPG, PNG, WebP, HEIC, or HEIF photo up to 5 MB.",
+        variant: "destructive",
+      });
+    }
 
-    const validFiles = Array.from(newFiles).filter((file) =>
-      file.type.startsWith("image/")
-    );
-    const totalFiles = [...characterFiles, ...validFiles].slice(0, 2); // Max 2 files
-
-    setCharacterFiles(totalFiles);
-
-    // Generate previews for all files
-    const newPreviews: string[] = [];
-    totalFiles.forEach((file, index) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        newPreviews[index] = e.target?.result as string;
-        if (newPreviews.filter(Boolean).length === totalFiles.length) {
-          setPreviews([...newPreviews]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    const availableSlots = MAX_REFERENCE_PHOTOS - characterFiles.length;
+    const nextPhotos = supported.slice(0, availableSlots);
+    if (nextPhotos.length) setCharacterFiles([...characterFiles, ...nextPhotos]);
+    if (supported.length > availableSlots) {
+      toast({ title: "Two photos maximum", description: "Remove a photo before adding another one." });
+    }
   };
 
   const removeFile = (index: number) => {
-    const newFiles = characterFiles.filter((_, i) => i !== index);
-    const newPreviews = previews.filter((_, i) => i !== index);
-    setCharacterFiles(newFiles);
-    setPreviews(newPreviews);
-    setShowPreview(null);
+    setCharacterFiles(characterFiles.filter((_, i) => i !== index));
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   };
 
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (!target.closest(".dropdown-container")) {
-        setShowStyleDropdown(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
   const handleCreate = async () => {
-    if (!isLoaded) {
+    if (!isLoaded || isLoading) {
       return;
     }
 
-    if (!isSignedIn) {
+    if (!hasStudioSession) {
       void signIn("google", { redirectTo: window.location.href });
       return;
     }
@@ -203,6 +209,16 @@ export function ComicCreationForm({
       toast({
         title: "Prompt required",
         description: "Please enter a prompt to generate your comic",
+        variant: "destructive",
+        duration: 3000,
+      });
+      return;
+    }
+
+    if (characterFiles.length === 0) {
+      toast({
+        title: "Reference photo required",
+        description: "Add at least one reference photo before generating your comic.",
         variant: "destructive",
         duration: 3000,
       });
@@ -318,213 +334,238 @@ export function ComicCreationForm({
     "Finishing up...",
   ];
 
+  const selectedStyle = style || DEFAULT_STYLE;
+  const photoSlotsAvailable = characterFiles.length < MAX_REFERENCE_PHOTOS;
+  const canAddPhotos = hasStudioSession && !isLoading && photoSlotsAvailable;
+  const canGenerate = hasStudioSession && !isLoading && Boolean(prompt.trim()) && characterFiles.length > 0;
+  const actionHint = !isLoaded
+    ? "Checking sign-in…"
+    : !hasStudioSession
+      ? "Sign in, then add a photo and your idea."
+      : characterFiles.length === 0
+        ? "Add a photo to make your comic personal."
+        : !prompt.trim()
+          ? "Write your idea to continue."
+          : "Your photos and idea are ready.";
+
   return (
-    <>
-      <div className="relative glass-panel p-0.5 sm:p-1 rounded-xl group focus-within:border-indigo/30 transition-colors">
-        <div className="bg-background/80 rounded-lg p-3 sm:p-4 border border-border/50">
-          <div className="flex justify-between items-center mb-2 sm:mb-3">
-            <label className="text-[10px] uppercase text-muted-foreground tracking-[0.02em] font-medium">
-              Prompt
-            </label>
+    <section className={styles.form} aria-label="Create your comic">
+      <div className={styles.formHeader}>
+        <p className={styles.brandLine}>Twilio Comics Studio</p>
+        <h2>Create your comic</h2>
+        <p>Use your own photos so the people in the story look like you.</p>
+      </div>
+
+      <div className={styles.formBody}>
+        {isLoaded && !hasStudioSession && (
+          <div className={styles.signInGate}>
+            <p>Sign in with Google to add photos and create your comic.</p>
+            <SignInButton className={styles.signInGateButton}>
+              Sign in with Google <ArrowRight size={18} aria-hidden="true" />
+            </SignInButton>
+          </div>
+        )}
+        <section className={styles.stepSection} aria-labelledby="studio-photos-title">
+          <div className={styles.stepHeading}>
+            <span className={styles.stepNumber} aria-hidden="true">1</span>
+            <div className={styles.stepCopy}>
+              <h3 id="studio-photos-title">Add 1 or 2 reference photos</h3>
+              <p>First photo required. Add a second for another person or look.</p>
+            </div>
           </div>
 
-          <textarea
-            ref={textareaRef}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value.slice(
-              0, MAX_USER_PROMPT))
-            }
-            placeholder="A cyberpunk detective standing in neon rain, holding a glowing datapad, moody lighting, noir style..."
-            disabled={isLoading}
-            maxLength={MAX_USER_PROMPT}
-            className="w-full bg-transparent border-none text-sm text-white placeholder-muted-foreground/50 focus:ring-0 focus:outline-none resize-none h-16 leading-relaxed disabled:opacity-50 disabled:cursor-not-allowed"
-          />
-
-          <div className="mt-3 pt-3 border-t border-border/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-2">
-            <div className="flex items-center gap-2 flex-1 min-w-0 w-full sm:w-auto">
-              {characterFiles.length > 0 ? (
-                <div className="flex items-center gap-2">
-                  {previews.map((preview, index) => (
-                    <div key={index} className="relative group/thumb">
-                      <button
-                        onClick={() => setShowPreview(index)}
-                        className="w-8 h-8 rounded-md overflow-hidden border border-border/50 hover:border-indigo/50 transition-colors"
-                      >
-                        <img
-                          src={preview || "/placeholder.svg"}
-                          alt={`Character ${index + 1}`}
-                          className="w-full h-full object-cover"
+          <div className={styles.photoGrid} aria-label="Reference photos">
+            {[0, 1].map((index) => {
+              const file = characterFiles[index];
+              return (
+                <div
+                  key={index}
+                  className={`${styles.photoSlot} ${file ? styles.photoSlotFilled : ""}`}
+                >
+                  {file ? (
+                    <>
+                      {previews[index] ? (
+                        <Image
+                          src={previews[index]}
+                          alt={`Reference photo ${index + 1}`}
+                          width={300}
+                          height={240}
+                          unoptimized
+                          className={styles.photoImage}
+                          onError={() => setPreviews((current) => current.map((preview, previewIndex) => (
+                            previewIndex === index ? null : preview
+                          )))}
                         />
-                      </button>
+                      ) : (
+                        <div className={styles.photoPending}>
+                          <ImagePlus size={26} aria-hidden="true" />
+                          <span>{previews[index] === undefined ? "Preparing preview…" : "Photo added; preview unavailable"}</span>
+                        </div>
+                      )}
+                      <span className={styles.photoFileName} title={photoDisplayName(file, index)}>
+                        {photoDisplayName(file, index)}
+                      </span>
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!isLoading) removeFile(index);
-                        }}
-                        disabled={isLoading}
-                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center opacity-0 group-hover/thumb:opacity-100 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                        type="button"
+                        className={styles.removePhoto}
+                        aria-label={`Remove reference photo ${index + 1}`}
+                        onClick={() => removeFile(index)}
+                        disabled={!hasStudioSession || isLoading}
                       >
-                        <X className="w-2.5 h-2.5 text-white" />
+                        <X size={16} aria-hidden="true" />
                       </button>
+                    </>
+                  ) : (
+                    <div className={styles.photoEmpty}>
+                      <ImagePlus size={28} strokeWidth={1.7} aria-hidden="true" />
+                      <strong>Photo {index + 1}</strong>
+                      <span>{index === 0 ? "Required" : "Optional"}</span>
                     </div>
-                  ))}
-                  {characterFiles.length < 2 && (
-                    <button
-                      onClick={() =>
-                        !isLoading && fileInputRef.current?.click()
-                      }
-                      disabled={isLoading}
-                      className="w-8 h-8 rounded-md border border-dashed border-border/50 hover:border-indigo/50 flex items-center justify-center text-muted-foreground hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-border/50 disabled:hover:text-muted-foreground"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                    </button>
                   )}
                 </div>
-              ) : (
-                <button
-                  onClick={() => !isLoading && fileInputRef.current?.click()}
-                  disabled={isLoading}
-                  className="flex items-center gap-2 text-xs text-muted-foreground hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-muted-foreground"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Upload Characters</span>
-                  <span className="text-muted-foreground/50 hidden sm:inline">
-                    (Max 2)
-                  </span>
-                </button>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-start sm:justify-end">
-              <div className="relative dropdown-container z-60">
-                <button
-                  onClick={() => {
-                    if (!isLoading) setShowStyleDropdown(!showStyleDropdown);
-                  }}
-                  disabled={isLoading}
-                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-md glass-panel glass-panel-hover transition-all text-xs text-muted-foreground hover:text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-muted-foreground"
-                >
-                  <svg
-                    className="w-3 h-3"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"
-                    />
-                  </svg>
-                  <span>{COMIC_STYLES.find((s) => s.id === style)?.name}</span>
-                </button>
-
-                {showStyleDropdown && (
-                  <div className="absolute left-0 sm:right-0 sm:left-auto bottom-full mb-2 w-40 bg-background rounded-lg p-1 z-70 shadow-2xl border border-border/50">
-                    {COMIC_STYLES.map((styleOption) => (
-                      <button
-                        key={styleOption.id}
-                        onClick={() => {
-                          setStyle(styleOption.id);
-                          setShowStyleDropdown(false);
-                        }}
-                        className={`w-full text-left px-3 py-2 rounded text-xs transition-colors flex items-center justify-between ${style === styleOption.id
-                          ? "bg-indigo/10 text-indigo"
-                          : "text-muted-foreground hover:bg-white/5 hover:text-white"
-                          }`}
-                      >
-                        <span>{styleOption.name}</span>
-                        {style === styleOption.id && (
-                          <Check className="w-3 h-3" />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+              );
+            })}
           </div>
 
+          <div className={styles.photoActions}>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!canAddPhotos}
+            >
+              <ImagePlus size={18} aria-hidden="true" />
+              Choose photo
+            </button>
+            <CameraCaptureButton
+              onCapture={(file) => addPhotos([file])}
+              disabled={!canAddPhotos}
+              title="Take a reference photo"
+              className={styles.secondaryButton}
+            >
+              <Camera size={18} aria-hidden="true" />
+              Take photo
+            </CameraCaptureButton>
+          </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif"
             multiple
-            className="hidden"
-            onChange={(e) => handleFiles(e.target.files)}
+            className={styles.fileInput}
+            aria-label="Choose reference photos"
+            onChange={(event) => {
+              if (event.target.files) addPhotos(Array.from(event.target.files));
+              event.target.value = "";
+            }}
+            disabled={!canAddPhotos}
           />
-        </div>
-      </div>
+          <p className={styles.photoMeta}>
+            <span aria-live="polite">{characterFiles.length} of 2 photos added</span>
+            <span>JPG, PNG, WebP, HEIC, or HEIF; up to 5 MB each</span>
+          </p>
+        </section>
 
-      {showPreview !== null && previews[showPreview] && (
-        <div
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-100 flex items-center justify-center p-4"
-          onClick={() => setShowPreview(null)}
-        >
-          <div className="relative max-w-2xl max-h-[80vh] glass-panel p-4 rounded-xl z-101">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="absolute top-2 right-2 h-8 w-8 hover:bg-white/10 z-102"
-              onClick={() => setShowPreview(null)}
-            >
-              <X className="w-4 h-4" />
-            </Button>
-            <img
-              src={previews[showPreview] || "/placeholder.svg"}
-              alt="Character preview"
-              className="w-full h-full object-contain rounded-lg"
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="pt-4">
-        {!isLoaded ? (
-          <div className="h-10" />
-        ) : isSignedIn ? (
-          <div className="flex items-center justify-between gap-3 w-full">
-            <Button
-              onClick={handleCreate}
-              disabled={isLoading || !prompt.trim()}
-              className="bg-white hover:bg-neutral-200 text-black px-8 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-3 tracking-tight"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm font-medium tracking-tight">
-                    {loadingSteps[loadingStep]}
-                  </span>
-                </>
-              ) : (
-                <>
-                  Generate
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </Button>
-            <div className="text-xs text-muted-foreground whitespace-nowrap">
-              {hasApiKey ? (
-                <>Using your API key (~$0.01 per comic)</>
-              ) : (
-                <>{creditsRemaining === "unlimited" ? "Unlimited generations" : creditsRemaining !== null ? `${creditsRemaining} credit${creditsRemaining === 1 ? '' : 's'} remaining` : 'Checking credits...'}</>
-              )}
+        <section className={styles.stepSection} aria-labelledby="studio-idea-title">
+          <div className={styles.stepHeading}>
+            <span className={styles.stepNumber} aria-hidden="true">2</span>
+            <div className={styles.stepCopy}>
+              <h3 id="studio-idea-title">Your comic idea</h3>
+              <p>Tell us what happens in your story.</p>
             </div>
           </div>
+          <label htmlFor="studio-idea" className={styles.srOnly}>Your comic idea</label>
+          <textarea
+            id="studio-idea"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value.slice(0, MAX_USER_PROMPT))}
+            placeholder="My friend and I explore a hidden city under the ocean..."
+            disabled={isLoading}
+            maxLength={MAX_USER_PROMPT}
+            rows={4}
+            className={styles.ideaInput}
+          />
+          <p className={styles.characterCount}>{prompt.length} / {MAX_USER_PROMPT} characters</p>
+        </section>
+
+        <section className={styles.stepSection} aria-labelledby="studio-style-title">
+          <div className={styles.stepHeading}>
+            <span className={styles.stepNumber} aria-hidden="true">3</span>
+            <div className={styles.stepCopy}>
+              <h3 id="studio-style-title">Choose a style</h3>
+              <p>Pick the look for your comic.</p>
+            </div>
+          </div>
+          <div className={styles.styleOptions} role="group" aria-label="Comic style">
+            {COMIC_STYLES.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={`${styles.styleOption} ${selectedStyle === option.id ? styles.styleOptionSelected : ""}`}
+                aria-pressed={selectedStyle === option.id}
+                onClick={() => setStyle(option.id)}
+                disabled={isLoading}
+              >
+                {option.name}
+              </button>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <div className={styles.formFooter}>
+        {!isLoaded ? (
+          <div className={styles.authPending} role="status">Checking sign-in…</div>
+        ) : hasStudioSession ? (
+          <button
+            type="button"
+            aria-label="Generate comic"
+            className={styles.generateButton}
+            onClick={() => { void handleCreate(); }}
+            disabled={!canGenerate}
+          >
+            {isLoading ? (
+              <><Loader2 size={18} className={styles.spinner} aria-hidden="true" /> {loadingSteps[loadingStep]}</>
+            ) : (
+              <>Generate comic <ArrowRight size={19} aria-hidden="true" /></>
+            )}
+          </button>
         ) : (
-          <SignInButton className="w-full sm:w-auto sm:min-w-40 bg-white hover:bg-neutral-200 text-black px-8 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-3 tracking-tight">
-            Login to create your comic
-            <ArrowRight className="w-4 h-4" />
-          </SignInButton>
+          <button type="button" aria-label="Generate comic" className={styles.generateButton} disabled>
+            Generate comic <ArrowRight size={19} aria-hidden="true" />
+          </button>
+        )}
+        <div className={styles.actionMeta}>
+          <span role="status">{actionHint}</span>
+          {hasStudioSession && (
+            <span>
+              {hasApiKey
+                ? "Using your OpenAI API key"
+                : creditsRemaining === "unlimited"
+                  ? "Unlimited generations"
+                  : creditsRemaining !== null
+                  ? `${creditsRemaining} credit${creditsRemaining === 1 ? "" : "s"} remaining`
+                  : "Checking credits…"}
+            </span>
+          )}
+        </div>
+        {hasStudioSession && (
+          <button
+            type="button"
+            className={styles.apiKeyButton}
+            onClick={() => setShowApiModal(true)}
+          >
+            {hasApiKey ? "Manage OpenAI key" : "Use my OpenAI key"}
+          </button>
         )}
       </div>
 
       <ApiKeyModal
+        theme="studio"
         isOpen={showApiModal}
         onClose={() => setShowApiModal(false)}
         onSubmit={handleApiKeySubmit}
       />
-    </>
+    </section>
   );
 }

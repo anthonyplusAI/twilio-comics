@@ -395,19 +395,32 @@ export async function recoverUnpublishedGenerationJobs(limit = 50): Promise<numb
 export async function reconcileTerminalGenerationConversations(limit = 50): Promise<number> {
   const result = await db.execute(sql`
     WITH ready AS (
-      SELECT c.id, j.status, j.story_id
+      SELECT c.id, j.status, j.story_id, j.source, j.idempotency_key, j.prompt
       FROM conversations c
-      JOIN generation_jobs j
-        ON j.recipient_address = c.phone_number
-       AND j.source = c.channel
-       AND j.idempotency_key = c.collected->>'generationRequestKey'
+      JOIN LATERAL (
+        SELECT j.status, j.story_id, j.source, j.idempotency_key, j.prompt, j.updated_at
+        FROM generation_jobs j
+        WHERE j.recipient_address = c.phone_number
+          AND j.source = c.channel
+          AND (
+            j.idempotency_key = c.collected->>'generationRequestKey'
+            OR (
+              c.collected->>'generationRequestKey' IS NULL
+              AND c.collected->>'prompt' = j.prompt
+            )
+          )
+          AND j.status IN ('succeeded', 'failed', 'quota_rejected')
+        ORDER BY j.updated_at DESC
+        LIMIT 1
+      ) j ON TRUE
       WHERE c.state = 'generating'
-        AND j.status IN ('succeeded', 'failed', 'quota_rejected')
       ORDER BY j.updated_at
       LIMIT ${Math.max(1, Math.min(limit, 100))}
     )
     UPDATE conversations c
     SET state = CASE
+          WHEN c.collected->>'newDraftRequestedAt' IS NOT NULL
+            THEN 'collecting'
           WHEN ready.status = 'succeeded' AND ready.story_id IS NOT NULL
             THEN 'done'
           WHEN ready.status = 'failed' AND ready.story_id IS NOT NULL
@@ -415,16 +428,44 @@ export async function reconcileTerminalGenerationConversations(limit = 50): Prom
           ELSE 'confirming'
         END,
         active_story_id = CASE
+          WHEN c.collected->>'newDraftRequestedAt' IS NOT NULL
+            THEN NULL
           WHEN ready.status = 'succeeded' AND ready.story_id IS NOT NULL
             THEN ready.story_id
           WHEN ready.status = 'failed' AND ready.story_id IS NOT NULL
             THEN ready.story_id
           ELSE c.active_story_id
         END,
-        collected = c.collected - 'generationRequestKey',
-        updated_at = NOW()
+        collected = CASE
+          WHEN c.collected->>'newDraftRequestedAt' IS NOT NULL AND ready.source = 'voice'
+            THEN jsonb_strip_nulls(jsonb_build_object(
+              'photoHandoffResetAt', c.collected->>'newDraftRequestedAt',
+              'ignoredCameraReferences', c.collected->'ignoredCameraReferences'
+            ))
+          WHEN c.collected->>'newDraftRequestedAt' IS NOT NULL
+            THEN jsonb_strip_nulls(jsonb_build_object(
+              'phoneRestartedAt', GREATEST(
+                COALESCE(c.collected->>'phoneRestartedAt', ''),
+                c.collected->>'newDraftRequestedAt'
+              ),
+              'phoneRestartedByMessageSid', c.collected->>'phoneRestartedByMessageSid'
+            ))
+          ELSE c.collected - 'generationRequestKey'
+        END,
+        updated_at = GREATEST(
+          date_trunc('milliseconds', NOW()),
+          date_trunc('milliseconds', c.updated_at) + INTERVAL '1 millisecond'
+        )
     FROM ready
     WHERE c.id = ready.id
+      AND c.state = 'generating'
+      AND (
+        c.collected->>'generationRequestKey' = ready.idempotency_key
+        OR (
+          c.collected->>'generationRequestKey' IS NULL
+          AND c.collected->>'prompt' = ready.prompt
+        )
+      )
     RETURNING c.id
   `);
   const rows = "rows" in result ? result.rows : result;

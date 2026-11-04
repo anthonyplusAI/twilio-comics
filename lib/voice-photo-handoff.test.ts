@@ -7,6 +7,7 @@ import {
   planVoicePhotoHandoff,
   selectVoicePhotoHandoff,
   VOICE_PHOTO_HANDOFF_WINDOW_MS,
+  voiceSmsMediaCutoff,
   withoutVoicePhotoReferences,
   type PhotoHandoffConversation,
   type VoicePhotoDraft,
@@ -16,6 +17,7 @@ const NOW = new Date("2026-10-22T12:00:00.000Z");
 const PHOTO_1 = "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages/SM123/Media/ME111";
 const PHOTO_2 = "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages/SM123/Media/ME222";
 const CAMERA_PHOTO = `blob:uploads/twilio_${"a".repeat(32)}/camera/123e4567-e89b-42d3-a456-426614174000.jpg`;
+const NEW_CAMERA_PHOTO = `blob:uploads/twilio_${"a".repeat(32)}/camera/123e4567-e89b-42d3-a456-426614174001.jpg`;
 
 function source(
   collected: PhotoHandoffConversation["collected"] = { characterImageUrls: [PHOTO_1] },
@@ -39,6 +41,71 @@ function applied(plan: ReturnType<typeof planVoicePhotoHandoff>): VoicePhotoDraf
 }
 
 describe("Voice photo handoff", () => {
+  it("requires an MMS receipt from NEW onward even if an old SMS draft is refreshed", () => {
+    const windowStart = new Date("2026-10-21T12:00:00.000Z");
+    const resetAt = "2026-10-22T11:59:00.000Z";
+    const restartedVoice = voice({ collected: { photoHandoffResetAt: resetAt } });
+    const refreshedSms = source(
+      { characterImageUrls: [PHOTO_1] },
+      { updatedAt: new Date("2026-10-22T11:59:30.000Z") },
+    );
+
+    const receiptCutoff = voiceSmsMediaCutoff(restartedVoice, windowStart);
+
+    expect(receiptCutoff).toEqual(new Date(resetAt));
+    // An MMS attached to the same texted NEW has this receipt time and is kept.
+    expect(new Date(resetAt) >= receiptCutoff).toBe(true);
+    expect(refreshedSms.updatedAt > receiptCutoff).toBe(true);
+    expect(voiceSmsMediaCutoff(voice(), windowStart)).toEqual(windowStart);
+  });
+
+  it("accepts a photo attached to texted NEW at the exact Voice reset timestamp", () => {
+    const resetAt = "2026-10-22T11:59:00.000Z";
+    const restarted = voice({ collected: { photoHandoffResetAt: resetAt } });
+    const sameTurnPhoto = source(
+      { characterImageUrls: [PHOTO_2] },
+      { updatedAt: new Date(resetAt) },
+    );
+
+    const selected = planVoicePhotoHandoff({
+      mode: "sms",
+      sourceChannel: "sms",
+      voice: restarted,
+      source: sameTurnPhoto,
+      recentSmsMediaUrls: [PHOTO_2],
+      now: NOW,
+    });
+
+    expect(selected && selected !== "unchanged" && selected.collected.characterImageUrls)
+      .toEqual([PHOTO_2]);
+  });
+
+  it("keeps the Voice reset cutoff when a later finished comic starts another photo draft", () => {
+    const resetAt = "2026-10-22T11:59:00.000Z";
+    const finished = voice({ state: "done", collected: { photoHandoffResetAt: resetAt } });
+    const camera = source(
+      {
+        characterImageUrls: [CAMERA_PHOTO],
+        cameraReferenceSavedAt: { [CAMERA_PHOTO]: Date.parse("2026-10-22T11:59:30.000Z") },
+      },
+      { updatedAt: new Date("2026-10-22T11:59:30.000Z") },
+    );
+
+    const next = applied(planVoicePhotoHandoff({
+      mode: "camera",
+      sourceChannel: "camera",
+      voice: finished,
+      source: camera,
+      now: NOW,
+    }));
+
+    expect(next.state).toBe("collecting");
+    expect(next.collected.characterImageUrls).toEqual([CAMERA_PHOTO]);
+    expect(next.collected.photoHandoffResetAt).toBe(resetAt);
+    expect(voiceSmsMediaCutoff(next, new Date("2026-10-21T12:00:00.000Z")))
+      .toEqual(new Date(resetAt));
+  });
+
   it("selects the configured photo source", () => {
     expect(photoHandoffSourceChannels("sms", false)).toEqual(["sms"]);
     expect(photoHandoffSourceChannels("sms", true)).toEqual(["sms", "camera"]);
@@ -192,7 +259,10 @@ describe("Voice photo handoff", () => {
         { sourceChannel: "sms", source: originalSms, recentSmsMediaUrls: [PHOTO_1] },
         {
           sourceChannel: "camera",
-          source: source({ characterImageUrls: [CAMERA_PHOTO] }, { updatedAt: new Date(resetAt + 1_000) }),
+          source: source({
+            characterImageUrls: [CAMERA_PHOTO],
+            cameraReferenceSavedAt: { [CAMERA_PHOTO]: resetAt + 1_000 },
+          }, { updatedAt: new Date(resetAt + 1_000) }),
         },
       ],
       now: new Date(resetAt + 2_000),
@@ -224,7 +294,10 @@ describe("Voice photo handoff", () => {
     })).toBeNull();
 
     const newCamera = source(
-      { characterImageUrls: [CAMERA_PHOTO] },
+      {
+        characterImageUrls: [CAMERA_PHOTO],
+        cameraReferenceSavedAt: { [CAMERA_PHOTO]: resetAt + 1_000 },
+      },
       { updatedAt: new Date(resetAt + 1_000) },
     );
     expect(selectVoicePhotoHandoff({
@@ -232,6 +305,64 @@ describe("Voice photo handoff", () => {
       candidates: [{ sourceChannel: "camera", source: newCamera }],
       now: new Date(resetAt + 2_000),
     })?.handoff.collected.characterImageUrls).toEqual([CAMERA_PHOTO]);
+  });
+
+  it("excludes camera photos captured before spoken NEW even if cleanup fails and a new capture refreshes the stage", () => {
+    const resetAt = "2026-10-22T11:59:00.000Z";
+    const restarted = voice({
+      collected: {
+        photoHandoffResetAt: resetAt,
+        ignoredCameraReferences: [CAMERA_PHOTO],
+      },
+    });
+    const mixedStage = source(
+      {
+        characterImageUrls: [CAMERA_PHOTO, NEW_CAMERA_PHOTO],
+        cameraReferenceSavedAt: {
+          [CAMERA_PHOTO]: Date.parse("2026-10-22T11:58:30.000Z"),
+          [NEW_CAMERA_PHOTO]: Date.parse("2026-10-22T11:59:30.000Z"),
+        },
+      },
+      { updatedAt: new Date("2026-10-22T11:59:30.000Z") },
+    );
+
+    const selected = applied(planVoicePhotoHandoff({
+      mode: "camera",
+      sourceChannel: "camera",
+      voice: restarted,
+      source: mixedStage,
+      now: NOW,
+    }));
+
+    expect(selected.collected.characterImageUrls).toEqual([NEW_CAMERA_PHOTO]);
+    expect(selected.collected.ignoredCameraReferences).toEqual([CAMERA_PHOTO]);
+  });
+
+  it("uses only camera photos saved after NEW when an older photo remains in the stage", () => {
+    const resetAt = "2026-10-22T11:59:00.000Z";
+    const restarted = voice({ collected: { photoHandoffResetAt: resetAt } });
+    const mixedStage = source({
+      characterImageUrls: [CAMERA_PHOTO, NEW_CAMERA_PHOTO],
+      cameraReferenceSavedAt: {
+        [CAMERA_PHOTO]: Date.parse("2026-10-22T11:58:30.000Z"),
+        [NEW_CAMERA_PHOTO]: Date.parse("2026-10-22T11:59:30.000Z"),
+      },
+    }, { updatedAt: new Date("2026-10-22T11:59:30.000Z") });
+
+    const selected = applied(planVoicePhotoHandoff({
+      mode: "camera", sourceChannel: "camera", voice: restarted,
+      source: mixedStage, now: NOW,
+    }));
+    expect(selected.collected.characterImageUrls).toEqual([NEW_CAMERA_PHOTO]);
+
+    const legacyStage = source(
+      { characterImageUrls: [CAMERA_PHOTO] },
+      { updatedAt: new Date("2026-10-22T11:59:30.000Z") },
+    );
+    expect(planVoicePhotoHandoff({
+      mode: "camera", sourceChannel: "camera", voice: restarted,
+      source: legacyStage, now: NOW,
+    })).toBeNull();
   });
 
   it("does not take an older fallback when the preferred photo stage is unchanged", () => {
@@ -304,7 +435,17 @@ describe("Voice photo handoff", () => {
       },
       { text: "CREATE", channel: "sms" },
     );
-    expect(nextSmsComic.submission?.characterImageUrls).toEqual([]);
+    expect(nextSmsComic.action).toBe("none");
+    expect(nextSmsComic.reply).toMatch(/send at least one.*photo/i);
+    const refreshedSmsComic = await advanceComicAgent(
+      {
+        state: nextSmsIdea.nextState,
+        collected: nextSmsIdea.collected,
+        activeStoryId: nextSmsIdea.activeStoryId,
+      },
+      { text: "CREATE", channel: "sms", imageUrls: [PHOTO_2] },
+    );
+    expect(refreshedSmsComic.submission?.characterImageUrls).toEqual([PHOTO_2]);
     expect(planConsumedSmsPhotoStage(markedStage, [PHOTO_2])).toBeNull();
     expect(planConsumedSmsPhotoStage(staged, [PHOTO_1])).toBeNull();
     expect(planConsumedSmsPhotoStage(

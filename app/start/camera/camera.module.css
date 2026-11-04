@@ -271,7 +271,8 @@
   margin-top: 9px;
 }
 
-.photoInputs label {
+.photoInputs label,
+.photoInputs .takePhotoButton {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -286,6 +287,16 @@
   cursor: pointer;
 }
 
+.photoInputs .takePhotoButton {
+  font-family: inherit;
+}
+
+.photoInputs label:focus-within,
+.photoInputs .takePhotoButton:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
 .photoInputs input {
   position: absolute;
   inset: 0;
@@ -295,7 +306,8 @@
   cursor: pointer;
 }
 
-.photoInputs label:has(input:disabled) {
+.photoInputs label:has(input:disabled),
+.photoInputs .takePhotoButton:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -338,7 +350,7 @@
 }
 
 .finishSetup button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.65;
 }
 
@@ -465,6 +477,10 @@
 }
 
 @media (max-width: 680px) {
+  .cameraPage .backLink:first-child {
+    display: inline-flex;
+  }
+
   .hero {
     padding-top: 28px;
     padding-bottom: 30px;

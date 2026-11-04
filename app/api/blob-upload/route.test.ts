@@ -13,9 +13,18 @@ vi.mock("@/lib/browser-upload-budget", () => ({ reserveBrowserUpload: h.reserveB
 
 import { POST } from "@/app/api/blob-upload/route";
 
+function uploadRequest(file: File): Request {
+  const formData = new FormData();
+  formData.set("file", file);
+  return new Request("https://comics.example.com/api/blob-upload", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  h.auth.mockResolvedValue({ user: { id: "owner-1" } });
+  h.auth.mockResolvedValue({ user: { id: "owner-1", role: "user", studioAuthorized: true } });
   h.uploadBufferToBlob.mockResolvedValue("https://comics.example.com/photo.jpg");
   h.reserveBrowserUpload.mockResolvedValue({ allowed: true });
 });
@@ -132,5 +141,74 @@ describe("POST /api/blob-upload", () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ url: "https://comics.example.com/photo.jpg" });
     expect(h.uploadBufferToBlob).toHaveBeenCalledOnce();
+  });
+
+  it("stores a WebP portrait as a bounded metadata-free JPEG", async () => {
+    const webp = await sharp({
+      create: { width: 2000, height: 1200, channels: 3, background: "#d0a997" },
+    }).webp().toBuffer();
+
+    const response = await POST(uploadRequest(new File([new Uint8Array(webp)], "portrait.webp", {
+      type: "image/webp",
+    })));
+
+    expect(response.status).toBe(201);
+    expect(h.uploadBufferToBlob).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      expect.stringMatching(/^uploads\/owner-1\/[0-9a-f-]+\.jpg$/),
+      "image/jpeg",
+    );
+    const saved = h.uploadBufferToBlob.mock.calls[0][0] as Buffer;
+    const metadata = await sharp(saved).metadata();
+    expect(metadata.format).toBe("jpeg");
+    expect(Math.max(metadata.width ?? 0, metadata.height ?? 0)).toBeLessThanOrEqual(1600);
+    expect(metadata.exif).toBeUndefined();
+  });
+
+  it("rejects a disguised HEIC upload without storing it", async () => {
+    const response = await POST(uploadRequest(new File(
+      ["<svg xmlns='http://www.w3.org/2000/svg' />"],
+      "portrait.heic",
+      { type: "image/heic" },
+    )));
+
+    expect(response.status).toBe(415);
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a password admin", { id: "", role: "admin", studioAuthorized: false }],
+    ["an unapproved Google account", { id: "google-user", role: "user", studioAuthorized: false }],
+    ["a blank Studio identity", { id: "   ", role: "user", studioAuthorized: true }],
+  ])("rejects %s before reserving upload budget", async (_label, user) => {
+    h.auth.mockResolvedValue({ user });
+    const response = await POST(uploadRequest(new File(["photo"], "portrait.jpg", {
+      type: "image/jpeg",
+    })));
+
+    expect(response.status).toBe(401);
+    expect(h.reserveBrowserUpload).not.toHaveBeenCalled();
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
+  });
+
+  it("allows an approved Google admin with a Studio identity", async () => {
+    h.auth.mockResolvedValue({ user: {
+      id: "google-admin-user", role: "admin", studioAuthorized: true,
+    } });
+    const jpeg = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "#4c78a8" },
+    }).jpeg().toBuffer();
+
+    const response = await POST(uploadRequest(new File([new Uint8Array(jpeg)], "photo.jpg", {
+      type: "image/jpeg",
+    })));
+
+    expect(response.status).toBe(201);
+    expect(h.reserveBrowserUpload).toHaveBeenCalledWith("google-admin-user");
+    expect(h.uploadBufferToBlob).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      expect.stringMatching(/^uploads\/google-admin-user\/[0-9a-f-]+\.jpg$/),
+      "image/jpeg",
+    );
   });
 });

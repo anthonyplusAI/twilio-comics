@@ -45,6 +45,7 @@ const EXPIRED_DELIVERY_REASON = "Result delivery expired after 24 hours";
 const EXPIRED_POLICY_REJECTION_REASON = "Result delivery expired after 24 hours (policy rejection)";
 const OPTED_OUT_DELIVERY_REASON = "recipient_opted_out";
 const POLICY_REJECTION_REASON = "Image service policy rejection";
+const MISSING_REFERENCE_REASON = "missing_reference";
 
 class TerminalConversationReconciliationError extends Error {}
 
@@ -285,6 +286,9 @@ function policyRevisionHint(error: ComicServiceError): string {
 
 function failureMessage(error: unknown, source: string, hasPhotos: boolean): string {
   if (error instanceof ComicServiceError) {
+    if (error.type === "missing_reference") {
+      return missingReferenceFailureMessage(source);
+    }
     if (error.type === "content_policy") {
       const reason = error.moderationDetails?.stage === "output"
         ? "The generated image was blocked by a safety check."
@@ -311,6 +315,12 @@ function failureMessage(error: unknown, source: string, hasPhotos: boolean): str
   return `A technical issue stopped your comic. Your idea is saved.\n\n${recovery}`;
 }
 
+function missingReferenceFailureMessage(source: string): string {
+  return source === "voice"
+    ? "A reference photo is required. Add one on the Voice photo setup page, then call again. Your idea is saved."
+    : "A reference photo is required. Send a photo, then reply CREATE. Your idea is saved.";
+}
+
 function recoveredFailureMessage(source: string): string {
   const recovery = source === "voice"
     ? "Call again, verify, and revise your idea or say create it to retry."
@@ -327,12 +337,23 @@ function recoveredPolicyFailureMessage(source: string, hasPhotos: boolean): stri
   return `The image service declined this comic. Your idea is saved for revision.\n\n${recovery}`;
 }
 
-async function restoreFailedDraft(job: GenerationJob, requireRevision = false): Promise<boolean> {
+function freshStartAfterFailureMessage(source: string): string {
+  return source === "voice"
+    ? "That comic couldn't be finished. Text one or two fresh reference photos to this number, then call back for your new comic."
+    : "That comic couldn't be finished. Send one or two fresh reference photos, then your new comic idea.";
+}
+
+type FailedDraftRestoration = Awaited<ReturnType<typeof failConversationForGeneration>>;
+
+async function restoreFailedDraft(
+  job: GenerationJob,
+  requireRevision = false,
+): Promise<FailedDraftRestoration> {
   try {
     const restored = requireRevision
       ? await failConversationForGeneration(job, { requireRevision: true })
       : await failConversationForGeneration(job);
-    if (!restored) {
+    if (restored === "unchanged") {
       console.warn("No matching draft to restore after generation failure", { jobId: job.id });
     }
     return restored;
@@ -418,7 +439,8 @@ async function notifyGenerationFailure(job: GenerationJob, failureBody: string):
 function isPermanent(error: unknown, attempts: number): boolean {
   if (attempts >= 3) return true;
   return error instanceof ComicServiceError
-    ? error.type === "content_policy" ||
+    ? error.type === "missing_reference" ||
+        error.type === "content_policy" ||
         error.type === "credit_limit" ||
         [403, 404, 409].includes(error.status || 0)
     : false;
@@ -469,10 +491,14 @@ export async function processGenerationJob(jobId: string): Promise<void> {
       }
       const policyRejected = existing.lastError === POLICY_REJECTION_REASON;
       const restored = await restoreFailedDraft(existing, policyRejected);
-      if (restored && existing.lastError !== OPTED_OUT_DELIVERY_REASON) {
-        await notifyGenerationFailure(existing, policyRejected
-          ? recoveredPolicyFailureMessage(existing.source, existing.characterImageUrls.length > 0)
-          : recoveredFailureMessage(existing.source));
+      if (restored !== "unchanged" && existing.lastError !== OPTED_OUT_DELIVERY_REASON) {
+        await notifyGenerationFailure(existing, restored === "new_draft"
+          ? freshStartAfterFailureMessage(existing.source)
+          : policyRejected
+            ? recoveredPolicyFailureMessage(existing.source, existing.characterImageUrls.length > 0)
+            : existing.lastError === MISSING_REFERENCE_REASON
+              ? missingReferenceFailureMessage(existing.source)
+              : recoveredFailureMessage(existing.source));
       }
       return;
     }
@@ -722,9 +748,12 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     try {
       const policyRejected = !generatedStoryId && error instanceof ComicServiceError &&
         error.type === "content_policy";
+      const missingReference = !generatedStoryId && error instanceof ComicServiceError &&
+        error.type === "missing_reference";
       const terminalReason = expired
         ? policyRejected ? EXPIRED_POLICY_REJECTION_REASON : EXPIRED_DELIVERY_REASON
-        : policyRejected ? POLICY_REJECTION_REASON : message;
+        : policyRejected ? POLICY_REJECTION_REASON
+          : missingReference ? MISSING_REFERENCE_REASON : message;
       if (generatedStoryId) {
         await markGenerationJobSuppressed(claimed.id, workerId, terminalReason, generatedStoryId);
       } else {
@@ -762,14 +791,17 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     // Restore before inviting CREATE or a revision. While still generating,
     // inbound messages would only get a "still creating" reply. A false
     // result means the original draft no longer matches this failed job.
+    let failedDraftRestoration: FailedDraftRestoration = "unchanged";
     if (!generatedStoryId) {
       const policyRejected = error instanceof ComicServiceError && error.type === "content_policy";
-      const restored = await restoreFailedDraft(claimed, policyRejected);
-      if (!restored) return;
+      failedDraftRestoration = await restoreFailedDraft(claimed, policyRejected);
+      if (failedDraftRestoration === "unchanged") return;
     }
     const failureBody = generatedStoryId
       ? "Your comic was created, but I couldn't deliver the link.\n\nReply STATUS to get it."
-      : failureMessage(error, claimed.source, claimed.characterImageUrls.length > 0);
+      : failedDraftRestoration === "new_draft"
+        ? freshStartAfterFailureMessage(claimed.source)
+        : failureMessage(error, claimed.source, claimed.characterImageUrls.length > 0);
     await notifyGenerationFailure(claimed, failureBody);
   }
 }

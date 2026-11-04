@@ -1,0 +1,247 @@
+.studioDialog {
+  --studio-ink: #000d25;
+  --studio-red: #db132a;
+  --studio-blue: #1866ee;
+  --studio-pale-blue: #e4f7ff;
+  overflow: hidden;
+  width: min(420px, calc(100% - 32px));
+  max-width: 420px;
+  border: 3px solid var(--studio-ink);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: 8px 8px 0 var(--studio-ink);
+  padding: 24px;
+  color: var(--studio-ink);
+  font-family: var(--font-space-grotesk), sans-serif;
+  letter-spacing: -0.025em;
+}
+
+.studioDialog :global([data-slot="dialog-close"]) {
+  color: var(--studio-ink);
+  opacity: 1;
+}
+
+.studioDialog :global([data-slot="dialog-close"]:focus-visible),
+.studioDialog button:focus-visible,
+.studioDialog a:focus-visible,
+.studioDialog input:focus-visible {
+  outline: 3px solid var(--studio-blue);
+  outline-offset: 3px;
+}
+
+.studioHeader {
+  margin-bottom: 4px;
+  text-align: left;
+}
+
+.studioKeyIcon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--studio-red);
+}
+
+.studioTitle {
+  color: var(--studio-ink);
+  font-family: var(--font-bangers), Impact, sans-serif;
+  font-size: 29px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.studioDescription {
+  padding-left: 28px;
+  color: #4d5777;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.studioError {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: #a32231;
+  font-size: 12px;
+  line-height: 1.25;
+  pointer-events: none;
+}
+
+.studioErrorDot {
+  display: inline-block;
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #a32231;
+}
+
+.studioDialog .studioInput {
+  height: 45px;
+  border: 2px solid var(--studio-ink);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+  padding: 9px 38px 9px 12px;
+  color: var(--studio-ink);
+  font-size: 14px;
+}
+
+.studioDialog .studioInput::placeholder {
+  color: #66718e;
+}
+
+.studioDialog .studioInput:focus-visible {
+  border-color: var(--studio-blue);
+  box-shadow: none;
+}
+
+.studioDialog .studioInputError {
+  border-color: #a32231;
+}
+
+.studioClear {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  transform: translateY(-50%);
+  border: 0;
+  background: none;
+  padding: 3px;
+  color: #4d5777;
+  cursor: pointer;
+}
+
+.studioClear:hover {
+  color: var(--studio-ink);
+}
+
+.studioLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--studio-blue);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.studioLink:hover {
+  color: var(--studio-ink);
+}
+
+.studioDialog .studioSecondaryButton,
+.studioDialog .studioPrimaryButton {
+  min-height: 43px;
+  height: auto;
+  border-radius: 0;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.studioDialog .studioSecondaryButton {
+  flex: 1;
+  border: 2px solid var(--studio-ink);
+  background: #fff;
+  color: var(--studio-ink);
+}
+
+.studioDialog .studioSecondaryButton:hover {
+  border-color: var(--studio-ink);
+  background: var(--studio-pale-blue);
+  color: var(--studio-ink);
+}
+
+.studioDialog .studioDeleteButton {
+  border-color: #a32231;
+  color: #a32231;
+}
+
+.studioDialog .studioDeleteButton:hover {
+  border-color: #a32231;
+  background: #fff0f1;
+  color: #a32231;
+}
+
+.studioDialog .studioPrimaryButton {
+  display: inline-flex;
+  flex: 2;
+  gap: 8px;
+  border: 2px solid var(--studio-ink);
+  background: var(--studio-red);
+  color: #fff;
+}
+
+.studioDialog .studioPrimaryButton:hover:not(:disabled) {
+  background: #b90d22;
+  color: #fff;
+}
+
+.studioDialog .studioPrimaryButton:disabled {
+  opacity: 0.55;
+}
+
+.studioFinePrint {
+  padding-top: 5px;
+  color: #4d5777;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.studioSuccess {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: #fff;
+  padding: 24px;
+  text-align: center;
+}
+
+.studioSuccessMark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border: 2px solid var(--studio-blue);
+  border-radius: 50%;
+  background: var(--studio-pale-blue);
+}
+
+.studioSuccessIcon {
+  width: 28px;
+  height: 28px;
+  color: var(--studio-blue);
+}
+
+.studioSuccessTitle {
+  margin: 0;
+  color: var(--studio-ink);
+  font-family: var(--font-bangers), Impact, sans-serif;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.studioSuccessText {
+  margin: 0;
+  color: #4d5777;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studioDialog {
+    animation: none;
+  }
+}

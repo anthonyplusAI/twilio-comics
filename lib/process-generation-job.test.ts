@@ -142,13 +142,42 @@ beforeEach(() => {
   h.sendChannelMessage.mockResolvedValue("SMresult");
   h.completeConversationForGeneration.mockResolvedValue(true);
   h.expireConversationForGeneration.mockResolvedValue(true);
-  h.failConversationForGeneration.mockResolvedValue(true);
+  h.failConversationForGeneration.mockResolvedValue("restored");
   h.blobExists.mockResolvedValue(false);
   h.getBlobPublicUrl.mockReturnValue("https://comics.example.com/api/media?key=ref");
   h.recordActivityEvent.mockResolvedValue(undefined);
 });
 
 describe("processGenerationJob", () => {
+  it.each(["sms", "voice", "whatsapp"] as const)(
+    "stops a queued no-photo %s story permanently and asks for a reference photo",
+    async (source) => {
+      h.claimGenerationJob.mockResolvedValue({
+        ...job,
+        source,
+        characterImageUrls: [],
+        targetStoryId: null,
+      });
+      h.createComicStory.mockRejectedValue(new ComicServiceError(
+        "missing_reference",
+        "Add at least one reference photo before generating your comic.",
+        400,
+      ));
+
+      await processGenerationJob(job.id);
+
+      expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+      expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+        job.id, expect.any(String), "missing_reference",
+      );
+      expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+      expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: source === "voice" ? "sms" : source,
+        body: expect.stringMatching(/reference photo.*(?:send a photo|add one)/i),
+      }));
+    },
+  );
+
   it("releases quota when a delivery window expires before any comic exists", async () => {
     h.claimGenerationJob.mockResolvedValue({
       ...job,
@@ -586,8 +615,8 @@ describe("processGenerationJob", () => {
   it("waits for the matching draft to be restored before sending retry instructions", async () => {
     h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
     h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
-    let finishRestore: (restored: boolean) => void = () => {};
-    h.failConversationForGeneration.mockImplementation(() => new Promise<boolean>((resolve) => {
+    let finishRestore: (restored: "restored") => void = () => {};
+    h.failConversationForGeneration.mockImplementation(() => new Promise<"restored">((resolve) => {
       finishRestore = resolve;
     }));
 
@@ -595,7 +624,7 @@ describe("processGenerationJob", () => {
     await vi.waitFor(() => expect(h.failConversationForGeneration).toHaveBeenCalledOnce());
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
 
-    finishRestore(true);
+    finishRestore("restored");
     await processing;
 
     expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -606,12 +635,49 @@ describe("processGenerationJob", () => {
   it("does not send stale retry instructions when the submitted draft no longer matches", async () => {
     h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
     h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
-    h.failConversationForGeneration.mockResolvedValue(false);
+    h.failConversationForGeneration.mockResolvedValue("unchanged");
 
     await processGenerationJob(job.id);
 
     expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(["sms", "whatsapp", "voice"] as const)(
+    "asks for fresh photos after a failed %s job with a queued NEW",
+    async (source) => {
+      h.claimGenerationJob.mockResolvedValue({ ...job, source, attemptCount: 3 });
+      h.createComicStory.mockRejectedValue(new Error("Image service unavailable"));
+      h.failConversationForGeneration.mockResolvedValue("new_draft");
+
+      await processGenerationJob(job.id);
+
+      const notice = h.sendChannelMessage.mock.calls[0][0];
+      expect(notice.body).toMatch(/one or two.*photo/i);
+      expect(notice.body).not.toMatch(/idea is saved|CREATE to retry/i);
+      if (source === "voice") expect(notice.body).toMatch(/text.*photo.*call back/i);
+      else expect(notice.body).toMatch(/send.*photo/i);
+      expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("sends the fresh-photo failure notice once after terminal recovery", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "Image service unavailable",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+    h.failConversationForGeneration
+      .mockResolvedValueOnce("new_draft")
+      .mockResolvedValueOnce("unchanged");
+
+    await processGenerationJob(job.id);
+    await processGenerationJob(job.id);
+
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage.mock.calls[0][0].body).toMatch(/one or two.*photo/i);
   });
 
   it("reconciles a failed job after a temporary draft restoration error", async () => {
@@ -625,7 +691,7 @@ describe("processGenerationJob", () => {
     h.createComicStory.mockRejectedValue(new Error("private provider detail"));
     h.failConversationForGeneration
       .mockRejectedValueOnce(new Error("temporary database outage"))
-      .mockResolvedValueOnce(true);
+      .mockResolvedValueOnce("restored");
 
     await expect(processGenerationJob(job.id)).rejects.toThrow("Failed to restore comic draft");
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
@@ -788,6 +854,24 @@ describe("processGenerationJob", () => {
 
     expect(h.failConversationForGeneration).not.toHaveBeenCalled();
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("recovers a failed no-photo job with photo instructions after its draft is restored", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({
+      ...job,
+      status: "failed",
+      lastError: "missing_reference",
+      completedAt: new Date(Date.now() - 120_000),
+    });
+
+    await processGenerationJob(job.id);
+
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringMatching(/reference photo.*send a photo/i),
+    }));
+    expect(h.createComicStory).not.toHaveBeenCalled();
   });
 
   it("tells users how to retry a saved idea after image credits are unavailable", async () => {

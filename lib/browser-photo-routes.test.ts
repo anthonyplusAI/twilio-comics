@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   startVoiceVerification: vi.fn(),
   checkVoiceVerification: vi.fn(),
   getOrCreateChannelIdentity: vi.fn(),
+  beginVerifiedCameraPhotoSession: vi.fn(),
   getStagedCameraPhotoCount: vi.fn(),
   stageCameraPhoto: vi.fn(),
   newCameraBlobKey: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("@/lib/voice-verification", () => ({
 }));
 vi.mock("@/lib/channel-identities", () => ({ getOrCreateChannelIdentity: h.getOrCreateChannelIdentity }));
 vi.mock("@/lib/browser-photo-staging", () => ({
+  beginVerifiedCameraPhotoSession: h.beginVerifiedCameraPhotoSession,
   getStagedCameraPhotoCount: h.getStagedCameraPhotoCount,
   stageCameraPhoto: h.stageCameraPhoto,
   newCameraBlobKey: h.newCameraBlobKey,
@@ -41,7 +43,7 @@ vi.mock("@/lib/browser-photo-image", async (original) => ({
 vi.mock("@/lib/blob-storage", () => ({ uploadBufferToBlob: h.uploadBufferToBlob }));
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
-import { createPhotoToken, CAMERA_CHALLENGE_COOKIE, CAMERA_SESSION_COOKIE } from "@/lib/browser-photo-session";
+import { createPhotoToken, readPhotoTokenDetails, CAMERA_CHALLENGE_COOKIE, CAMERA_SESSION_COOKIE } from "@/lib/browser-photo-session";
 import { POST as startVerification } from "@/app/api/voice/photos/verify/start/route";
 import { POST as checkVerification } from "@/app/api/voice/photos/verify/check/route";
 import { POST as uploadPhoto } from "@/app/api/voice/photos/upload/route";
@@ -91,6 +93,7 @@ beforeEach(() => {
   h.startVoiceVerification.mockResolvedValue(undefined);
   h.checkVoiceVerification.mockResolvedValue(true);
   h.getOrCreateChannelIdentity.mockResolvedValue({ userId: OWNER });
+  h.beginVerifiedCameraPhotoSession.mockResolvedValue(true);
   h.getStagedCameraPhotoCount.mockResolvedValue(0);
   h.stageCameraPhoto.mockResolvedValue({ count: 1, replaced: false });
   h.newCameraBlobKey.mockReturnValue(BLOB_KEY);
@@ -174,14 +177,42 @@ describe("verified Voice camera APIs", () => {
     ));
     expect(wrong.status).toBe(401);
     expect(wrong.headers.get("set-cookie")).toBeNull();
+    expect(h.beginVerifiedCameraPhotoSession).not.toHaveBeenCalled();
 
     const approved = await checkVerification(jsonRequest(
       "/api/voice/photos/verify/check", { code: "654321" }, cookie,
     ));
     expect(approved.status).toBe(200);
     expect(h.checkVoiceVerification).toHaveBeenLastCalledWith(PHONE, "654321");
+    expect(h.beginVerifiedCameraPhotoSession).toHaveBeenCalledWith(PHONE,
+      expect.objectContaining({ phone: PHONE, nonce: expect.any(String), issued: expect.any(Number) }));
     expect(approved.headers.get("set-cookie")).toContain(CAMERA_SESSION_COOKIE);
     expect(approved.headers.get("set-cookie")).not.toContain("654321");
+    const sessionToken = approved.headers.get("set-cookie")?.match(
+      /twilio_comics_camera_session=([^;]+)/,
+    )?.[1];
+    expect(readPhotoTokenDetails(sessionToken, "session")?.nonce)
+      .toBe(readPhotoTokenDetails(challenge, "challenge")?.nonce);
+  });
+
+  it("rejects a delayed verification that would replace a newer photo session", async () => {
+    h.beginVerifiedCameraPhotoSession.mockResolvedValueOnce(false);
+    const cookie = `${CAMERA_CHALLENGE_COOKIE}=${createPhotoToken(PHONE, "challenge")}`;
+    const response = await checkVerification(jsonRequest(
+      "/api/voice/photos/verify/check", { code: "123456" }, cookie,
+    ));
+    expect(response.status).toBe(409);
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("does not issue an upload session when photo staging fails", async () => {
+    h.beginVerifiedCameraPhotoSession.mockRejectedValueOnce(new Error("database unavailable"));
+    const cookie = `${CAMERA_CHALLENGE_COOKIE}=${createPhotoToken(PHONE, "challenge")}`;
+    const response = await checkVerification(jsonRequest(
+      "/api/voice/photos/verify/check", { code: "123456" }, cookie,
+    ));
+    expect(response.status).toBe(503);
+    expect(response.headers.get("set-cookie")).toBeNull();
   });
 
   it("rejects uploads without the verified phone cookie and stores only owner-scoped photos", async () => {
@@ -190,13 +221,15 @@ describe("verified Voice camera APIs", () => {
     expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
 
     const cookie = `${CAMERA_SESSION_COOKIE}=${createPhotoToken(PHONE, "session")}`;
+    const sessionNonce = readPhotoTokenDetails(cookie.split("=")[1], "session")?.nonce;
     const saved = await uploadPhoto(uploadRequest(cookie));
     expect(saved.status).toBe(201);
     expect(h.getOrCreateChannelIdentity).toHaveBeenCalledWith("camera", PHONE);
     expect(h.uploadBufferToBlob).toHaveBeenCalledWith(
       Buffer.from([0xff, 0xd8, 0xff, 0xd9]), BLOB_KEY, "image/jpeg",
     );
-    expect(h.stageCameraPhoto).toHaveBeenCalledWith(PHONE, OWNER, BLOB_KEY, 0);
+    expect(h.getStagedCameraPhotoCount).toHaveBeenCalledWith(PHONE, OWNER, sessionNonce);
+    expect(h.stageCameraPhoto).toHaveBeenCalledWith(PHONE, OWNER, BLOB_KEY, 0, sessionNonce);
     expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
       userId: OWNER,
       channel: "camera",
@@ -206,6 +239,15 @@ describe("verified Voice camera APIs", () => {
     }));
     const details = h.recordActivityEvent.mock.calls[0][0].details;
     expect(JSON.stringify(details)).not.toContain("123456");
+  });
+
+  it("rejects an older verified session before saving a new photo", async () => {
+    h.getStagedCameraPhotoCount.mockResolvedValueOnce(null);
+    const cookie = `${CAMERA_SESSION_COOKIE}=${createPhotoToken(PHONE, "session")}`;
+    const response = await uploadPhoto(uploadRequest(cookie));
+    expect(response.status).toBe(409);
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
+    expect(h.stageCameraPhoto).not.toHaveBeenCalled();
   });
 
 });

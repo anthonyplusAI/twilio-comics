@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight, MessageCircle, Phone, ScanLine } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, BookOpen, Camera, MessageCircle, Phone, ScanLine } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { GitHubStarLink } from "@/components/github-star-link";
 import {
@@ -12,16 +12,20 @@ import {
 import { getCameraDestination } from "@/lib/browser-photo-access";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
+import { getPublicOrigin } from "@/lib/public-origin";
+import { isStudioStartReady } from "@/lib/studio-start-readiness";
 import marketingStyles from "../marketing.module.css";
 import styles from "./start.module.css";
 
-type ChannelChoice = {
-  id: MarketingChannel;
+type StartChoice = {
+  id: MarketingChannel | "camera" | "studio";
   label: string;
   heading: string;
   destination: string;
+  description: string;
   href: string;
   action: string;
+  qrValue: string;
   qrTitle: string;
   qrCaption: string;
 };
@@ -29,9 +33,9 @@ type ChannelChoice = {
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Choose a channel | Twilio Comics",
+  title: "Choose how to start | Twilio Comics",
   description:
-    "Choose an available Twilio text or phone channel, shape a comic idea with the agent, and get the result on your phone.",
+    "Choose an available way to start a comic by text, call, browser photos, or Studio.",
 };
 
 export default async function StartPage() {
@@ -45,51 +49,96 @@ export default async function StartPage() {
   );
   const phoneNumber = contact.phoneNumber ?? "";
   const whatsappNumber = contact.whatsappNumber ?? "";
-  const choices: Record<MarketingChannel, ChannelChoice> = {
+  const hasSms = selectedChannels.includes("sms") && Boolean(contact.smsHref);
+  const selectedVoice = selectedChannels.includes("voice") && Boolean(contact.callHref);
+  const settings = hasSms || selectedVoice ? await getExperienceSettings() : null;
+  const cameraDestination = settings?.cameraEnabled
+    ? await getCameraDestination(settings)
+    : null;
+  const showCamera = Boolean(cameraDestination);
+  const showStudio = isStudioStartReady();
+  const hasVoice = selectedVoice && settings?.voicePhotoMode !== "none" &&
+    (hasSms || Boolean(cameraDestination?.callHref));
+  const hasTextDelivery = hasSms || hasVoice;
+  const publicOrigin = getPublicOrigin() || "http://localhost:3000";
+  const voiceStartUrl = new URL(
+    "/start/voice",
+    publicOrigin,
+  ).toString();
+  const choices: Record<MarketingChannel, StartChoice> = {
     sms: {
       id: "sms",
       label: "Twilio SMS",
-      heading: "Text us.",
+      heading: "Text your photos.",
       destination: phoneNumber,
+      description: "Attach one or two reference photos before you send your first text. Then share your comic idea.",
       href: contact.smsHref ?? "",
-      action: "Open SMS draft",
-      qrTitle: `Scan to open a text to ${phoneNumber} with ${COMIC_START_MESSAGE}`,
-      qrCaption: "Scan to open a text.",
+      action: "Open text to add photos",
+      qrValue: contact.smsHref ?? "",
+      qrTitle: `Scan to text reference photos to ${phoneNumber} with ${COMIC_START_MESSAGE}`,
+      qrCaption: "Scan, attach photos, then send.",
     },
     whatsapp: {
       id: "whatsapp",
       label: "Twilio WhatsApp",
       heading: "Chat with us.",
       destination: whatsappNumber,
+      description: "Send a reference photo, then tell the agent your comic idea.",
       href: contact.whatsappHref ?? "",
       action: "Open WhatsApp",
+      qrValue: contact.whatsappHref ?? "",
       qrTitle: `Scan to open WhatsApp with ${COMIC_START_MESSAGE}`,
       qrCaption: "Scan to open WhatsApp.",
     },
     voice: {
       id: "voice",
       label: "Twilio Voice",
-      heading: "Call us.",
+      heading: "Photos, then call.",
       destination: phoneNumber,
-      href: contact.callHref ?? "",
-      action: "Call the agent",
-      qrTitle: `Scan to call ${phoneNumber}`,
-      qrCaption: "Scan to call.",
+      description: "Add one or two reference photos before calling from the same number.",
+      href: "/start/voice",
+      action: "Set up photos first",
+      qrValue: voiceStartUrl,
+      qrTitle: "Scan to add photos before your Voice call",
+      qrCaption: "Scan to add photos, then call.",
     },
   };
-  const activeChoices = selectedChannels
+  const channelChoices = selectedChannels
+    .filter((channel) => channel !== "voice" || hasVoice)
     .map((channel) => choices[channel])
     .filter((choice) => Boolean(choice.href));
-  const hasSms = activeChoices.some((choice) => choice.id === "sms");
-  const hasVoice = activeChoices.some((choice) => choice.id === "voice");
-  const hasTextDelivery = hasSms || hasVoice;
-  const settings = hasTextDelivery ? await getExperienceSettings() : null;
-  const voicePhotoMode = hasVoice ? settings?.voicePhotoMode : null;
-  const voiceUsesPhotos = hasVoice && voicePhotoMode !== "none";
-  const cameraDestination = settings?.cameraEnabled
-    ? await getCameraDestination(settings)
-    : null;
-  const showCamera = Boolean(cameraDestination);
+  const cameraContinuation = cameraDestination?.smsHref && cameraDestination.callHref
+    ? "text or call"
+    : cameraDestination?.smsHref ? "text" : "call";
+  const activeChoices: StartChoice[] = [
+    ...channelChoices,
+    ...(showCamera ? [{
+      id: "camera" as const,
+      label: "Browser photo page",
+      heading: "Add photos in browser.",
+      destination: `Then ${cameraContinuation}`,
+      description: `Verify your mobile number, take or upload one or two photos, then ${cameraContinuation} from that number.`,
+      href: "/start/camera",
+      action: "Open photo page",
+      qrValue: new URL("/start/camera", publicOrigin).toString(),
+      qrTitle: "Scan to open the browser photo page",
+      qrCaption: "Scan to take or upload photos.",
+    }] : []),
+    ...(showStudio ? [{
+      id: "studio" as const,
+      label: "Browser Studio",
+      heading: "Create in Studio.",
+      destination: process.env.NODE_ENV === "production"
+        ? "Approved testers only"
+        : "Google sign-in",
+      description: `Sign in with ${process.env.NODE_ENV === "production" ? "an approved Google account" : "Google"}, take or upload one or two photos, add your idea, and create your comic in the browser.`,
+      href: "/studio",
+      action: "Open Studio",
+      qrValue: new URL("/studio", publicOrigin).toString(),
+      qrTitle: "Scan to open Browser Studio",
+      qrCaption: "Scan to create in your browser.",
+    }] : []),
+  ];
 
   return (
     <div className={`${marketingStyles.page} ${styles.startPage}`}>
@@ -119,14 +168,16 @@ export default async function StartPage() {
             </h1>
             <p className={styles.introCopy}>
               {activeChoices.length
-                ? "Your comic arrives on your phone. Public five-digit links can be guessed."
-                : "Come back to start your comic when a channel is ready."}
+                ? "Start with at least one reference photo. Then share your comic idea using any available option below."
+                : selectedVoice
+                  ? "Calls need reference photos. Come back when photo setup is available."
+                  : "Come back to start your comic when an option is ready."}
             </p>
           </div>
         </section>
 
         {activeChoices.length > 0 && (
-          <section className={styles.choicesSection} aria-label="Available channels">
+          <section className={styles.choicesSection} aria-label="Available ways to start">
             <div className={styles.cards}>
               {activeChoices.map((choice) => (
                 <article
@@ -135,7 +186,10 @@ export default async function StartPage() {
                 >
                   <div className={styles.cardBand}>
                     <span className={styles.channelIcon} aria-hidden="true">
-                      {choice.id === "voice" ? <Phone size={24} /> : <MessageCircle size={24} />}
+                      {choice.id === "voice" ? <Phone size={24} />
+                        : choice.id === "camera" ? <Camera size={24} />
+                        : choice.id === "studio" ? <BookOpen size={24} />
+                        : <MessageCircle size={24} />}
                     </span>
                     <span className={styles.channelLabel}>{choice.label}</span>
                   </div>
@@ -143,14 +197,21 @@ export default async function StartPage() {
                     <div className={styles.cardAction}>
                       <h2>{choice.heading}</h2>
                       <p className={styles.destination}>{choice.destination}</p>
-                      <a className={styles.channelButton} href={choice.href}>
-                        {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
-                      </a>
+                      <p className={styles.cardDescription}>{choice.description}</p>
+                      {choice.href.startsWith("/") ? (
+                        <Link className={styles.channelButton} href={choice.href}>
+                          {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
+                        </Link>
+                      ) : (
+                        <a className={styles.channelButton} href={choice.href}>
+                          {choice.action} <ArrowUpRight size={22} aria-hidden="true" />
+                        </a>
+                      )}
                     </div>
                     <div className={styles.qrPanel}>
                       <div className={styles.qrFrame}>
                         <QRCodeSVG
-                          value={choice.href}
+                          value={choice.qrValue}
                           size={146}
                           level="M"
                           includeMargin
@@ -165,59 +226,51 @@ export default async function StartPage() {
                 </article>
               ))}
             </div>
-            {(hasSms || showCamera) && (
-              <div className={showCamera
-                ? `${styles.photoPath} ${styles.cameraPath}`
-                : styles.photoPath}
-              >
-                <p>
-                  <strong>Want to appear in the comic?</strong>{" "}
-                  {hasSms
-                    ? voiceUsesPhotos
-                      ? "Text up to two photos, then keep texting or call from the same number."
-                      : "Text up to two photos, then share your idea."
-                    : "Take photos here, then call from the same number."}
-                  {hasVoice && " Or call without photos."}
-                </p>
-                {showCamera && (
-                  <Link className={styles.cameraLink} href="/start/camera">
-                    Take photos <ArrowUpRight size={18} aria-hidden="true" />
-                  </Link>
-                )}
-              </div>
-            )}
             <details className={styles.howItWorks}>
               <summary>How it works</summary>
               <ul>
                 {hasSms && (
                   <li>
-                    <strong>Text:</strong> Send a photo or an idea. The agent guides you and texts
+                    <strong>Text:</strong> Send at least one photo, then an idea. The agent guides you and texts
                     the comic link.
                   </li>
                 )}
                 {hasVoice && (
                   <li>
-                    <strong>Call:</strong> Confirm the SMS code, then tell the agent your idea.
+                    <strong>Call:</strong> Save photos first, then call from the same number. Confirm the SMS code and tell the agent your idea.
                     Your comic link arrives by text.
                   </li>
                 )}
                 {activeChoices.some((choice) => choice.id === "whatsapp") && (
                   <li>
-                    <strong>WhatsApp:</strong> Share your idea in chat. The agent sends your
+                    <strong>WhatsApp:</strong> Send a photo, then share your idea in chat. The agent sends your
                     comic link there.
+                  </li>
+                )}
+                {showCamera && (
+                  <li>
+                    <strong>Browser photos:</strong> Verify your phone, take or upload photos, then {cameraContinuation} from that number.
+                  </li>
+                )}
+                {showStudio && (
+                  <li>
+                    <strong>Studio:</strong> Sign in with Google, add photos and an idea, then create the comic in your browser.
                   </li>
                 )}
               </ul>
             </details>
-            <p className={styles.programDisclosure}>
-              {hasTextDelivery
-                ? "Twilio Comics sends automated replies and comic links by text. "
-                : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
-              Message frequency varies; message and data rates may apply.{" "}
-              {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
-              <Link href="/privacy">Privacy Policy</Link> ·{" "}
-              <Link href="/terms">Terms of Service</Link>
-            </p>
+            {channelChoices.length > 0 && (
+              <p className={styles.programDisclosure}>
+                {hasTextDelivery
+                  ? "Twilio Comics sends automated replies and comic links by text. "
+                  : "Twilio Comics sends automated replies and comic links in WhatsApp. "}
+                Message frequency varies; message and data rates may apply.{" "}
+                {hasTextDelivery && "Reply HELP for help or STOP to opt out. "}
+                Public five-digit comic links can be guessed.{" "}
+                <Link href="/privacy">Privacy Policy</Link> ·{" "}
+                <Link href="/terms">Terms of Service</Link>
+              </p>
+            )}
           </section>
         )}
       </main>

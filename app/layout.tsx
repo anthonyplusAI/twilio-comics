@@ -7,6 +7,7 @@ import {
   Instrument_Serif,
 } from "next/font/google"
 import { Toaster } from "@/components/ui/toaster"
+import { getPublicOrigin } from "@/lib/public-origin"
 import "./globals.css"
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
@@ -27,10 +28,14 @@ const instrumentSerif = Instrument_Serif({
 
 const title = "Twilio Comics | Turn a story idea into a comic"
 const description =
-  "Create a custom comic from your story idea with Twilio Comics. See which Twilio channels are available and how to get started."
+  "Create a custom comic from your reference photos and story idea. Choose text, a call, or Browser Studio when available."
+const publicOrigin = getPublicOrigin() ||
+  (!process.env.PUBLIC_BASE_URL && process.env.NODE_ENV !== "production"
+    ? "http://localhost:3000"
+    : null)
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.PUBLIC_BASE_URL || "http://localhost:3000"),
+  metadataBase: new URL(publicOrigin ?? "http://localhost:3000"),
   applicationName: "Twilio Comics",
   title,
   description,

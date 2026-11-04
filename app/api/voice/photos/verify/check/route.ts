@@ -1,13 +1,14 @@
 import { type NextRequest } from "next/server";
 import { getCameraDestination, photoJson, readSmallPhotoJson } from "@/lib/browser-photo-access";
 import { finishCameraBudget, reserveCameraBudget } from "@/lib/browser-photo-budget";
+import { beginVerifiedCameraPhotoSession } from "@/lib/browser-photo-staging";
 import {
   CAMERA_CHALLENGE_COOKIE,
   CAMERA_SESSION_COOKIE,
   createPhotoToken,
   photoCookieOptions,
   photoRequestHasAllowedOrigin,
-  readPhotoToken,
+  readPhotoTokenDetails,
 } from "@/lib/browser-photo-session";
 import { checkVoiceVerification } from "@/lib/voice-verification";
 
@@ -16,8 +17,12 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest): Promise<Response> {
   if (!photoRequestHasAllowedOrigin(request)) return photoJson({ error: "Request origin is not allowed" }, 403);
   if (!await getCameraDestination()) return photoJson({ error: "Camera photos are not enabled" }, 404);
-  const phone = readPhotoToken(request.cookies.get(CAMERA_CHALLENGE_COOKIE)?.value, "challenge");
-  if (!phone) return photoJson({ error: "Request a new verification code" }, 401);
+  const challenge = readPhotoTokenDetails(
+    request.cookies.get(CAMERA_CHALLENGE_COOKIE)?.value,
+    "challenge",
+  );
+  if (!challenge) return photoJson({ error: "Request a new verification code" }, 401);
+  const phone = challenge.phone;
   const body = await readSmallPhotoJson(request);
   const code = body?.code;
   if (typeof code !== "string" || !/^\d{6}$/.test(code)) {
@@ -46,8 +51,19 @@ export async function POST(request: NextRequest): Promise<Response> {
   );
   if (!approved) return photoJson({ error: "That code did not match" }, 401);
 
+  let sessionReady: boolean;
+  try {
+    sessionReady = await beginVerifiedCameraPhotoSession(phone, challenge);
+  } catch (error) {
+    console.error("Browser camera photo session could not start", error instanceof Error ? error.name : "unknown");
+    return photoJson({ error: "Could not prepare your photo session right now" }, 503);
+  }
+  if (!sessionReady) {
+    return photoJson({ error: "A newer photo session is already active. Request a new code to start again." }, 409);
+  }
+
   const response = photoJson({ ok: true, phoneNumber: phone });
-  response.cookies.set(CAMERA_SESSION_COOKIE, createPhotoToken(phone, "session"),
+  response.cookies.set(CAMERA_SESSION_COOKIE, createPhotoToken(phone, "session", Date.now(), challenge.nonce),
     photoCookieOptions("session"));
   response.cookies.set(CAMERA_CHALLENGE_COOKIE, "", {
     ...photoCookieOptions("challenge"), maxAge: 0,
