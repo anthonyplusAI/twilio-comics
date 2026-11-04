@@ -125,6 +125,20 @@ function receipt(
   };
 }
 
+function expectOneGsm7Segment(body: string): void {
+  const basicAscii = new Set(
+    "@ $!\"#%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz\n\r",
+  );
+  const extensionAscii = new Set("^{}\\[~]|");
+  let septets = 0;
+  for (const character of body) {
+    if (basicAscii.has(character)) septets += 1;
+    else if (extensionAscii.has(character)) septets += 2;
+    else throw new Error(`SMS contains a non-GSM-7 character: ${character}`);
+  }
+  expect(septets).toBeLessThanOrEqual(160);
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("TWILIO_PHONE_NUMBER", TO);
@@ -472,17 +486,7 @@ describe("ordered inbound messaging processor", () => {
     await processInboundMessage("SM1");
 
     const body = sends[0].body;
-    const basicAscii = new Set(
-      "@ $!\"#%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz\n\r",
-    );
-    const extensionAscii = new Set("^{}\\[~]|");
-    let septets = 0;
-    for (const character of body) {
-      if (basicAscii.has(character)) septets += 1;
-      else if (extensionAscii.has(character)) septets += 2;
-      else throw new Error(`Greeting contains a non-GSM-7 character: ${character}`);
-    }
-    expect(septets).toBeLessThanOrEqual(160);
+    expectOneGsm7Segment(body);
     expect(body).toMatch(/^Twilio Comics\n\nSend 1 or 2 photos/i);
     expect(body).toMatch(/comic idea/i);
     expect(body).toMatch(/Reply HELP.*STOP.*Msg & data rates may apply/i);
@@ -772,7 +776,27 @@ describe("ordered inbound messaging processor", () => {
 
     await processInboundMessage("SM1");
 
-    expect(sends[0].body).toMatch(/Photo saved.*Text your idea.*call us from this phone after this reply/i);
+    expect(sends[0].body).toMatch(/Photo saved.*Text your idea.*call us from this phone.*voice/i);
+  });
+
+  it("fits the first photo-only MMS reply with Voice guidance in one GSM-7 segment", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
+    receipts.SM1.body = "";
+    receipts.SM1.mediaUrls = [REFERENCE];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    const agent = await vi.importActual<typeof import("@/lib/comic-agent")>("@/lib/comic-agent");
+    h.advanceComicAgent.mockImplementation(agent.advanceComicAgent);
+
+    await processInboundMessage("SM1");
+
+    expect(sends).toHaveLength(1);
+    const body = sends[0].body;
+    expectOneGsm7Segment(body);
+    expect(body).toMatch(/^Twilio Comics\n\nPhoto saved\./);
+    expect(body).toMatch(/Text your idea.*call.*this phone.*voice/i);
+    expect(body).toMatch(/Reply HELP.*STOP.*Msg & data rates may apply/i);
+    expect(conversation.collected.characterImageUrls).toEqual([REFERENCE]);
   });
 
   it("keeps the photo acknowledgement when voice is disabled", async () => {

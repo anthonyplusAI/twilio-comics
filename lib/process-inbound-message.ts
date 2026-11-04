@@ -281,7 +281,7 @@ async function processOneMessage(
                 process.env.TWILIO_WHATSAPP_NUMBER,
               );
               if (getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes("voice")) {
-                replyBody = "Photo saved. Text your idea, or call us from this phone after this reply to tell it by voice.";
+                replyBody = "Photo saved. Text your idea or call us from this phone to say it by voice.";
               }
             }
             if (unsupportedAttachment) {
