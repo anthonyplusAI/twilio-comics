@@ -619,7 +619,7 @@ export async function recoverStalledAgentReplies(limit = STALLED_REPLY_MAX_BATCH
                ${eventStatus}, jsonb_build_object(
                  'purpose', 'agent_reply',
                  'inReplyTo', receipt.message_sid,
-                 'observedStatus', ${status},
+                 'observedStatus', ${status}::text,
                  'ageSeconds', GREATEST(0, EXTRACT(EPOCH FROM (
                    NOW() - COALESCE(sent_event.occurred_at, receipt.updated_at)
                  ))::int)

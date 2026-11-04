@@ -15,7 +15,7 @@ import {
   EarlierInboundTurnsPendingError,
   processInboundMessage,
 } from "@/lib/process-inbound-message";
-import { recoverUnpublishedGenerationJobs } from "@/lib/generation-jobs";
+import { GenerationJobDeferredError, recoverUnpublishedGenerationJobs } from "@/lib/generation-jobs";
 import { recoverPendingInboundMessages, recoverStalledAgentReplies } from "@/lib/twilio-events";
 import { recoverFailedComicTextFallbacks } from "@/lib/twilio-delivery";
 import { db } from "@/lib/db";
@@ -65,7 +65,17 @@ export async function processNextGenerationJob(): Promise<boolean> {
 
   if (message.version === 1) {
     const { processGenerationJob } = await import("@/lib/process-generation-job");
-    await processGenerationJob(message.jobId);
+    try {
+      await processGenerationJob(message.jobId);
+    } catch (error) {
+      if (error instanceof GenerationJobDeferredError) {
+        // The database claim remains fenced until shortly before this pop
+        // becomes visible again. Recovery republishes if renewal is lost.
+        await renewGenerationJob(message, error.visibilitySeconds);
+        return true;
+      }
+      throw error;
+    }
   } else {
     try {
       await processInboundMessage(message.messageSid);

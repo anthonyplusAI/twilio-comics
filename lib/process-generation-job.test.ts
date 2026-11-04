@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   markGenerationJobFailed: vi.fn(),
   markGenerationJobSuppressed: vi.fn(),
   markGenerationJobSucceeded: vi.fn(),
+  deferGenerationJobRetry: vi.fn(),
   returnGenerationJobToQueue: vi.fn(),
   consumeFreeTierQuota: vi.fn(),
   releaseFreeTierQuota: vi.fn(),
@@ -40,17 +41,29 @@ vi.mock("@/lib/comic-service", () => ({
     status?: number;
     code?: string;
     moderationDetails?: { stage?: string; categories: string[] };
+    retryAfterSeconds?: number;
+    imageGenerationError?: boolean;
+    retryableConnection?: boolean;
     constructor(
       type: string,
       message: string,
       status?: number,
-      options?: { code?: string; moderationDetails?: { stage?: string; categories: string[] } },
+      options?: {
+        code?: string;
+        moderationDetails?: { stage?: string; categories: string[] };
+        retryAfterSeconds?: number;
+        imageGenerationError?: boolean;
+        retryableConnection?: boolean;
+      },
     ) {
       super(message);
       this.type = type;
       this.status = status;
       this.code = options?.code;
       this.moderationDetails = options?.moderationDetails;
+      this.retryAfterSeconds = options?.retryAfterSeconds;
+      this.imageGenerationError = options?.imageGenerationError;
+      this.retryableConnection = options?.retryableConnection;
     }
   },
   createComicStory: h.createComicStory,
@@ -64,6 +77,14 @@ vi.mock("@/lib/generation-jobs", () => ({
       this.name = "GenerationJobLeaseLostError";
     }
   },
+  GenerationJobDeferredError: class GenerationJobDeferredError extends Error {
+    visibilitySeconds: number;
+    constructor(visibilitySeconds: number) {
+      super("Generation job deferred after a temporary image rate limit");
+      this.name = "GenerationJobDeferredError";
+      this.visibilitySeconds = visibilitySeconds;
+    }
+  },
   checkpointGenerationDelivery: h.checkpointGenerationDelivery,
   checkpointGenerationOutput: h.checkpointGenerationOutput,
   claimGenerationJob: h.claimGenerationJob,
@@ -71,6 +92,7 @@ vi.mock("@/lib/generation-jobs", () => ({
   markGenerationJobFailed: h.markGenerationJobFailed,
   markGenerationJobSuppressed: h.markGenerationJobSuppressed,
   markGenerationJobSucceeded: h.markGenerationJobSucceeded,
+  deferGenerationJobRetry: h.deferGenerationJobRetry,
   returnGenerationJobToQueue: h.returnGenerationJobToQueue,
 }));
 vi.mock("@/lib/quota", () => ({
@@ -93,7 +115,7 @@ vi.mock("@/lib/dub-short-links", () => ({ comicDeliveryUrl: h.comicDeliveryUrl }
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 
 import { ComicServiceError } from "@/lib/comic-service";
-import { GenerationJobLeaseLostError } from "@/lib/generation-jobs";
+import { GenerationJobDeferredError, GenerationJobLeaseLostError } from "@/lib/generation-jobs";
 import { processGenerationJob } from "@/lib/process-generation-job";
 
 const job = {
@@ -888,6 +910,255 @@ describe("processGenerationJob", () => {
     expect(body.length).toBeLessThanOrEqual(160);
   });
 
+  it("defers a temporary image 429 without failing the comic or texting a failure", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true },
+    ));
+
+    const deferred = await processGenerationJob(job.id).then(() => null, (error: unknown) => error);
+    expect(deferred).toBeInstanceOf(GenerationJobDeferredError);
+    expect((deferred as GenerationJobDeferredError).visibilitySeconds).toBe(67);
+
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 62);
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.failConversationForGeneration).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "generation.retry",
+      status: "deferred",
+      details: expect.objectContaining({ errorType: "api_error", httpStatus: 429, retryDelaySeconds: 62 }),
+    }));
+  });
+
+  it("honors a bounded Retry-After hint before the next image attempt", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true, retryAfterSeconds: 42 },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds: 49,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 44);
+  });
+
+  it("defers an overloaded image 503 when the provider supplies Retry-After", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Provider overloaded", 503, { imageGenerationError: true, retryAfterSeconds: 35 },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds: 42,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 37);
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+  });
+
+  it.each([408, 409, 500, 502, 503, 504, 529])(
+    "defers a transient image API %i with a short default backoff",
+    async (status) => {
+      h.createComicStory.mockRejectedValue(new ComicServiceError(
+        "api_error", "Provider image request failed", status, { imageGenerationError: true },
+      ));
+
+      await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+        name: "GenerationJobDeferredError",
+        visibilitySeconds: 27,
+      });
+      expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 22);
+      expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+      expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("defers an OpenAI image connection timeout", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "OpenAI connection timed out", undefined,
+      { imageGenerationError: true, retryableConnection: true },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds: 27,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 22);
+  });
+
+  it("keeps a non-image story conflict 409 terminal", async () => {
+    h.createComicContinuationPage.mockRejectedValue(new ComicServiceError(
+      "api_error", "Page ID belongs to a different story", 409,
+    ));
+    h.claimGenerationJob.mockResolvedValue({ ...job, targetStoryId: "story-1" });
+
+    await processGenerationJob(job.id);
+
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+  });
+
+  it("does not misclassify a local invalid reference as an image transport failure", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Reference image must be a configured Azure Blob or signed media URL",
+      undefined, { imageGenerationError: true },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow(/Reference image/);
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.returnGenerationJobToQueue).toHaveBeenCalledOnce();
+  });
+
+  it("defers a temporary image failure on a continuation page", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, targetStoryId: "story-1" });
+    h.createComicContinuationPage.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds: 67,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), 62);
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.cleanupFailedContinuationPage).not.toHaveBeenCalled();
+  });
+
+  it("never subtracts jitter from Retry-After for a non-UUID job ID", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, id: "job-1" });
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true, retryAfterSeconds: 42 },
+    ));
+
+    await expect(processGenerationJob("job-1")).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds: 47,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith("job-1", expect.any(String), 42);
+  });
+
+  it.each([
+    { hint: 0, leaseSeconds: 10, visibilitySeconds: 15 },
+    { hint: 600, leaseSeconds: 600, visibilitySeconds: 605 },
+  ])("clamps a $hint-second provider retry hint to a safe queue delay", async ({ hint, leaseSeconds, visibilitySeconds }) => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true, retryAfterSeconds: hint },
+    ));
+
+    await expect(processGenerationJob(job.id)).rejects.toMatchObject({
+      name: "GenerationJobDeferredError",
+      visibilitySeconds,
+    });
+    expect(h.deferGenerationJobRetry).toHaveBeenCalledWith(job.id, expect.any(String), leaseSeconds);
+  });
+
+  it("does not automatically retry before a provider Retry-After beyond ten minutes", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Provider error with sensitive request details", 429,
+      { imageGenerationError: true, retryAfterSeconds: 9_000 },
+    ));
+
+    await processGenerationJob(job.id);
+
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image request rate limited",
+    );
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining("Reply CREATE later to retry"),
+    }));
+  });
+
+  it("does not retry an overloaded image 503 before a long provider Retry-After", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Provider error with sensitive request details", 503,
+      { imageGenerationError: true, retryAfterSeconds: 9_000 },
+    ));
+
+    await processGenerationJob(job.id);
+
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image service unavailable",
+    );
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a deferred image 429 recoverable when the lease update fails", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true },
+    ));
+    h.deferGenerationJobRetry.mockRejectedValue(new Error("DB unavailable"));
+
+    await expect(processGenerationJob(job.id)).rejects.toThrow("DB unavailable");
+    expect(h.markGenerationJobFailed).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not claim an image job again while its deferred processing lease is active", async () => {
+    h.claimGenerationJob.mockResolvedValue(null);
+    h.getGenerationJob.mockResolvedValue({ ...job, status: "processing" });
+
+    await processGenerationJob(job.id);
+
+    expect(h.createComicStory).not.toHaveBeenCalled();
+    expect(h.createComicContinuationPage).not.toHaveBeenCalled();
+    expect(h.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("fails a hard image quota 429 without retrying the job", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "credit_limit", "Provider billing error with sensitive request details", 429,
+      { imageGenerationError: true },
+    ));
+
+    await processGenerationJob(job.id);
+
+    expect(h.returnGenerationJobToQueue).not.toHaveBeenCalled();
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image credits unavailable",
+    );
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining("Reply CREATE later to retry"),
+    }));
+  });
+
+  it("ends a temporary image 429 after the third bounded job attempt", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Image request rate limited", 429, { imageGenerationError: true },
+    ));
+
+    await processGenerationJob(job.id);
+
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledOnce();
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+  });
+
+  it("ends a transient image 500 after the third bounded job attempt", async () => {
+    h.claimGenerationJob.mockResolvedValue({ ...job, attemptCount: 3 });
+    h.createComicStory.mockRejectedValue(new ComicServiceError(
+      "api_error", "Provider error with sensitive request details", 500,
+      { imageGenerationError: true },
+    ));
+
+    await processGenerationJob(job.id);
+
+    expect(h.deferGenerationJobRetry).not.toHaveBeenCalled();
+    expect(h.markGenerationJobFailed).toHaveBeenCalledWith(
+      job.id, expect.any(String), "Image service unavailable",
+    );
+    expect(h.failConversationForGeneration).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["image failure", new Error("Image service unavailable"), 3, "say create it to retry", false],
     ["content policy rejection", new ComicServiceError("content_policy", "Rejected"), 1, "tell me what to change", true],
@@ -956,7 +1227,7 @@ describe("processGenerationJob", () => {
     await processGenerationJob(job.id);
 
     expect(h.createComicStory).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: job.userId, prompt: job.prompt, style: job.style }),
+      expect.objectContaining({ userId: job.userId, prompt: job.prompt, style: job.style, imageMaxRetries: 0 }),
     );
     expect(h.comicDeliveryUrl).toHaveBeenCalledWith(
       "story-1", "mars-dragon", "https://comics.example.com/story/mars-dragon",
@@ -1097,6 +1368,7 @@ describe("processGenerationJob", () => {
         storyId: "story-1",
         pageId: job.id,
         userId: job.userId,
+        imageMaxRetries: 0,
       }),
     );
     expect(h.createComicStory).not.toHaveBeenCalled();

@@ -18,6 +18,13 @@ const h = vi.hoisted(() => ({
   recoverFailedComicTextFallbacks: vi.fn(),
   Busy: class ConversationLeaseBusyError extends Error {},
   Backlog: class EarlierInboundTurnsPendingError extends Error {},
+  Deferred: class GenerationJobDeferredError extends Error {
+    visibilitySeconds: number;
+    constructor(visibilitySeconds: number) {
+      super("Generation job deferred after a temporary image failure");
+      this.visibilitySeconds = visibilitySeconds;
+    }
+  },
 }));
 
 vi.mock("@/lib/generation-queue", () => ({
@@ -47,6 +54,7 @@ vi.mock("@/lib/twilio-events", () => ({
 }));
 vi.mock("@/lib/generation-jobs", () => ({
   recoverUnpublishedGenerationJobs: h.recoverUnpublishedGenerationJobs,
+  GenerationJobDeferredError: h.Deferred,
 }));
 vi.mock("@/lib/twilio-delivery", () => ({
   recoverFailedComicTextFallbacks: h.recoverFailedComicTextFallbacks,
@@ -131,6 +139,39 @@ describe("Azure Queue worker dispatch", () => {
     expect(h.processGenerationJob).toHaveBeenCalledWith("job-1");
     expect(h.processInboundMessage).not.toHaveBeenCalled();
     expect(h.deleteGenerationJob).toHaveBeenCalledWith(message);
+  });
+
+  it("defers a temporary image failure until its database lease expires", async () => {
+    const worker = await import("@/worker/index");
+    const message = {
+      version: 1,
+      jobId: "job-1",
+      messageId: "queue-1",
+      popReceipt: "receipt-1",
+    };
+    h.receiveGenerationJob.mockResolvedValue(message);
+    h.processGenerationJob.mockRejectedValue(new h.Deferred(67));
+
+    await expect(worker.processNextGenerationJob()).resolves.toBe(true);
+
+    expect(h.renewGenerationJob).toHaveBeenCalledWith(message, 67);
+    expect(h.deleteGenerationJob).not.toHaveBeenCalled();
+  });
+
+  it("leaves a deferred generation pop recoverable when Azure rejects visibility renewal", async () => {
+    const worker = await import("@/worker/index");
+    const message = {
+      version: 1,
+      jobId: "job-1",
+      messageId: "queue-1",
+      popReceipt: "receipt-1",
+    };
+    h.receiveGenerationJob.mockResolvedValue(message);
+    h.processGenerationJob.mockRejectedValue(new h.Deferred(67));
+    h.renewGenerationJob.mockRejectedValue(new Error("Queue unavailable"));
+
+    await expect(worker.processNextGenerationJob()).rejects.toThrow("Queue unavailable");
+    expect(h.deleteGenerationJob).not.toHaveBeenCalled();
   });
 
   it("routes inbound work to the agent and deletes only after completion", async () => {

@@ -27,6 +27,17 @@ export class GenerationJobLeaseLostError extends Error {
   }
 }
 
+/** The current queue pop must be hidden until a deferred provider retry is claimable. */
+export class GenerationJobDeferredError extends Error {
+  readonly visibilitySeconds: number;
+
+  constructor(visibilitySeconds: number) {
+    super("Generation job deferred after a temporary image failure");
+    this.name = "GenerationJobDeferredError";
+    this.visibilitySeconds = visibilitySeconds;
+  }
+}
+
 function assertProcessingLeaseUpdated(rows: { id: string }[], jobId: string): void {
   if (rows.length === 0) throw new GenerationJobLeaseLostError(jobId);
 }
@@ -660,6 +671,31 @@ export async function returnGenerationJobToQueue(
       lastError: error.slice(0, 1000),
       leaseOwner: null,
       leaseExpiresAt: null,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(generationJobs.id, jobId),
+      eq(generationJobs.status, "processing"),
+      eq(generationJobs.leaseOwner, workerId),
+    ))
+    .returning({ id: generationJobs.id });
+  assertProcessingLeaseUpdated(rows, jobId);
+}
+
+/** Hold the current claim until its provider backoff ends, fencing duplicate queue pops. */
+export async function deferGenerationJobRetry(
+  jobId: string,
+  workerId: string,
+  leaseSeconds: number,
+): Promise<void> {
+  if (!Number.isInteger(leaseSeconds) || leaseSeconds < 10 || leaseSeconds > 600) {
+    throw new Error("Generation retry delay must be an integer from 10 to 600 seconds");
+  }
+  const rows = await db
+    .update(generationJobs)
+    .set({
+      leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
+      lastError: "image_provider_deferred",
       updatedAt: new Date(),
     })
     .where(and(
