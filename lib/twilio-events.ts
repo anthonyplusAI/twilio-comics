@@ -39,6 +39,13 @@ function rowsOf<T>(result: unknown): T[] {
   return (result as { rows?: T[] }).rows ?? (result as T[]);
 }
 
+// Revisions must advance even when two turns land within one clock tick. The
+// SMS checkpoint compares this value with its model-turn snapshot.
+const nextConversationRevision = sql`GREATEST(
+  date_trunc('milliseconds', NOW()),
+  date_trunc('milliseconds', ${conversations.updatedAt}) + INTERVAL '1 millisecond'
+)`;
+
 function toStored(row: typeof twilioInboundMessages.$inferSelect): StoredInboundMessage {
   if (row.channel !== "sms" && row.channel !== "whatsapp") {
     throw new Error(`Unsupported inbound message channel: ${row.channel}`);
@@ -189,7 +196,7 @@ export async function claimConversationLease(
       activeStoryId: sql`CASE WHEN ${staleDraft} THEN NULL ELSE ${conversations.activeStoryId} END`,
       leaseOwner,
       leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
-      updatedAt: new Date(),
+      updatedAt: nextConversationRevision,
     })
     .where(and(
       eq(conversations.channel, channel),
@@ -209,7 +216,7 @@ export async function renewConversationLease(
     .update(conversations)
     .set({
       leaseExpiresAt: sql`NOW() + (${leaseSeconds} * INTERVAL '1 second')`,
-      updatedAt: new Date(),
+      updatedAt: nextConversationRevision,
     })
     .where(and(
       eq(conversations.id, conversationId),
@@ -226,7 +233,7 @@ export async function releaseConversationLease(
 ): Promise<void> {
   await db
     .update(conversations)
-    .set({ leaseOwner: null, leaseExpiresAt: null, updatedAt: new Date() })
+    .set({ leaseOwner: null, leaseExpiresAt: null, updatedAt: nextConversationRevision })
     .where(and(eq(conversations.id, conversationId), eq(conversations.leaseOwner, leaseOwner)));
 }
 
@@ -257,20 +264,57 @@ export async function checkpointInboundTurn(input: {
   activeStoryId: string | null;
   replyBody: string;
   submission: ComicAgentSubmission | null;
-}): Promise<void> {
+  expectedUpdatedAt: Date;
+  expectedGeneratingRequestKey?: string | null;
+  restartVoice?: { phoneNumber: string; requestedAt: string };
+}): Promise<Date> {
   const collected = JSON.stringify(input.collected);
   const submission = input.submission ? JSON.stringify(input.submission) : null;
+  const generatingGuard = input.expectedGeneratingRequestKey !== undefined
+    ? sql`AND state = 'generating'
+        AND collected->>'generationRequestKey' IS NOT DISTINCT FROM ${input.expectedGeneratingRequestKey}`
+    : sql``;
+  const voiceReset = input.restartVoice
+    ? sql`, voice_reset AS (
+      UPDATE conversations
+      SET state = CASE WHEN state = 'generating' THEN 'generating' ELSE 'collecting' END,
+          collected = CASE WHEN state = 'generating'
+            THEN collected || jsonb_build_object(
+              'newDraftRequestedAt',
+              GREATEST(COALESCE(collected->>'newDraftRequestedAt', ''), ${input.restartVoice.requestedAt})
+            )
+            ELSE jsonb_build_object(
+              'photoHandoffResetAt',
+              GREATEST(COALESCE(collected->>'photoHandoffResetAt', ''), ${input.restartVoice.requestedAt})
+            )
+          END,
+          active_story_id = CASE WHEN state = 'generating' THEN active_story_id ELSE NULL END,
+          updated_at = GREATEST(
+            date_trunc('milliseconds', NOW()),
+            date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+          )
+      WHERE channel = 'voice'
+        AND phone_number = ${input.restartVoice.phoneNumber}
+        AND EXISTS (SELECT 1 FROM checkpointed_message)
+      RETURNING id
+    )`
+    : sql``;
   const result = await db.execute(sql`
     WITH checkpointed_conversation AS (
       UPDATE conversations
       SET state = ${input.state},
           collected = ${collected}::jsonb,
           active_story_id = ${input.activeStoryId}::uuid,
-          updated_at = NOW()
+          updated_at = GREATEST(
+            date_trunc('milliseconds', NOW()),
+            date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+          )
       WHERE id = ${input.conversationId}::uuid
         AND lease_owner = ${input.leaseOwner}
         AND lease_expires_at > NOW()
-      RETURNING id
+        AND updated_at = ${input.expectedUpdatedAt}
+        ${generatingGuard}
+      RETURNING id, updated_at
     ), checkpointed_message AS (
       UPDATE twilio_inbound_messages
       SET status = 'reply_pending',
@@ -281,12 +325,15 @@ export async function checkpointInboundTurn(input: {
         AND status <> 'completed'
         AND EXISTS (SELECT 1 FROM checkpointed_conversation)
       RETURNING message_sid
-    )
-    SELECT message_sid FROM checkpointed_message
+    )${voiceReset}
+    SELECT checkpointed_message.message_sid, checkpointed_conversation.updated_at
+    FROM checkpointed_message CROSS JOIN checkpointed_conversation
   `);
-  if (rowsOf<{ message_sid: string }>(result).length !== 1) {
+  const rows = rowsOf<{ message_sid: string; updated_at: Date }>(result);
+  if (rows.length !== 1) {
     throw new Error("Unable to checkpoint inbound turn: conversation lease lost");
   }
+  return rows[0].updated_at;
 }
 
 export async function completeInboundReply(

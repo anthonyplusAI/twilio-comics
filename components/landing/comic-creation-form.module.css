@@ -1,0 +1,496 @@
+.form {
+  border: 3px solid var(--ink, #000d25);
+  background: var(--paper, #fff);
+  box-shadow: 8px 8px 0 var(--ink, #000d25);
+  color: var(--ink, #000d25);
+}
+
+.formHeader {
+  border-bottom: 3px solid var(--ink, #000d25);
+  background: var(--red-action, #db132a);
+  padding: 20px 26px 22px;
+  color: #fff;
+}
+
+.brandLine {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.formHeader h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-bangers), Impact, sans-serif;
+  font-size: clamp(36px, 3vw, 46px);
+  font-weight: 400;
+  letter-spacing: 0.005em;
+  line-height: 1;
+}
+
+.formHeader p:last-child {
+  max-width: 41ch;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.formBody {
+  padding: 0 26px;
+}
+
+.signInGate {
+  margin-top: 22px;
+  border: 2px solid var(--blue, #1866ee);
+  background: var(--pale-blue, #e4f7ff);
+  padding: 14px;
+}
+
+.signInGate p {
+  margin: 0 0 11px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.signInGateButton,
+.signInGateButton:global([data-slot="button"]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 43px;
+  height: auto;
+  border: 2px solid var(--ink, #000d25);
+  border-radius: 0;
+  background: var(--red-action, #db132a);
+  box-shadow: 3px 3px 0 var(--ink, #000d25);
+  padding: 8px 12px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.signInGateButton:hover {
+  background: var(--ink, #000d25);
+}
+
+.stepSection {
+  border-bottom: 1px solid #ccd3df;
+  padding: 22px 0;
+}
+
+.stepSection:last-child {
+  border-bottom: 0;
+}
+
+.stepHeading {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-bottom: 15px;
+}
+
+.stepNumber {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 2px solid var(--ink, #000d25);
+  background: var(--pale-blue, #e4f7ff);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.stepCopy h3 {
+  margin: 2px 0 3px;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.stepCopy p {
+  margin: 0;
+  color: var(--muted, #4d5777);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.photoGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.photoSlot {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 126px;
+  border: 2px dashed #8793ad;
+  background: #f7f9fc;
+}
+
+.photoSlot:first-child:not(.photoSlotFilled) {
+  background: var(--pale-blue, #e4f7ff);
+}
+
+.photoSlotFilled {
+  overflow: hidden;
+  border: 2px solid var(--ink, #000d25);
+  background: var(--surface, #f3f4f7);
+}
+
+.photoEmpty,
+.photoPending {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 14px 8px;
+  text-align: center;
+}
+
+.photoEmpty strong,
+.photoPending span {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.photoEmpty > span {
+  color: var(--muted, #4d5777);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.photoImage {
+  display: block;
+  width: 100%;
+  height: 126px;
+  object-fit: cover;
+}
+
+.photoFileName {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  background: rgb(0 13 37 / 88%);
+  padding: 5px 8px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removePhoto {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border: 2px solid var(--ink, #000d25);
+  background: #fff;
+  color: var(--ink, #000d25);
+  cursor: pointer;
+}
+
+.removePhoto:hover:not(:disabled) {
+  background: var(--red-action, #db132a);
+  color: #fff;
+}
+
+.photoActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 43px;
+  border: 2px solid var(--ink, #000d25);
+  background: #fff;
+  padding: 8px 13px;
+  color: var(--ink, #000d25);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 150ms ease, transform 150ms ease;
+}
+
+.secondaryButton:hover:not(:disabled) {
+  background: var(--pale-blue, #e4f7ff);
+  transform: translateY(-1px);
+}
+
+.secondaryButton:disabled,
+.removePhoto:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.fileInput,
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.fileInput {
+  display: none;
+}
+
+.photoMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 9px 0 0;
+  color: var(--muted, #4d5777);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.ideaInput {
+  display: block;
+  width: 100%;
+  min-height: 104px;
+  resize: vertical;
+  border: 2px solid var(--ink, #000d25);
+  border-radius: 0;
+  background: #fff;
+  padding: 11px 13px;
+  color: var(--ink, #000d25);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.ideaInput::placeholder {
+  color: #65708b;
+  opacity: 1;
+}
+
+.ideaInput:disabled {
+  background: var(--surface, #f3f4f7);
+  cursor: not-allowed;
+}
+
+.characterCount {
+  margin: 6px 0 0;
+  color: var(--muted, #4d5777);
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: right;
+}
+
+.styleOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.styleOption {
+  min-height: 42px;
+  border: 2px solid var(--ink, #000d25);
+  background: #fff;
+  padding: 8px 11px;
+  color: var(--ink, #000d25);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.styleOption:hover:not(:disabled) {
+  background: var(--pale-blue, #e4f7ff);
+}
+
+.styleOptionSelected,
+.styleOptionSelected:hover:not(:disabled) {
+  border-color: var(--blue, #1866ee);
+  background: var(--pale-blue, #e4f7ff);
+  box-shadow: inset 4px 0 0 var(--blue, #1866ee);
+}
+
+.styleOption:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.formFooter {
+  border-top: 3px solid var(--ink, #000d25);
+  background: var(--surface, #f3f4f7);
+  padding: 18px 26px 20px;
+}
+
+.generateButton,
+.generateButton:global([data-slot="button"]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  min-height: 53px;
+  height: auto;
+  border: 3px solid var(--ink, #000d25);
+  border-radius: 0;
+  background: var(--red-action, #db132a);
+  box-shadow: 4px 4px 0 var(--ink, #000d25);
+  padding: 10px 14px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.generateButton:hover:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 var(--ink, #000d25);
+}
+
+.generateButton:disabled {
+  border-color: #8793ad;
+  background: #d8dde7;
+  box-shadow: none;
+  color: #4d5777;
+  cursor: not-allowed;
+}
+
+.generateButton svg {
+  flex: none;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+.authPending {
+  min-height: 53px;
+  color: var(--muted, #4d5777);
+  font-size: 14px;
+}
+
+.actionMeta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--muted, #4d5777);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.actionMeta span:last-child {
+  flex: none;
+  text-align: right;
+}
+
+.apiKeyButton {
+  margin-top: 12px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--ink, #000d25);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.form button:focus-visible,
+.form textarea:focus-visible {
+  outline: 3px solid var(--blue, #1866ee);
+  outline-offset: 3px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 560px) {
+  .formHeader,
+  .formFooter {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .formBody {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .stepSection {
+    padding: 19px 0;
+  }
+
+  .photoGrid {
+    gap: 8px;
+  }
+
+  .photoSlot {
+    min-height: 116px;
+  }
+
+  .photoImage {
+    height: 116px;
+  }
+
+  .photoActions > * {
+    flex: 1;
+  }
+
+  .photoMeta,
+  .actionMeta {
+    flex-wrap: wrap;
+  }
+
+  .actionMeta span:last-child {
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secondaryButton,
+  .styleOption,
+  .generateButton {
+    transition: none;
+  }
+
+  .spinner {
+    animation: none;
+  }
+}

@@ -69,7 +69,7 @@
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(410px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 30px;
   max-width: 1380px;
   margin: 0 auto;
@@ -121,6 +121,18 @@
   color: var(--ink);
 }
 
+.camera .cardBand,
+.camera .channelButton {
+  background: var(--blue);
+  color: var(--paper);
+}
+
+.studio .cardBand,
+.studio .channelButton {
+  background: var(--red-action);
+  color: var(--paper);
+}
+
 .channelIcon {
   display: grid;
   place-items: center;
@@ -160,9 +172,16 @@
 
 .destination {
   overflow-wrap: anywhere;
-  margin: 8px 0 24px;
+  margin: 8px 0 10px;
   font-size: 21px;
   font-weight: 800;
+}
+
+.cardDescription {
+  margin: 0 0 20px;
+  color: #38425e;
+  font-size: 15px;
+  line-height: 1.4;
 }
 
 .channelButton {
@@ -229,49 +248,9 @@
   flex: none;
 }
 
-.photoPath {
-  max-width: 1380px;
-  margin: 49px auto 0;
-  border: 2px solid var(--ink);
-  background: var(--pale-blue);
-  padding: 19px 23px;
-  font-size: 16px;
-  line-height: 1.5;
-}
-
-.photoPath strong {
-  font-weight: 800;
-}
-
-.photoPath p {
-  margin: 0;
-}
-
-.cameraPath {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.cameraLink {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 44px;
-  border: 2px solid var(--ink);
-  background: var(--paper);
-  padding: 8px 12px;
-  color: var(--ink);
-  font-weight: 800;
-  text-decoration: none;
-}
-
 .howItWorks {
   max-width: 1380px;
-  margin: 20px auto 0;
+  margin: 32px auto 0;
   color: #38425e;
   font-size: 14px;
   line-height: 1.5;
@@ -350,7 +329,6 @@
 
 @media (min-width: 901px) and (max-width: 1100px) {
   .cards,
-  .photoPath,
   .howItWorks {
     max-width: 680px;
   }
@@ -437,19 +415,8 @@
     min-height: 58px;
   }
 
-  .photoPath {
-    margin-top: 44px;
-    padding: 18px 20px;
-    font-size: 15px;
-  }
-
-  .cameraPath {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .howItWorks {
-    margin-top: 16px;
+    margin-top: 24px;
   }
 
   .programDisclosure {

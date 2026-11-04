@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({ select: vi.fn() }));
 vi.mock("@/lib/db", () => ({ db: { select: h.select } }));
 
-import { getStagedCameraPhotoReferences } from "@/lib/browser-photo-staging";
+import { getStagedCameraPhotoCount, getStagedCameraPhotoReferences } from "@/lib/browser-photo-staging";
 import { VOICE_PHOTO_HANDOFF_WINDOW_MS } from "@/lib/voice-photo-handoff";
 
 const PHONE = "+14155552671";
@@ -11,6 +11,7 @@ const OWNER = `twilio_${"a".repeat(32)}`;
 const OTHER = `twilio_${"b".repeat(32)}`;
 const FIRST = `blob:uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000001.jpg`;
 const SECOND = `blob:uploads/${OWNER}/camera/00000000-0000-4000-8000-000000000002.jpg`;
+const SESSION_NONCE = "00000000-0000-4000-8000-000000000011";
 
 function setCameraRow(collected: unknown, updatedAt: Date) {
   const limit = vi.fn().mockResolvedValue([{ collected, updatedAt }]);
@@ -37,5 +38,27 @@ describe("camera references for a verified phone", () => {
     expect(await getStagedCameraPhotoReferences("bad phone", OWNER)).toEqual([]);
     expect(await getStagedCameraPhotoReferences(PHONE, "foreign-user")).toEqual([]);
     expect(h.select).not.toHaveBeenCalled();
+  });
+
+  it("snapshots only photos saved before a spoken reset, preserving a later upload", async () => {
+    const cutoff = Date.now() - 500;
+    setCameraRow({
+      characterImageUrls: [FIRST, SECOND],
+      cameraReferenceSavedAt: { [FIRST]: cutoff - 1000, [SECOND]: cutoff + 100 },
+    }, new Date());
+
+    expect(await getStagedCameraPhotoReferences(PHONE, OWNER, cutoff)).toEqual([FIRST]);
+    expect(await getStagedCameraPhotoReferences(PHONE, OWNER)).toEqual([FIRST, SECOND]);
+  });
+
+  it("lets only the active verified browser session count the staged photos", async () => {
+    setCameraRow({
+      characterImageUrls: [FIRST, SECOND],
+      cameraSessionNonce: SESSION_NONCE,
+    }, new Date());
+
+    expect(await getStagedCameraPhotoCount(PHONE, OWNER, SESSION_NONCE)).toBe(2);
+    expect(await getStagedCameraPhotoCount(PHONE, OWNER,
+      "00000000-0000-4000-8000-000000000012")).toBeNull();
   });
 });

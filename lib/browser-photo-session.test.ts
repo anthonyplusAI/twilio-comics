@@ -4,6 +4,7 @@ import {
   normalizePhotoPhone,
   photoRequestHasAllowedOrigin,
   readPhotoToken,
+  readPhotoTokenDetails,
 } from "@/lib/browser-photo-session";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -40,6 +41,22 @@ describe("browser camera phone verification", () => {
     expect(readPhotoToken(challenge, "challenge", issued - 30_001)).toBeNull();
     expect(readPhotoToken(challenge, "challenge", issued + 10 * 60_000 - 1)).toBe("+14155552671");
     expect(readPhotoToken(challenge, "challenge", issued + 10 * 60_000)).toBeNull();
+  });
+
+  it("carries a signed session nonce from the verified challenge", () => {
+    vi.stubEnv("AUTH_SECRET", "server-only-camera-secret");
+    const issued = Date.parse("2026-10-22T12:00:00Z");
+    const challenge = createPhotoToken("+14155552671", "challenge", issued);
+    const details = readPhotoTokenDetails(challenge, "challenge", issued + 1000);
+    expect(details).toMatchObject({ phone: "+14155552671", issued });
+    expect(details?.nonce).toMatch(/^[0-9a-f-]{36}$/);
+
+    const session = createPhotoToken("+14155552671", "session", issued + 2000, details?.nonce);
+    expect(readPhotoTokenDetails(session, "session", issued + 3000)?.nonce)
+      .toBe(details?.nonce);
+    expect(readPhotoTokenDetails(session, "challenge", issued + 3000)).toBeNull();
+    expect(readPhotoTokenDetails(`${session.slice(0, -1)}x`, "session", issued + 3000))
+      .toBeNull();
   });
 
   it("allows only the configured public origin for browser mutations", () => {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings, type ExperienceSettings } from "@/lib/photo-experience-settings";
 import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
+import { getPublicOrigin } from "@/lib/public-origin";
 import { isVoiceVerificationConfigured } from "@/lib/voice-verification";
 
 const ACCOUNT_SID = /^AC[0-9a-f]{32}$/i;
@@ -11,20 +12,6 @@ export type CameraDestination = {
   smsHref: string | null;
   callHref: string | null;
 };
-
-function hasPublicOrigin(): boolean {
-  const configured = process.env.PUBLIC_BASE_URL?.trim();
-  if (!configured) return false;
-  try {
-    const url = new URL(configured);
-    const localHttp = url.protocol === "http:" &&
-      (url.hostname === "localhost" || url.hostname === "127.0.0.1");
-    return (url.protocol === "https:" || localHttp) &&
-      !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
-  } catch {
-    return false;
-  }
-}
 
 /** Camera entry requires an admin opt-in, Verify, and a ready text/call path. */
 export async function getCameraDestination(
@@ -36,7 +23,7 @@ export async function getCameraDestination(
   );
   const channels = getPublicEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS);
   if (!contact.phoneNumber ||
-      !hasPublicOrigin() ||
+      !getPublicOrigin() ||
       !isVoiceVerificationConfigured() ||
       !ACCOUNT_SID.test(process.env.TWILIO_ACCOUNT_SID || "") ||
       !process.env.TWILIO_AUTH_TOKEN || !process.env.AUTH_SECRET) return null;

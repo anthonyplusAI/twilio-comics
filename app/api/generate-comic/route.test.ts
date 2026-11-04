@@ -55,6 +55,7 @@ vi.mock("@/lib/db", () => ({ db: { transaction: h.transaction, execute: h.execut
 
 import { POST } from "@/app/api/generate-comic/route";
 import { getBlobPublicUrl } from "@/lib/blob-storage";
+import { ComicServiceError } from "@/lib/comic-service";
 
 const story = {
   id: "98e67699-ffec-4e68-a52d-e2c28fc21453",
@@ -66,6 +67,7 @@ const page = {
   id: "c1f4e5c0-2e1a-48a6-a251-c104697f60bf",
   pageNumber: 2,
 };
+const validCharacterImage = "https://account.blob.core.windows.net/comics/fox.png";
 
 function request(body: unknown): NextRequest {
   return new NextRequest("https://comics.example.com/api/generate-comic", {
@@ -97,7 +99,9 @@ beforeEach(() => {
   vi.stubEnv("MEDIA_SIGNING_SECRET", "test-media-signing-secret");
   h.transaction.mockImplementation(async (callback) => callback({ execute: h.execute }));
   h.execute.mockReset().mockResolvedValue({ rows: [] });
-  h.auth.mockResolvedValue({ user: { id: story.userId } });
+  h.auth.mockResolvedValue({ user: {
+    id: story.userId, role: "user", studioAuthorized: true,
+  } });
   h.reserveFreeTierQuota.mockResolvedValue({ allowed: true, remaining: 2, reset: null, status: "reserved" });
   h.createComicStory.mockResolvedValue({
     story: { ...story, title: "Fox on Mars" },
@@ -121,7 +125,7 @@ describe("POST /api/generate-comic quota after saving", () => {
     h.consumeFreeTierQuota.mockRejectedValue(new Error("Quota status write failed"));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const response = await POST(request({ prompt: "A fox visits Mars" }));
+      const response = await POST(request({ prompt: "A fox visits Mars", characterImages: [validCharacterImage] }));
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ storyId: story.id, imageUrl: "https://example.com/first.png" });
@@ -154,7 +158,7 @@ describe("POST /api/generate-comic quota after saving", () => {
     h.createComicStory.mockRejectedValue(new Error("OpenAI unavailable"));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const response = await POST(request({ prompt: "A fox visits Mars" }));
+      const response = await POST(request({ prompt: "A fox visits Mars", characterImages: [validCharacterImage] }));
 
       expect(response.status).toBe(500);
       expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
@@ -168,7 +172,7 @@ describe("POST /api/generate-comic quota after saving", () => {
   it("rejects a generation request before creating a comic when quota is exhausted", async () => {
     h.reserveFreeTierQuota.mockResolvedValue({ allowed: false, remaining: 0, reset: null, status: "rejected" });
 
-    const response = await POST(request({ prompt: "A fox visits Mars" }));
+    const response = await POST(request({ prompt: "A fox visits Mars", characterImages: [validCharacterImage] }));
 
     expect(response.status).toBe(429);
     expect(h.createComicStory).not.toHaveBeenCalled();
@@ -179,7 +183,7 @@ describe("POST /api/generate-comic quota after saving", () => {
   it("ignores the obsolete daily limit setting for an app-funded story", async () => {
     vi.stubEnv("DAILY_GENERATION_JOB_LIMIT", "0");
 
-    const response = await POST(request({ prompt: "A fox visits Mars" }));
+    const response = await POST(request({ prompt: "A fox visits Mars", characterImages: [validCharacterImage] }));
 
     expect(response.status).toBe(200);
     expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
@@ -190,7 +194,7 @@ describe("POST /api/generate-comic quota after saving", () => {
   it("uses a caller-owned key without reserving the app-funded weekly quota", async () => {
     const ownKey = `sk-${"a".repeat(32)}`;
 
-    const response = await POST(request({ prompt: "A fox visits Mars", apiKey: ownKey }));
+    const response = await POST(request({ prompt: "A fox visits Mars", apiKey: ownKey, characterImages: [validCharacterImage] }));
 
     expect(response.status).toBe(200);
     expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
@@ -210,7 +214,7 @@ describe("POST /api/generate-comic quota after saving", () => {
   });
 
   it("counts a submitted copy of the server key as app-funded", async () => {
-    const response = await POST(request({ prompt: "A fox visits Mars", apiKey: "test-key" }));
+    const response = await POST(request({ prompt: "A fox visits Mars", apiKey: "test-key", characterImages: [validCharacterImage] }));
 
     expect(response.status).toBe(200);
     expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
@@ -220,6 +224,69 @@ describe("POST /api/generate-comic quota after saving", () => {
 });
 
 describe("POST /api/generate-comic input validation", () => {
+  it.each([
+    ["omitted", { prompt: "A fox visits Mars" }],
+    ["empty", { prompt: "A fox visits Mars", characterImages: [] }],
+  ])("requires a reference photo for a new story when references are %s", async (_label, body) => {
+    const response = await POST(request(body));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Add at least one reference photo before generating your comic.",
+    });
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.createComicStory).not.toHaveBeenCalled();
+  });
+
+  it("maps a service-level missing-photo error to a clear browser response", async () => {
+    h.createComicStory.mockRejectedValue(new ComicServiceError("missing_reference", "Photo required", 400));
+
+    const response = await POST(request({
+      prompt: "A fox visits Mars",
+      characterImages: [validCharacterImage],
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Add at least one reference photo before generating your comic.",
+      errorType: "missing_reference",
+    });
+    expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
+  });
+
+  it("allows an approved Google admin with a Studio identity", async () => {
+    h.auth.mockResolvedValue({ user: {
+      id: "google-admin-user", role: "admin", studioAuthorized: true,
+    } });
+
+    const response = await POST(request({
+      prompt: "A fox visits Mars",
+      characterImages: [validCharacterImage],
+    }));
+
+    expect(response.status).toBe(200);
+    expect(h.createComicStory).toHaveBeenCalledWith(expect.objectContaining({
+      userId: "google-admin-user",
+    }));
+  });
+
+  it.each([
+    ["a password admin", { id: "", role: "admin", studioAuthorized: false }],
+    ["an unapproved Google account", { id: "google-user", role: "user", studioAuthorized: false }],
+    ["a blank Studio identity", { id: "   ", role: "user", studioAuthorized: true }],
+  ])("rejects %s before reserving generation quota", async (_label, user) => {
+    h.auth.mockResolvedValue({ user });
+
+    const response = await POST(request({
+      prompt: "A fox visits Mars",
+      characterImages: [validCharacterImage],
+    }));
+
+    expect(response.status).toBe(401);
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.createComicStory).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["non-object JSON", null],
     ["non-string prompt", { prompt: { text: "A fox visits Mars" } }],

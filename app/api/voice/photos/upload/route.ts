@@ -12,7 +12,7 @@ import {
 import {
   CAMERA_SESSION_COOKIE,
   photoRequestHasAllowedOrigin,
-  readPhotoToken,
+  readPhotoTokenDetails,
 } from "@/lib/browser-photo-session";
 import { getStagedCameraPhotoCount, newCameraBlobKey, stageCameraPhoto } from "@/lib/browser-photo-staging";
 import { getOrCreateChannelIdentity } from "@/lib/channel-identities";
@@ -22,8 +22,9 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest): Promise<Response> {
   if (!photoRequestHasAllowedOrigin(request)) return photoJson({ error: "Request origin is not allowed" }, 403);
   if (!await getCameraDestination()) return photoJson({ error: "Camera photos are not enabled" }, 404);
-  const phone = readPhotoToken(request.cookies.get(CAMERA_SESSION_COOKIE)?.value, "session");
-  if (!phone) return photoJson({ error: "Verify your mobile number first" }, 401);
+  const session = readPhotoTokenDetails(request.cookies.get(CAMERA_SESSION_COOKIE)?.value, "session");
+  if (!session) return photoJson({ error: "Verify your mobile number first" }, 401);
+  const phone = session.phone;
 
   let form: FormData;
   try {
@@ -44,7 +45,10 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
   const slot = Number(slotValue);
   const identity = await getOrCreateChannelIdentity("camera", phone);
-  const currentCount = await getStagedCameraPhotoCount(phone, identity.userId);
+  const currentCount = await getStagedCameraPhotoCount(phone, identity.userId, session.nonce);
+  if (currentCount === null) {
+    return photoJson({ error: "Photo setup changed. Verify your number again to add photos." }, 409);
+  }
   if (slot > currentCount) return photoJson({ error: "Add the first photo before the second" }, 409);
 
   const budget = await reserveCameraBudget("upload", phone);
@@ -70,7 +74,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   let staged: Awaited<ReturnType<typeof stageCameraPhoto>>;
   try {
     await uploadBufferToBlob(image, blobKey, "image/jpeg");
-    staged = await stageCameraPhoto(phone, identity.userId, blobKey, slot);
+    staged = await stageCameraPhoto(phone, identity.userId, blobKey, slot, session.nonce);
   } catch (error) {
     console.error("Browser camera photo could not be staged", error instanceof Error ? error.name : "unknown");
     await finishCameraBudget(budget.eventKey, "failed").catch(() => {});
@@ -78,7 +82,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
   if (!staged) {
     await finishCameraBudget(budget.eventKey, "failed").catch(() => {});
-    return photoJson({ error: "Photo slots changed. Refresh and try again." }, 409);
+    return photoJson({ error: "Photo setup changed. Verify your number again to add photos." }, 409);
   }
   await finishCameraBudget(budget.eventKey, "stored").catch((error) =>
     console.error("Browser camera upload history could not finish", error instanceof Error ? error.name : "unknown"),

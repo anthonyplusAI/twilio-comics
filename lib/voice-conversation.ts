@@ -19,6 +19,7 @@ export interface VoiceConversationUpdate {
   state: string;
   collected: AgentCollected;
   activeStoryId: string | null;
+  freshStart?: { phoneNumber: string; requestedAt: string };
 }
 
 export interface VoiceSubmitInput {
@@ -57,6 +58,11 @@ export interface VoiceRelayDependencies {
     status: string;
     lastError?: string | null;
   } | null>;
+  /** Snapshot refs older than the prompt, then clear only those after a saved NEW. */
+  prepareFreshStart?: (from: string, receivedAt: number) => Promise<{
+    references: string[];
+    cleanup: () => Promise<void>;
+  }>;
   onCallStart?: (event: { callSid: string; from: string; to: string }) => Promise<void>;
   onTurn?: (event: {
     callSid: string;
@@ -90,7 +96,8 @@ export interface VoiceRelaySession {
 }
 
 type EndResult = "queued" | "quota_rejected" | "capacity_rejected" |
-  "checking" | "invalid_setup" | "stale" | "service_error" | "limit_reached";
+  "checking" | "invalid_setup" | "stale" | "service_error" | "limit_reached" |
+  "new_draft" | "new_draft_queued" | "draft_cancelled" | "missing_photo";
 
 const DUPLICATE_FINAL_WINDOW_MS = 1_500;
 const MAX_VOICE_TURNS = 20;
@@ -98,6 +105,16 @@ const MAX_VOICE_SESSION_MS = 10 * 60_000;
 const TWILIO_CALL_SID = /^CA[0-9a-f]{32}$/i;
 const TWILIO_ACCOUNT_SID = /^AC[0-9a-f]{32}$/i;
 const E164 = /^\+[1-9]\d{6,14}$/;
+
+function loadedVoiceReady(snapshot: VoiceConversationSnapshot): boolean {
+  if (snapshot.state === "generating") return true;
+  if (snapshot.state === "done" && snapshot.activeStoryId) return true;
+  if (snapshot.collected.targetStoryId &&
+      snapshot.collected.targetStoryId === snapshot.activeStoryId) return true;
+  return Array.isArray(snapshot.collected.characterImageUrls) &&
+    snapshot.collected.characterImageUrls.some((reference) =>
+      typeof reference === "string" && Boolean(reference.trim()));
+}
 
 function text(token: string): VoiceRelayOutbound[] {
   return [{ type: "text", token, last: true }];
@@ -114,6 +131,24 @@ function draftFingerprint(collected: AgentCollected): string {
     characterImageUrls: collected.characterImageUrls,
     targetStoryId: collected.targetStoryId,
   });
+}
+
+/** Keep a reset that another channel saved after this prompt reached the WebSocket. */
+function newestResetMarker(receivedAt: string, collected: AgentCollected): string {
+  let latest = receivedAt;
+  let latestTime = Date.parse(receivedAt);
+  for (const marker of [
+    collected.newDraftRequestedAt,
+    collected.photoHandoffResetAt,
+    collected.phoneRestartedAt,
+  ]) {
+    const markerTime = Date.parse(marker || "");
+    if (Number.isFinite(markerTime) && markerTime > latestTime) {
+      latest = new Date(markerTime).toISOString();
+      latestTime = markerTime;
+    }
+  }
+  return latest;
 }
 
 /** One controller per signed ConversationRelay WebSocket. The server serializes its events. */
@@ -204,7 +239,7 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
       } catch (error) {
         deps.onError?.("voice call history failed", error);
       }
-      return [];
+      return loadedVoiceReady(snapshot) ? [] : finish("missing_photo");
     }
 
     if (message.type !== "prompt" || message.last !== true) return [];
@@ -222,6 +257,8 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
       return text("I didn't catch that. Please say your comic idea or tell me what to change.");
     }
     const normalized = utterance.toLowerCase().replace(/\s+/g, " ");
+    const command = utterance.replace(/[.!?,;:…。！？]+$/u, "").trim().toUpperCase();
+    const phoneWideRestart = ["NEW", "RESET", "RESTART"].includes(command);
     if (
       normalized === lastFinalText &&
       receivedAt >= lastFinalAt &&
@@ -232,6 +269,8 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
     lastFinalText = normalized;
     lastFinalAt = receivedAt;
     turn += 1;
+    // This is the WebSocket receipt time, before history writes or model work.
+    const spokenAt = new Date(receivedAt).toISOString();
     if (!(await recordTurn("caller", utterance))) {
       return closed ? [] : finish("service_error");
     }
@@ -278,16 +317,39 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         return speak("I couldn't save your request. Please say create it again to try again.");
       }
 
-      async function rollback(): Promise<boolean> {
+      async function rollback(): Promise<"restored" | "new_draft" | false> {
         try {
           const restored = await deps.save(snapshot!, {
             state: beforeSubmission.state,
             collected: beforeSubmission.collected,
             activeStoryId: beforeSubmission.activeStoryId,
           });
-          if (!restored) return false;
-          snapshot = restored;
-          return true;
+          if (restored) {
+            snapshot = restored;
+            return "restored";
+          }
+
+          // A texted or spoken NEW may have changed the revision while the
+          // job was still being admitted. If admission failed, that queued
+          // reset must finish even though the original rollback lost its CAS.
+          const current = await deps.load(from!);
+          const requestedAt = current.collected.newDraftRequestedAt;
+          if (current.state !== "generating" ||
+              current.collected.generationRequestKey !== approvalKey ||
+              !requestedAt) return false;
+          const fresh = await deps.save(current, {
+            state: "collecting",
+            collected: {
+              photoHandoffResetAt: requestedAt,
+              ...(current.collected.ignoredCameraReferences?.length
+                ? { ignoredCameraReferences: current.collected.ignoredCameraReferences }
+                : {}),
+            },
+            activeStoryId: null,
+          });
+          if (!fresh) return false;
+          snapshot = fresh;
+          return "new_draft";
         } catch (error) {
           deps.onError?.("voice submission rollback failed", error);
           return false;
@@ -323,7 +385,12 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
           return finish("queued");
         }
         if (lookedUpJob === null || jobStatus === "quota_rejected" || jobStatus === "failed") {
-          if (await rollback()) {
+          const rollbackResult = await rollback();
+          if (rollbackResult) {
+            if (rollbackResult === "new_draft") {
+              approvalKey = undefined;
+              return finish("new_draft");
+            }
             if (jobStatus === "quota_rejected") {
               return finish(lookedUpJob && isDailyGenerationCapacityRejection(lookedUpJob)
                 ? "capacity_rejected" : "quota_rejected");
@@ -342,8 +409,13 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
         if (status !== "quota_rejected" && status !== "failed") {
           return finish(["queued", "processing", "succeeded"].includes(status) ? "queued" : "checking");
         }
-        if (!(await rollback())) {
+        const rollbackResult = await rollback();
+        if (!rollbackResult) {
           return finish("checking");
+        }
+        if (rollbackResult === "new_draft") {
+          approvalKey = undefined;
+          return finish("new_draft");
         }
         if (status === "quota_rejected") {
           return finish(isDailyGenerationCapacityRejection(submission.job)
@@ -359,20 +431,82 @@ export function createVoiceRelaySession(deps: VoiceRelayDependencies): VoiceRela
     if (draftFingerprint(snapshot.collected) !== draftFingerprint(advanced.collected)) {
       approvalKey = undefined;
     }
-    try {
-      const saved = await deps.save(snapshot, {
-        state: advanced.nextState,
-        collected: advanced.collected,
-        activeStoryId: advanced.activeStoryId,
-      });
-      if (!saved) {
-        return finish("stale");
+    let finishFreshStart: (() => Promise<void>) | undefined;
+    let ignoredCameraReferences: string[] = [];
+    if (advanced.freshStart && deps.prepareFreshStart) {
+      try {
+        const prepared = await deps.prepareFreshStart(from, receivedAt);
+        ignoredCameraReferences = prepared.references;
+        finishFreshStart = prepared.cleanup;
+      } catch (error) {
+        deps.onError?.("voice fresh-start photo snapshot failed", error);
+        lastFinalText = undefined;
+        return speak("I couldn't restart your comic yet. Please say NEW again.");
       }
+    }
+    try {
+      let current = snapshot;
+      let candidate = advanced;
+      let saved: VoiceConversationSnapshot | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const savedCollected = candidate.freshStart
+          ? {
+              ...candidate.collected,
+              ...(candidate.nextState === "generating"
+                ? { newDraftRequestedAt: newestResetMarker(spokenAt, current.collected) }
+                : { photoHandoffResetAt: newestResetMarker(spokenAt, current.collected) }),
+              ...(ignoredCameraReferences.length
+                ? { ignoredCameraReferences: [...new Set([
+                    ...(candidate.collected.ignoredCameraReferences || []),
+                    ...ignoredCameraReferences,
+                  ])].slice(-20) }
+                : {}),
+            }
+          : candidate.collected;
+        saved = await deps.save(current, {
+          state: candidate.nextState,
+          collected: savedCollected,
+          activeStoryId: candidate.activeStoryId,
+          ...(candidate.freshStart && phoneWideRestart
+            ? { freshStart: { phoneNumber: from, requestedAt: spokenAt } }
+            : {}),
+        });
+        if (saved) break;
+        if (!advanced.freshStart || attempt === 2) return finish("stale");
+
+        // A terminal worker or SMS NEW can change the revision after the
+        // utterance. Reapply it to that state, then keep whichever reset
+        // marker is newer while retaining the original spoken event time.
+        current = await deps.load(from);
+        candidate = await deps.advance(
+          {
+            state: current.state,
+            collected: current.collected,
+            activeStoryId: current.activeStoryId,
+          },
+          { text: utterance, channel: "voice" },
+        );
+        if (!candidate.freshStart || candidate.action !== "none") return finish("stale");
+      }
+      if (!saved) return finish("stale");
+      advanced = candidate;
       snapshot = saved;
     } catch (error) {
       deps.onError?.("voice conversation save failed", error);
       lastFinalText = undefined;
       return speak("I couldn't save that idea. Please say it again to try again.");
+    }
+    if (finishFreshStart) {
+      try {
+        await finishFreshStart();
+      } catch (error) {
+        deps.onError?.("voice fresh-start photo cleanup failed", error);
+      }
+    }
+    if (advanced.freshStart) {
+      return finish(["CANCEL", "DISCARD"].includes(command)
+        ? "draft_cancelled"
+        : snapshot.state === "generating" ? "new_draft_queued" : "new_draft");
     }
     return speak(advanced.reply);
   }

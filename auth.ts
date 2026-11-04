@@ -132,20 +132,29 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     session({ session, token }) {
       if (session.user) {
         session.user.role = token.role === "admin" ? "admin" : "user";
-        // Browser creation APIs check for a user ID. Admin sessions have a
-        // signed role claim but only approved Studio testers have a browser identity.
-        if (token.role === "admin" && !(
+        const studioEmail = typeof token.studioEmail === "string" ? token.studioEmail : null;
+        const approvedGoogleAdmin = token.role === "admin" &&
           token.adminAuthMethod === "google" &&
-          isStudioTesterEmailAllowed(
-            typeof token.studioEmail === "string" ? token.studioEmail : null,
-            process.env.STUDIO_TESTER_EMAILS,
-          )
-        )) {
+          isGoogleAdminJwtFresh(
+            token.adminIssuedAt,
+            token.adminGoogleEmail,
+            token.adminGoogleHostedDomain,
+            studioEmail,
+          ) &&
+          isStudioTesterEmailAllowed(studioEmail, process.env.STUDIO_TESTER_EMAILS);
+        const approvedGoogleUser = token.role !== "admin" && Boolean(studioEmail) &&
+          (process.env.NODE_ENV !== "production" ||
+            isStudioTesterEmailAllowed(studioEmail, process.env.STUDIO_TESTER_EMAILS));
+        // Only a signed Google Studio identity can use the browser composer.
+        // Password admin sessions remain admin-only, even with a user ID claim.
+        if (token.role === "admin" && !approvedGoogleAdmin) {
           session.user.id = "";
         } else {
           const userId = typeof token.id === "string" ? token.id : token.sub;
           session.user.id = userId ?? "";
         }
+        session.user.studioAuthorized = Boolean(session.user.id &&
+          (approvedGoogleAdmin || approvedGoogleUser));
       }
       return session;
     },

@@ -1,3 +1,5 @@
+import type { VoiceCallPhotoReadiness } from "@/lib/voice-call-photo-readiness";
+
 const XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>';
 
 function escapeXml(value: string): string {
@@ -43,17 +45,51 @@ export function getConversationRelayUrl(): string | null {
   }
 }
 
+export function voiceMissingPhotoPrompt(canText: boolean): string {
+  return canText
+    ? "I can't find a saved reference photo for this call. Text one or two photos to this number from the same phone you're calling on. Wait for the Photo saved reply, then call again."
+    : "I can't find a saved reference photo for this call. Open the photo page from the Twilio Comics start page. Take or upload one or two photos using the same phone number, then call again.";
+}
+
+function voiceGreeting(readiness: VoiceCallPhotoReadiness): string {
+  const disclosure =
+    "Welcome to Twilio Comics. Our AI agent transcribes this call. " +
+    "We text comic links to the number you're calling from. " +
+    "Hang up now if you don't want a text. You can find privacy and terms on our website. ";
+  if (readiness.kind === "photos") {
+    return disclosure +
+      `I found ${readiness.count >= 2 ? "two saved reference photos" : "one saved reference photo"}. ` +
+      "Tell me who is in your comic and what happens. I'll recap your idea; correct anything, then say create it to start.";
+  }
+  if (readiness.kind === "continuation") {
+    if (readiness.phase === "draft") {
+      return disclosure +
+        "Your next-page draft is saved. Tell me what to add or change. " +
+        "I'll recap it; say create it when you're ready.";
+    }
+    return disclosure +
+      "Your finished comic is ready. Say continue to add a new page. " +
+      "For a new comic, hang up and add new photos by text or on the photo page, then call back.";
+  }
+  return disclosure +
+    "I'm still creating your comic. I'll text the link when it's ready. " +
+    "Say status for an update, or new to start over after this result.";
+}
+
 /** Authorization is sent only in Twilio's signed, short-lived setup message. */
 export function voiceConversationRelayTwiML(
   publicBaseUrl: string,
   relayUrl: string,
   authorization: string,
+  readiness: VoiceCallPhotoReadiness,
 ): Response {
-  const greeting =
-    "Welcome to Twilio Comics. Our AI agent transcribes this call to create your comic. " +
-    "If you approve it, I'll text a link to the number you're calling from. " +
-    "Hang up now if you don't want a text. You can find privacy and terms on our website. " +
-    "Tell me your comic idea, or say continue to add a page to a finished story.";
+  if (readiness.kind === "missing" ||
+      (readiness.kind === "photos" && readiness.count < 1)) {
+    return voiceHangupTwiML(
+      "I couldn't find a saved photo for this call. Use the photo setup on our start page, then call again.",
+    );
+  }
+  const greeting = voiceGreeting(readiness);
   return voiceTwiMLResponse(
     `<Connect action="${escapeXml(`${publicBaseUrl}/api/twilio/voice/action`)}" method="POST">` +
     `<ConversationRelay url="${escapeXml(relayUrl)}" ` +

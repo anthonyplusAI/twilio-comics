@@ -70,13 +70,31 @@ describe("generation conversation checkpoints", () => {
     const changed = await completeConversationForGeneration(job, "story-1");
 
     expect(changed).toBe(true);
-    expect(query.set).toHaveBeenCalledWith(
-      expect.objectContaining({ state: "done", activeStoryId: "story-1" }),
-    );
+    const update = query.set.mock.calls[0][0];
+    expect(dialect.sqlToQuery(update.state).sql).toMatch(/newDraftRequestedAt[\s\S]*'collecting'[\s\S]*'done'/);
+    expect(dialect.sqlToQuery(update.activeStoryId).sql).toMatch(/newDraftRequestedAt[\s\S]*THEN NULL/);
+    const collected = dialect.sqlToQuery(update.collected);
+    expect(collected.sql).toContain("photoHandoffResetAt");
+    expect(collected.sql).toContain("ignoredCameraReferences");
+    expect(collected.sql).toContain("newDraftRequestedAt");
+    expect(collected.sql).toContain("generationRequestKey");
     const where = dialect.sqlToQuery(query.where.mock.calls[0][0]);
     expect(where.sql).toContain("generationRequestKey");
     expect(where.params).toContain("generating");
     expect(where.params).toContain("voice-call:CA123");
+  });
+
+  it("keeps the SMS restart boundary when an older job finishes", async () => {
+    const query = chain([{ id: "conversation-1" }]);
+    h.update.mockReturnValue(query);
+
+    await completeConversationForGeneration({ ...job, source: "sms" }, "story-1");
+
+    const collected = dialect.sqlToQuery(query.set.mock.calls[0][0].collected);
+    expect(collected.sql).toContain("phoneRestartedAt");
+    expect(collected.sql).toContain("phoneRestartedByMessageSid");
+    expect(collected.sql).toContain("newDraftRequestedAt");
+    expect(collected.sql).not.toContain("ignoredCameraReferences");
   });
 
   it("does not treat a newer draft as a failed generation", async () => {
@@ -85,8 +103,9 @@ describe("generation conversation checkpoints", () => {
 
     const changed = await failConversationForGeneration(job);
 
-    expect(changed).toBe(false);
-    expect(query.set).toHaveBeenCalledWith(expect.objectContaining({ state: "confirming" }));
+    expect(changed).toBe("unchanged");
+    expect(dialect.sqlToQuery(query.set.mock.calls[0][0].state).sql)
+      .toMatch(/newDraftRequestedAt[\s\S]*'collecting'[\s\S]*'confirming'/);
     const sql = dialect.sqlToQuery(query.where.mock.calls[0][0]).sql;
     expect(sql).toContain("generationRequestKey");
   });
@@ -97,9 +116,9 @@ describe("generation conversation checkpoints", () => {
 
     const changed = await failConversationForGeneration(job, { requireRevision: true });
 
-    expect(changed).toBe(true);
+    expect(changed).toBe("restored");
     const update = query.set.mock.calls[0][0];
-    expect(update.state).toBe("collecting");
+    expect(dialect.sqlToQuery(update.state).sql).toContain("'collecting'");
     const collected = dialect.sqlToQuery(update.collected);
     expect(collected.sql).toContain("jsonb_build_object");
     expect(collected.sql).toContain("generationRequestKey");
@@ -110,6 +129,24 @@ describe("generation conversation checkpoints", () => {
     expect(where.params).toContain(job.idempotencyKey);
   });
 
+  it("reports a queued NEW after failure so the worker asks for fresh photos", async () => {
+    const query = chain([{ id: "conversation-1", freshDraft: true }]);
+    h.update.mockReturnValue(query);
+
+    const changed = await failConversationForGeneration(job, { requireRevision: true });
+
+    expect(changed).toBe("new_draft");
+    const update = query.set.mock.calls[0][0];
+    expect(dialect.sqlToQuery(update.activeStoryId).sql)
+      .toMatch(/newDraftRequestedAt[\s\S]*THEN NULL/);
+    const collected = dialect.sqlToQuery(update.collected).sql;
+    expect(collected).toContain("photoHandoffResetAt");
+    expect(collected).toContain("newDraftRequestedAt");
+    expect(collected).toContain("blockedPrompt");
+    const returning = dialect.sqlToQuery(query.returning.mock.calls[0][0].freshDraft);
+    expect(returning.sql).toMatch(/collected.*prompt.*IS NULL/);
+  });
+
   it("clears only the matching expired draft and active story without touching job history", async () => {
     const query = chain([{ id: "conversation-1" }]);
     h.update.mockReturnValue(query);
@@ -117,11 +154,10 @@ describe("generation conversation checkpoints", () => {
     const changed = await expireConversationForGeneration(job);
 
     expect(changed).toBe(true);
-    expect(query.set).toHaveBeenCalledWith(expect.objectContaining({
-      state: "collecting",
-      collected: {},
-      activeStoryId: null,
-    }));
+    const update = query.set.mock.calls[0][0];
+    expect(update.state).toBe("collecting");
+    expect(update.activeStoryId).toBeNull();
+    expect(dialect.sqlToQuery(update.collected).sql).toContain("photoHandoffResetAt");
     const where = dialect.sqlToQuery(query.where.mock.calls[0][0]);
     expect(where.params).toContain("generating");
     expect(where.params).toContain(job.idempotencyKey);

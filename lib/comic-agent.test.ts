@@ -19,7 +19,7 @@ function modelReply(overrides: Partial<Awaited<ReturnType<ComicAgentModel>>> = {
 }
 
 describe("advanceComicAgent", () => {
-  it("turns an initial comic idea into a draft requiring explicit approval", async () => {
+  it("saves an initial comic idea and asks for a photo before approval", async () => {
     const model = modelReply();
     const result = await advanceComicAgent(
       { state: "awaiting_name", collected: emptyAgentCollected() },
@@ -35,7 +35,7 @@ describe("advanceComicAgent", () => {
       collected: { prompt: IDEA, style: "manga" },
     });
     expect(result.reply).toContain("CREATE");
-    expect(result.reply).toMatch(/sound right\?\n\nReply CREATE/);
+    expect(result.reply).toMatch(/sound right\?\n\nSend at least one character photo/);
     expect(result.submission).toBeUndefined();
   });
 
@@ -205,7 +205,7 @@ describe("advanceComicAgent", () => {
     expect(result.reply).toContain("CREATE");
   });
 
-  it("lets a verified caller skip staged photos without losing the idea", async () => {
+  it("does not discard a verified caller's staged photos on a skip command", async () => {
     const model = modelReply();
     const result = await advanceComicAgent(
       {
@@ -225,11 +225,11 @@ describe("advanceComicAgent", () => {
     expect(result.collected).toMatchObject({
       prompt: IDEA,
       style: "manga",
-      characterImageUrls: [],
+      characterImageUrls: ["https://example.com/first"],
       photoHandoffFingerprint: "same-source",
-      suppressPhotoHandoff: true,
     });
-    expect(result.reply).toContain("create it");
+    expect(result.collected.suppressPhotoHandoff).not.toBe(true);
+    expect(result.reply).toMatch(/reference photo.*required/i);
   });
 
   it("allows a reference to be added to a pending draft before approval", async () => {
@@ -245,18 +245,110 @@ describe("advanceComicAgent", () => {
     expect(result.action).toBe("none");
   });
 
-  it("keeps a generation locked against NEW and DISCARD", async () => {
-    for (const text of ["NEW", "DISCARD"]) {
+  it.each(["NEW", "RESET", "RESTART"])(
+    "queues %s during generation without detaching the running job",
+    async (text) => {
       const result = await advanceComicAgent(
-        { state: "generating", collected: { prompt: IDEA, style: "manga" } },
-        { text, channel: "sms" },
+        {
+          state: "generating",
+          activeStoryId: "story-1",
+          collected: {
+            prompt: IDEA,
+            style: "manga",
+            characterImageUrls: ["old-photo"],
+            generationRequestKey: "twilio-message:SM-old",
+          },
+        },
+        { text, channel: "sms", imageUrls: ["new-photo"] },
         modelReply(),
       );
+
       expect(result.nextState).toBe("generating");
-      expect(result.collected.prompt).toBe(IDEA);
-      expect(result.reply).toMatch(/working|creating|generat/i);
-    }
+      expect(result.freshStart).toBe(true);
+      expect(result.activeStoryId).toBe("story-1");
+      expect(result.collected).toMatchObject({
+        prompt: IDEA,
+        characterImageUrls: ["old-photo"],
+        generationRequestKey: "twilio-message:SM-old",
+      });
+      expect(Date.parse(result.collected.newDraftRequestedAt || "")).not.toBeNaN();
+      expect(result.reply).toMatch(/new comic|start over/i);
+      expect(result.reply).toMatch(/after.*result/i);
+      expect(result.reply).toMatch(/one or two.*photo/i);
+      expect(result.reply).toMatch(/resend.*photo/i);
+    },
+  );
+
+  it("keeps DISCARD locked during generation", async () => {
+    const result = await advanceComicAgent(
+      { state: "generating", collected: { prompt: IDEA, style: "manga" } },
+      { text: "DISCARD", channel: "sms" },
+      modelReply(),
+    );
+    expect(result.nextState).toBe("generating");
+    expect(result.collected.prompt).toBe(IDEA);
+    expect(result.freshStart).toBeUndefined();
+    expect(result.collected.newDraftRequestedAt).toBeUndefined();
+    expect(result.reply).toMatch(/working|creating|generat/i);
   });
+
+  it("reminds a Voice caller that a queued NEW needs fresh photos after the current result", async () => {
+    const result = await advanceComicAgent(
+      {
+        state: "generating",
+        collected: { prompt: IDEA, generationRequestKey: "twilio-call:old" },
+      },
+      { text: "NEW", channel: "voice" },
+      modelReply(),
+    );
+
+    expect(result.nextState).toBe("generating");
+    expect(result.reply).toMatch(/after.*result.*text.*photo.*call back/is);
+  });
+
+  it("reports the queued new comic when STATUS arrives before the old job finishes", async () => {
+    const result = await advanceComicAgent(
+      {
+        state: "generating",
+        collected: {
+          prompt: IDEA,
+          generationRequestKey: "twilio-message:SM-old",
+          newDraftRequestedAt: "2026-10-01T00:00:01.000Z",
+        },
+      },
+      { text: "STATUS", channel: "sms" },
+      modelReply(),
+    );
+
+    expect(result.reply).toMatch(/new comic.*after.*result/is);
+    expect(result.reply).toMatch(/photo/i);
+  });
+
+  it.each(["sms", "whatsapp", "voice"] as const)(
+    "starts a fresh %s comic by asking for a reference photo",
+    async (channel) => {
+      const result = await advanceComicAgent(
+        {
+          state: "done",
+          activeStoryId: "story-1",
+          collected: { prompt: IDEA, characterImageUrls: ["old-photo"] },
+        },
+        { text: "NEW", channel },
+        modelReply(),
+      );
+
+      expect(result.nextState).toBe("collecting");
+      expect(result.freshStart).toBe(true);
+      expect(result.activeStoryId).toBeNull();
+      expect(result.collected.characterImageUrls).toBeUndefined();
+      expect(result.collected.prompt).toBeUndefined();
+      expect(result.reply).toMatch(/photo/i);
+      if (channel === "voice") {
+        expect(result.reply).toMatch(/text.*new reference photo.*call back/i);
+      }
+      else expect(result.reply).toMatch(/send.*photo/i);
+    },
+  );
 
   it("asks for a revision when STATUS follows a blocked generation", async () => {
     const result = await advanceComicAgent(
@@ -329,7 +421,7 @@ describe("advanceComicAgent", () => {
     expect(result.nextState).toBe("confirming");
     expect(result.collected.prompt).toBe("A playful dragon and astronaut explore the moon");
     expect(result.collected.blockedPrompt).toBeUndefined();
-    expect(result.reply).toMatch(/create it/i);
+    expect(result.reply).toMatch(/reference photo/i);
   });
 
   it("does not call an unfinished revision declined while its prior failure marker remains", async () => {
@@ -412,17 +504,116 @@ describe("advanceComicAgent", () => {
       nextState: "done",
       activeStoryId: "story-1",
       collected: {},
+      freshStart: true,
     });
   });
 
   it("uses a spoken approval phrase for voice calls", async () => {
     const result = await advanceComicAgent(
-      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      {
+        state: "confirming",
+        collected: { prompt: IDEA, style: "noir", characterImageUrls: ["portrait-1"] },
+      },
       { text: "create it", channel: "voice" },
       modelReply(),
     );
     expect(result.action).toBe("submit");
     expect(result.submission?.prompt).toBe(IDEA);
+    expect(result.submission?.characterImageUrls).toEqual(["portrait-1"]);
+  });
+
+  it("tells a Voice caller whether a reference is present before approval", async () => {
+    const withoutPhotos = await advanceComicAgent(
+      { state: "collecting", collected: emptyAgentCollected() },
+      { text: IDEA, channel: "voice" },
+      modelReply(),
+    );
+    expect(withoutPhotos.nextState).toBe("confirming");
+    expect(withoutPhotos.reply).toMatch(/no reference photos/i);
+    expect(withoutPhotos.reply).toMatch(/hang up.*photo setup.*call back/i);
+    expect(withoutPhotos.reply).not.toMatch(/create it/i);
+
+    const withPhotos = await advanceComicAgent(
+      { state: "collecting", collected: { characterImageUrls: ["portrait-1"] } },
+      { text: IDEA, channel: "voice" },
+      modelReply(),
+    );
+    expect(withPhotos.nextState).toBe("confirming");
+    expect(withPhotos.reply).toMatch(/one reference photo/i);
+    expect(withPhotos.reply).toMatch(/create it/i);
+  });
+
+  it("does not submit a new Voice comic without photos on ordinary approval", async () => {
+    const result = await advanceComicAgent(
+      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      { text: "create it", channel: "voice" },
+      modelReply(),
+    );
+
+    expect(result.action).toBe("none");
+    expect(result.nextState).toBe("confirming");
+    expect(result.submission).toBeUndefined();
+    expect(result.reply).toMatch(/no reference photos/i);
+    expect(result.reply).toMatch(/hang up.*photo setup.*call back/i);
+  });
+
+  it("does not let a Voice skip command bypass the photo requirement", async () => {
+    const skipped = await advanceComicAgent(
+      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      { text: "skip photos", channel: "voice" },
+      modelReply(),
+    );
+    const approved = await advanceComicAgent(
+      { state: skipped.nextState, collected: skipped.collected },
+      { text: "create it", channel: "voice" },
+      modelReply(),
+    );
+
+    expect(skipped.collected.suppressPhotoHandoff).not.toBe(true);
+    expect(skipped.reply).toMatch(/reference photo.*required/i);
+    expect(approved.action).toBe("none");
+    expect(approved.submission).toBeUndefined();
+  });
+
+  it.each(["sms", "whatsapp"] as const)(
+    "requires a reference photo before a new %s comic can be created",
+    async (channel) => {
+      const draft = await advanceComicAgent(
+        { state: "collecting", collected: emptyAgentCollected() },
+        { text: IDEA, channel },
+        modelReply(),
+      );
+      expect(draft.nextState).toBe("confirming");
+      expect(draft.reply).toMatch(/send at least one.*photo/i);
+      expect(draft.reply).not.toMatch(/reply CREATE/i);
+
+      const approval = await advanceComicAgent(
+        { state: draft.nextState, collected: draft.collected },
+        { text: "CREATE", channel },
+        modelReply(),
+      );
+      expect(approval.action).toBe("none");
+      expect(approval.nextState).toBe("confirming");
+      expect(approval.submission).toBeUndefined();
+      expect(approval.reply).toMatch(/send at least one.*photo/i);
+    },
+  );
+
+  it("allows an SMS caller to add a reference to a saved idea before approval", async () => {
+    const added = await advanceComicAgent(
+      { state: "confirming", collected: { prompt: IDEA, style: "noir" } },
+      { text: "", channel: "sms", imageUrls: ["portrait-1"] },
+      modelReply(),
+    );
+    const approved = await advanceComicAgent(
+      { state: added.nextState, collected: added.collected },
+      { text: "CREATE", channel: "sms" },
+      modelReply(),
+    );
+
+    expect(added.reply).toMatch(/reply CREATE/i);
+    expect(approved.action).toBe("submit");
+    expect(approved.submission?.characterImageUrls).toEqual(["portrait-1"]);
   });
 
   it("recognizes spoken commands with sentence punctuation", async () => {
@@ -480,7 +671,8 @@ describe("advanceComicAgent", () => {
       { text: "status", channel: "voice" },
       modelReply(),
     );
-    expect(generating.reply).toContain("Say STATUS");
+    expect(generating.reply).toMatch(/still creating.*send it when it's ready/i);
+    expect(generating.reply).not.toMatch(/say STATUS/i);
 
     const done = await advanceComicAgent(
       { state: "done", collected: { prompt: IDEA }, activeStoryId: "story-1" },
@@ -490,7 +682,7 @@ describe("advanceComicAgent", () => {
     expect(done.reply).toContain("Say CONTINUE");
   });
 
-  it.each(["STATUS", "NEW", ""])("guides Voice callers without offering photos for %j", async (text) => {
+  it.each(["STATUS", "NEW", ""])("guides Voice callers to add a required photo for %j", async (text) => {
     const model = modelReply();
     const response = await advanceComicAgent(
       { state: "collecting", collected: emptyAgentCollected() },
@@ -500,7 +692,7 @@ describe("advanceComicAgent", () => {
 
     expect(response.reply).toMatch(/comic|idea/i);
     expect(response.reply).toMatch(/character|happen/i);
-    expect(response.reply).not.toMatch(/photo|attach|image/i);
+    expect(response.reply).toMatch(/reference photo/i);
     expect(model).not.toHaveBeenCalled();
   });
 

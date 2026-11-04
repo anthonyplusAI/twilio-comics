@@ -29,9 +29,9 @@ export default async function CameraPage() {
           <span>Twilio Comics</span>
         </Link>
         <nav className={marketingStyles.headerNav} aria-label="Main navigation">
-          <Link href="/start" className={styles.backLink} aria-label="Back to channels">
+          <Link href="/start" className={styles.backLink} aria-label="Back to start options">
             <ArrowLeft size={18} aria-hidden="true" />
-            <span className={marketingStyles.navText}>Channels</span>
+            <span className={marketingStyles.navText}>Start options</span>
           </Link>
           <GitHubStarLink className={marketingStyles.githubStar} />
         </nav>
@@ -40,11 +40,11 @@ export default async function CameraPage() {
       <main>
         <section className={styles.hero}>
           <div className={styles.heroInner}>
-            <p className={styles.kicker}>Optional photo setup</p>
+            <p className={styles.kicker}>Reference photo setup</p>
             <h1>{destination ? "Put yourself in the comic." : "Photo setup is unavailable."}</h1>
             <p>
               {destination
-                ? `Verify your number, add up to two photos, then ${startAction} from that same number. Share your idea with the agent on your phone.`
+                ? `Verify your number, save one or two reference photos, then ${startAction} from that same number. Share your idea with the agent on your phone.`
                 : "Choose an available way to start your comic."}
             </p>
           </div>
@@ -58,7 +58,7 @@ export default async function CameraPage() {
           />
         ) : (
           <div className={styles.unavailable}>
-            <Link href="/start">Back to channels</Link>
+            <Link href="/start">Back to start options</Link>
           </div>
         )}
       </main>

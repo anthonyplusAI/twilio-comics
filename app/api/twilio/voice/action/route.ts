@@ -69,6 +69,17 @@ function retryInstruction(): string {
   return options.length ? options.join(" or ") : "try again later";
 }
 
+function freshPhotoInstruction(afterVoiceCancel = false): string {
+  const contact = getMarketingContact(
+    process.env.TWILIO_PHONE_NUMBER,
+    process.env.TWILIO_WHATSAPP_NUMBER,
+  );
+  const channels = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS);
+  return channels.includes("sms")
+    ? `${afterVoiceCancel ? "text NEW to this number. After it replies, " : ""}text one or two fresh reference photos to this number. Wait for a Photo saved reply, then call again from the same number.`
+    : "use the photo page on our website to add one or two fresh reference photos using the number you called from, then call again from the same number.";
+}
+
 /** Twilio requests this signed URL when <Connect><ConversationRelay> exits. */
 export async function POST(request: NextRequest): Promise<Response> {
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
@@ -96,6 +107,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   const duration = callDuration ?? relayDuration;
   const knownResults = new Set([
     "queued", "quota_rejected", "capacity_rejected", "checking", "invalid_setup", "stale", "service_error", "limit_reached",
+    "new_draft", "new_draft_queued", "draft_cancelled", "missing_photo",
   ]);
   const result = handoffData.result && knownResults.has(handoffData.result)
     ? handoffData.result
@@ -106,6 +118,18 @@ export async function POST(request: NextRequest): Promise<Response> {
   switch (params.CallStatus === "completed" ? "completed" : result) {
     case "queued":
       spoken = "Your comic is being created. I'll text your comic to this number when it's ready. Goodbye.";
+      break;
+    case "new_draft":
+      spoken = `Your new comic is ready to start: ${freshPhotoInstruction()} Goodbye.`;
+      break;
+    case "new_draft_queued":
+      spoken = `Your previous comic is still being created. Wait for its result text, then ${freshPhotoInstruction()} Goodbye.`;
+      break;
+    case "draft_cancelled":
+      spoken = `Your draft was cancelled. To start a new comic, ${freshPhotoInstruction(true)} Goodbye.`;
+      break;
+    case "missing_photo":
+      spoken = `A reference photo is required before this call can create a comic: ${freshPhotoInstruction()} Goodbye.`;
       break;
     case "quota_rejected":
       spoken = "You've reached the free comic limit for this week. Please try again later. Goodbye.";

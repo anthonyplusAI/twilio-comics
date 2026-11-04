@@ -179,6 +179,9 @@ export const conversations = pgTable(
         blockedPrompt?: string;
         style?: string;
         characterImageUrls?: string[];
+        cameraSessionNonce?: string;
+        cameraSessionIssuedAt?: number;
+        cameraReferenceSavedAt?: Record<string, number>;
         photoHandoffFingerprint?: string;
         photoHandoffResetAt?: string;
         suppressPhotoHandoff?: boolean;

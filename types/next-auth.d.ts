@@ -11,6 +11,8 @@ declare module "next-auth" {
     user: DefaultSession["user"] & {
       id: string;
       role: "admin" | "user";
+      /** Derived from signed Google claims and the active Studio allowlist. */
+      studioAuthorized: boolean;
     };
   }
 }

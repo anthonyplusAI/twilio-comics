@@ -4,8 +4,10 @@ import twilio from "twilio";
 import { POST } from "@/app/api/twilio/voice/verify/route";
 import { verifyVoiceCallAuthorization } from "@/lib/voice-call-authorization";
 
-const { checkVoiceVerification } = vi.hoisted(() => ({
+const { checkVoiceVerification, getVoiceCallPhotoReadiness, getExperienceSettings } = vi.hoisted(() => ({
   checkVoiceVerification: vi.fn(),
+  getVoiceCallPhotoReadiness: vi.fn(),
+  getExperienceSettings: vi.fn(),
 }));
 const { reserveVoiceCallBudget } = vi.hoisted(() => ({
   reserveVoiceCallBudget: vi.fn(),
@@ -15,6 +17,8 @@ vi.mock("@/lib/voice-verification", () => ({
   checkVoiceVerification,
 }));
 vi.mock("@/lib/voice-call-budget", () => ({ reserveVoiceCallBudget }));
+vi.mock("@/lib/voice-call-photo-readiness", () => ({ getVoiceCallPhotoReadiness }));
+vi.mock("@/lib/photo-experience-settings", () => ({ getExperienceSettings }));
 
 const BASE = "https://comics.example";
 const TOKEN = "test-twilio-auth-token";
@@ -49,6 +53,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   checkVoiceVerification.mockResolvedValue(true);
   reserveVoiceCallBudget.mockResolvedValue({ allowed: true, duplicate: false });
+  getVoiceCallPhotoReadiness.mockResolvedValue({ kind: "photos", count: 1 });
+  getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
   vi.stubEnv("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
   vi.stubEnv("TWILIO_AUTH_TOKEN", TOKEN);
   vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", `VA${"d".repeat(32)}`);
@@ -62,12 +68,56 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Voice keypad verification", () => {
+  it("ends a verified call if its saved photo disappeared before Relay starts", async () => {
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "missing" });
+    const response = await POST(signedRequest(1, CALL_PARAMS));
+    const xml = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(xml).toMatch(/text one or two photos/i);
+    expect(xml).toContain("<Hangup");
+    expect(xml).not.toContain("<ConversationRelay");
+    expect(reserveVoiceCallBudget).not.toHaveBeenCalled();
+  });
+
+  it("continues a finished comic without asking for a new photo", async () => {
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "continuation", phase: "finished" });
+    const response = await POST(signedRequest(1, CALL_PARAMS));
+    const xml = await response.text();
+    expect(xml).toContain("<ConversationRelay");
+    expect(xml).toMatch(/continue/i);
+    expect(xml).not.toMatch(/Tell me your comic idea/i);
+  });
+
+  it("reports a generating comic instead of inviting another idea", async () => {
+    getVoiceCallPhotoReadiness.mockResolvedValueOnce({ kind: "generating" });
+    const response = await POST(signedRequest(1, CALL_PARAMS));
+    const xml = await response.text();
+    expect(xml).toContain("<ConversationRelay");
+    expect(xml).toMatch(/still making|still creating/i);
+    expect(xml).not.toMatch(/Tell me your comic idea/i);
+  });
+
+  it("does not blame a correct code when the saved-photo check is unavailable", async () => {
+    getVoiceCallPhotoReadiness.mockRejectedValueOnce(new Error("Database unavailable"));
+    const response = await POST(signedRequest(1, CALL_PARAMS));
+    const xml = await response.text();
+    expect(xml).toMatch(/check your photos/i);
+    expect(xml).not.toMatch(/couldn't verify/i);
+    expect(xml).toContain("<Hangup");
+    expect(reserveVoiceCallBudget).not.toHaveBeenCalled();
+  });
+
   it("connects an approved caller with a token bound to this call", async () => {
     const response = await POST(signedRequest(1, CALL_PARAMS));
     const xml = await response.text();
 
     expect(response.status).toBe(200);
     expect(checkVoiceVerification).toHaveBeenCalledExactlyOnceWith(CALL_PARAMS.From, CALL_PARAMS.Digits);
+    expect(getVoiceCallPhotoReadiness).toHaveBeenCalledExactlyOnceWith(
+      CALL_PARAMS.From,
+      { voicePhotoMode: "sms", cameraEnabled: false },
+    );
     expect(reserveVoiceCallBudget).toHaveBeenCalledExactlyOnceWith({
       callSid: CALL_SID,
       fromAddress: CALL_PARAMS.From,
@@ -75,7 +125,9 @@ describe("Voice keypad verification", () => {
     });
     expect(xml).toContain('<Connect action="https://comics.example/api/twilio/voice/action" method="POST">');
     expect(xml).toContain('url="wss://comics.example/relay"');
-    expect(xml).toMatch(/comic idea/i);
+    expect(xml).toMatch(/saved reference photo/i);
+    expect(xml).toMatch(/recap your idea/i);
+    expect(xml).toMatch(/say create it/i);
     expect(xml).toMatch(/AI agent.*transcrib/i);
     expect(xml).toMatch(/text.+(comic|link).+number/i);
     expect(xml).toMatch(/privacy and terms.*website/i);

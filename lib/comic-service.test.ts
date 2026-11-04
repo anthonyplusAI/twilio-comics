@@ -32,6 +32,8 @@ vi.mock("@/lib/db-actions", () => ({
 
 import { createComicContinuationPage, createComicStory } from "@/lib/comic-service";
 
+const REFERENCE_PHOTO = "https://account.blob.core.windows.net/comics/reference.jpg";
+
 beforeEach(() => {
   Object.values(h).forEach((f) => f.mockReset());
   process.env.OPENAI_API_KEY = "test-openai-key";
@@ -47,12 +49,28 @@ beforeEach(() => {
 });
 
 describe("createComicStory", () => {
+  it.each([[undefined], [[]], [["  "]]])(
+    "rejects a new story without a usable reference photo (%j)",
+    async (characterImageUrls) => {
+      await expect(createComicStory({
+        userId: "u1",
+        prompt: "A moon hero",
+        source: "web",
+        characterImageUrls,
+      })).rejects.toMatchObject({ type: "missing_reference", status: 400 });
+      expect(h.createStory).not.toHaveBeenCalled();
+      expect(h.createPage).not.toHaveBeenCalled();
+      expect(h.generateComicImage).not.toHaveBeenCalled();
+    },
+  );
+
   it("creates a story + page, generates and uploads image, and returns urls", async () => {
     const res = await createComicStory({
       userId: "+15551234567",
       prompt: "batman on a rooftop",
       source: "sms",
       generateTitle: false,
+      characterImageUrls: [REFERENCE_PHOTO],
     });
     expect(h.createStory).toHaveBeenCalledOnce();
     expect(h.createStory.mock.calls[0][0]).toMatchObject({ userId: "+15551234567", source: "sms" });
@@ -78,6 +96,7 @@ describe("createComicStory", () => {
       source: "web",
       generateTitle: false,
       apiKey: "user-openai-key",
+      characterImageUrls: [REFERENCE_PHOTO],
     });
 
     expect(h.generateComicImage.mock.calls[0][0].apiKey).toBe("user-openai-key");
@@ -86,7 +105,7 @@ describe("createComicStory", () => {
   it("deletes the story and throws content_policy on a policy violation", async () => {
     h.generateComicImage.mockRejectedValue(new Error("Your request was rejected as a result of our safety system"));
     await expect(
-      createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toMatchObject({ type: "content_policy" });
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
   });
@@ -95,7 +114,7 @@ describe("createComicStory", () => {
     h.generateComicImage.mockRejectedValue(new Error("NO_IMAGE: no image data returned"));
 
     await expect(
-      createComicStory({ userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "A moon hero", source: "sms", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toMatchObject({ type: "api_error" });
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
   });
@@ -116,7 +135,7 @@ describe("createComicStory", () => {
     h.generateComicImage.mockRejectedValue(error);
 
     await expect(
-      createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toMatchObject({
       type: "content_policy",
       code: "moderation_blocked",
@@ -139,7 +158,7 @@ describe("createComicStory", () => {
     h.generateComicImage.mockRejectedValue(error);
 
     try {
-      await createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false });
+      await createComicStory({ userId: "u1", prompt: "x", source: "sms", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] });
       throw new Error("Expected generation to fail");
     } catch (caught) {
       expect(caught).toMatchObject({ type: "content_policy", code: "moderation_blocked" });
@@ -151,7 +170,7 @@ describe("createComicStory", () => {
     const err: any = new Error("insufficient_quota"); err.status = 402;
     h.generateComicImage.mockRejectedValue(err);
     await expect(
-      createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "x", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toMatchObject({ type: "credit_limit" });
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
   });
@@ -163,6 +182,7 @@ describe("createComicStory", () => {
       userId: "u1",
       prompt: "A hero protects the moon",
       source: "web",
+      characterImageUrls: [REFERENCE_PHOTO],
     });
 
     expect(result.story.title).toBe("A hero protects the moon");
@@ -180,7 +200,7 @@ describe("createComicStory", () => {
     h.createPage.mockRejectedValue(new Error("page write failed"));
 
     await expect(
-      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toThrow("page write failed");
 
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
@@ -190,7 +210,7 @@ describe("createComicStory", () => {
     h.uploadBufferToBlob.mockRejectedValue(new Error("blob write failed"));
 
     await expect(
-      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toThrow("blob write failed");
 
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
@@ -201,7 +221,7 @@ describe("createComicStory", () => {
     h.updatePage.mockRejectedValue(new Error("page update failed"));
 
     await expect(
-      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false }),
+      createComicStory({ userId: "u1", prompt: "A moon hero", source: "web", generateTitle: false, characterImageUrls: [REFERENCE_PHOTO] }),
     ).rejects.toThrow("page update failed");
 
     expect(h.deleteStory).toHaveBeenCalledWith("s1");
@@ -220,6 +240,7 @@ describe("createComicStory", () => {
         imageKey: "stories/s1/page-1.png",
         preserveOnFailure: true,
         generateTitle: false,
+        characterImageUrls: [REFERENCE_PHOTO],
       }),
     ).rejects.toThrow("page update failed");
 

@@ -35,6 +35,7 @@ const CONVERSATION_LEASE_SECONDS = 5 * 60;
 const MAX_TURNS_PER_RUN = 12;
 const MAX_AGENT_ATTEMPTS = 3;
 const MAX_DAILY_MESSAGE_TURNS = 100;
+const E164 = /^\+[1-9]\d{6,14}$/;
 const INITIAL_SMS_PREFIX = "Twilio Comics\n\n";
 const INITIAL_SMS_SUFFIX = "\n\nReply HELP for help; STOP to opt out. Msg & data rates may apply.";
 const DAILY_LIMIT_REPLY =
@@ -49,6 +50,12 @@ const GENERATION_CHECKING_REPLY =
   "I'm checking your comic request. If it starts, I'll text the result here.\n\nReply STATUS to check later.";
 const GENERATION_FAILURE_REPLY =
   "I couldn't start your comic yet. Your draft is saved.\n\nReply CREATE to try again.";
+const PHOTO_REQUIRED_REPLY =
+  "I need at least one reference photo before I can create your comic. Send a photo, then reply CREATE.";
+const FRESH_START_PHOTO_REPLY =
+  "Your comic has been restarted. Send one or two new reference photos, then tell me your idea.";
+const QUEUED_FRESH_START_PHOTO_REPLY =
+  "Your previous comic is still being created. After its result message, send one or two new reference photos, then tell me your idea.";
 const AGENT_FAILURE_REPLY =
   "Sorry, I couldn't process that message. Your saved draft is unchanged.\n\nSend it again, or reply NEW to start over.";
 const UNSUPPORTED_ATTACHMENT_REPLY =
@@ -83,7 +90,7 @@ function unsupportedAttachmentReply(state: string): string {
     return "I couldn't use that attachment. I'm still creating your comic.\n\nReply STATUS for an update.";
   }
   if (state === "confirming") {
-    return "I couldn't use that attachment. Your idea is saved.\n\nSend a photo, or reply CREATE.";
+    return "I couldn't use that attachment. Your idea is saved.\n\nSend a photo if you haven't already, then reply CREATE.";
   }
   if (state === "done") {
     return "I couldn't use that attachment. Send a photo or text a new comic idea.";
@@ -107,6 +114,35 @@ function isStatusCommand(text: string): boolean {
   return normalizedCommand(text) === "STATUS";
 }
 
+function voiceResetPhone(channel: StoredInboundMessage["channel"], address: string): string | null {
+  const phone = channel === "whatsapp" ? address.replace(/^whatsapp:/, "") : address;
+  return E164.test(phone) ? phone : null;
+}
+
+function photoReplyAfterRestart(state: string): string {
+  return state === "generating" ? QUEUED_FRESH_START_PHOTO_REPLY : FRESH_START_PHOTO_REPLY;
+}
+
+function oldSubmissionOwnsDraft(
+  conversation: { state: string; collected: AgentCollected },
+  messageSid: string,
+): boolean {
+  return conversation.state === "generating" &&
+    conversation.collected?.generationRequestKey === `twilio-message:${messageSid}`;
+}
+
+function draftAfterRejectedOldSubmission(
+  conversation: { state: string; collected: AgentCollected; activeStoryId: string | null },
+  messageSid: string,
+): { state: string; collected: AgentCollected; activeStoryId: string | null } {
+  if (!oldSubmissionOwnsDraft(conversation, messageSid)) return conversation;
+  return {
+    state: "collecting",
+    collected: { phoneRestartedAt: conversation.collected.phoneRestartedAt },
+    activeStoryId: null,
+  };
+}
+
 async function processOneMessage(
   message: StoredInboundMessage,
   conversation: NonNullable<Awaited<ReturnType<typeof claimConversationLease>>>,
@@ -120,12 +156,22 @@ async function processOneMessage(
   let firstSmsReply = message.channel === "sms" && Boolean(replyBody?.startsWith(INITIAL_SMS_PREFIX));
   let collectedAfterCheckpoint: AgentCollected = conversation.collected || {};
   let activeStoryIdAfterCheckpoint = conversation.activeStoryId;
+  let checkpointRevision = conversation.updatedAt;
+  const savedCollected = (conversation.collected || {}) as AgentCollected;
+  const restartedAt = Date.parse(savedCollected.phoneRestartedAt || "");
+  const ownResetReceipt = savedCollected.phoneRestartedByMessageSid === message.messageSid;
+  const staleBeforeRestart = Number.isFinite(restartedAt) &&
+    message.createdAt.getTime() <= restartedAt && !ownResetReceipt;
+  let expectedGeneratingRequestKey: string | null | undefined;
+  let restartVoice: { phoneNumber: string; requestedAt: string } | undefined;
 
   if (message.status !== "reply_pending") {
     await markInboundProcessing(message.messageSid);
     let nextState = conversation.state;
     const position = await getInboundMessagePosition(message);
     firstSmsReply = message.channel === "sms" && position.firstMessage;
+    const command = normalizedCommand(message.body);
+    const freshStartCommand = ["NEW", "RESET", "RESTART"].includes(command);
     const rateLimited = position.dailyCount > MAX_DAILY_MESSAGE_TURNS;
     if (rateLimited) {
       // Repeating a paid SMS for every message in a flood would turn the
@@ -134,13 +180,23 @@ async function processOneMessage(
         ? DAILY_LIMIT_REPLY
         : "";
       submission = null;
+    } else if (staleBeforeRestart) {
+      // A spoken or texted NEW can overtake an older receipt while the SMS
+      // worker is still in its model turn. Never apply that old idea or photo
+      // to the replacement draft when the receipt is retried.
+      replyBody = photoReplyAfterRestart(conversation.state);
+      submission = null;
     } else {
-      const budget = await reserveMessageAgentTurn({
-        messageSid: message.messageSid,
-        channel: message.channel,
-        fromAddress: message.fromAddress,
-        toAddress: message.toAddress,
-      });
+      // NEW is deterministic and never calls the model. Keep the separate
+      // daily inbound cap, but do not make a restart depend on AI turn quota.
+      const budget = freshStartCommand
+        ? { allowed: true as const, duplicate: false }
+        : await reserveMessageAgentTurn({
+            messageSid: message.messageSid,
+            channel: message.channel,
+            fromAddress: message.fromAddress,
+            toAddress: message.toAddress,
+          });
       if (!budget.allowed) {
         if (budget.reason !== "rate_limit") {
           throw new Error(`Message agent budget unavailable: ${budget.reason}`);
@@ -150,15 +206,16 @@ async function processOneMessage(
       } else {
         let completedStoryStatusId: string | null = null;
         const statusRequested = isStatusCommand(message.body);
-        const command = normalizedCommand(message.body);
         const resetOrDiscard = message.channel === "sms" &&
-          ["NEW", "RESET", "RESTART", "DISCARD"].includes(command);
+          (freshStartCommand || command === "DISCARD");
         // Read the stage before the reset turn. A new upload made while the
         // turn runs must not be cleared with the old photo set.
-        const resetStageRefs = resetOrDiscard && conversation.state !== "generating"
+        const resetStageRefs = resetOrDiscard &&
+          (freshStartCommand || conversation.state !== "generating")
           ? await getStagedCameraPhotoReferences(
               message.fromAddress,
               channelUserId(message.fromAddress),
+              message.createdAt.getTime(),
             )
           : [];
         let advancedSuccessfully = false;
@@ -231,6 +288,24 @@ async function processOneMessage(
             activeStoryIdAfterCheckpoint = advance.activeStoryId;
             nextState = advance.nextState;
             advancedSuccessfully = true;
+            if (freshStartCommand) {
+              collectedAfterCheckpoint = {
+                ...collectedAfterCheckpoint,
+                phoneRestartedAt: message.createdAt.toISOString(),
+                phoneRestartedByMessageSid: message.messageSid,
+              };
+              const phoneNumber = voiceResetPhone(message.channel, message.fromAddress);
+              if (phoneNumber) {
+                restartVoice = { phoneNumber, requestedAt: message.createdAt.toISOString() };
+              }
+              if (conversation.state === "generating") {
+                expectedGeneratingRequestKey = conversation.collected?.generationRequestKey ?? null;
+                collectedAfterCheckpoint = {
+                  ...collectedAfterCheckpoint,
+                  newDraftRequestedAt: message.createdAt.toISOString(),
+                };
+              }
+            }
             if (
               conversation.state === "done" && conversation.activeStoryId &&
               statusRequested && advance.nextState === "done" &&
@@ -251,7 +326,8 @@ async function processOneMessage(
           replyBody = AGENT_FAILURE_REPLY;
           submission = null;
         }
-        if (advancedSuccessfully && resetOrDiscard && nextState !== "generating" &&
+        if (advancedSuccessfully && resetOrDiscard &&
+            (nextState !== "generating" || freshStartCommand) &&
             resetStageRefs.length) {
           await clearStagedCameraPhotoReferences(message.fromAddress, resetStageRefs);
         }
@@ -295,7 +371,7 @@ async function processOneMessage(
     if (replyBody !== "") {
       replyBody = withInitialSmsDisclosure(replyBody || AGENT_FAILURE_REPLY, firstSmsReply);
     }
-    await checkpointInboundTurn({
+    checkpointRevision = await checkpointInboundTurn({
       messageSid: message.messageSid,
       conversationId: conversation.id,
       leaseOwner,
@@ -304,6 +380,9 @@ async function processOneMessage(
       activeStoryId: activeStoryIdAfterCheckpoint,
       replyBody,
       submission,
+      expectedUpdatedAt: checkpointRevision,
+      ...(expectedGeneratingRequestKey !== undefined ? { expectedGeneratingRequestKey } : {}),
+      ...(restartVoice ? { restartVoice } : {}),
     });
     if (rateLimited) {
       await recordActivityEvent({
@@ -317,6 +396,52 @@ async function processOneMessage(
         details: { dailyCount: position.dailyCount, dailyLimit: MAX_DAILY_MESSAGE_TURNS },
       }).catch((error) => console.error("Message limit history failed", error));
     }
+  }
+
+  if (message.status === "reply_pending" && staleBeforeRestart && !submission) {
+    replyBody = withInitialSmsDisclosure(photoReplyAfterRestart(conversation.state), firstSmsReply);
+    checkpointRevision = await checkpointInboundTurn({
+      messageSid: message.messageSid,
+      conversationId: conversation.id,
+      leaseOwner,
+      state: conversation.state,
+      collected: conversation.collected || {},
+      activeStoryId: conversation.activeStoryId,
+      replyBody,
+      submission: null,
+      expectedUpdatedAt: checkpointRevision,
+    });
+  }
+
+  // A saved reply_pending receipt can predate the agent's photo requirement.
+  // Check it again here because retries skip advanceComicAgent entirely.
+  if (submission && !submission.targetStoryId &&
+      !submission.characterImageUrls?.some((ref) => typeof ref === "string" && ref.trim())) {
+    const savedDraft = staleBeforeRestart
+      ? draftAfterRejectedOldSubmission(conversation, message.messageSid)
+      : {
+          state: "confirming",
+          collected: { ...collectedAfterCheckpoint },
+          activeStoryId: activeStoryIdAfterCheckpoint,
+        };
+    if (!staleBeforeRestart) delete savedDraft.collected.generationRequestKey;
+    const photoReply = withInitialSmsDisclosure(
+      staleBeforeRestart ? photoReplyAfterRestart(savedDraft.state) : PHOTO_REQUIRED_REPLY,
+      firstSmsReply,
+    );
+    checkpointRevision = await checkpointInboundTurn({
+      messageSid: message.messageSid,
+      conversationId: conversation.id,
+      leaseOwner,
+      state: savedDraft.state,
+      collected: savedDraft.collected,
+      activeStoryId: savedDraft.activeStoryId,
+      replyBody: photoReply,
+      submission: null,
+      expectedUpdatedAt: checkpointRevision,
+    });
+    replyBody = photoReply;
+    submission = null;
   }
 
   if (replyBody === "") {
@@ -362,41 +487,72 @@ async function processOneMessage(
 
     if (!job.accepted) {
       if (job.job.status === "quota_rejected" || job.job.status === "failed") {
-        const savedDraft = { ...collectedAfterCheckpoint };
-        delete savedDraft.generationRequestKey;
+        const savedDraft = staleBeforeRestart
+          ? draftAfterRejectedOldSubmission(conversation, message.messageSid)
+          : {
+              state: "confirming",
+              collected: { ...collectedAfterCheckpoint },
+              activeStoryId: activeStoryIdAfterCheckpoint,
+            };
+        if (!staleBeforeRestart) delete savedDraft.collected.generationRequestKey;
         const rejectionReply = withInitialSmsDisclosure(
-          job.job.status === "failed" ? GENERATION_FAILURE_REPLY
-            : isDailyGenerationCapacityRejection(job.job) ? CAPACITY_REPLY : QUOTA_REPLY,
+          staleBeforeRestart ? photoReplyAfterRestart(savedDraft.state)
+            : job.job.status === "failed" ? GENERATION_FAILURE_REPLY
+              : isDailyGenerationCapacityRejection(job.job) ? CAPACITY_REPLY : QUOTA_REPLY,
           firstSmsReply,
         );
-        await checkpointInboundTurn({
+        checkpointRevision = await checkpointInboundTurn({
           messageSid: message.messageSid,
           conversationId: conversation.id,
           leaseOwner,
-          state: "confirming",
-          collected: savedDraft,
-          activeStoryId: activeStoryIdAfterCheckpoint,
+          state: savedDraft.state,
+          collected: savedDraft.collected,
+          activeStoryId: savedDraft.activeStoryId,
           replyBody: rejectionReply,
           submission: null,
+          expectedUpdatedAt: checkpointRevision,
         });
         replyBody = rejectionReply;
         submission = null;
       } else {
         // Another publisher is still admitting this idempotent request. Keep
         // its generation checkpoint until that publisher or recovery resolves it.
-        const checkingReply = withInitialSmsDisclosure(GENERATION_CHECKING_REPLY, firstSmsReply);
+        const checkingReply = withInitialSmsDisclosure(
+          staleBeforeRestart ? photoReplyAfterRestart(conversation.state) : GENERATION_CHECKING_REPLY,
+          firstSmsReply,
+        );
         await checkpointInboundTurn({
           messageSid: message.messageSid,
           conversationId: conversation.id,
           leaseOwner,
-          state: "generating",
-          collected: collectedAfterCheckpoint,
-          activeStoryId: activeStoryIdAfterCheckpoint,
+          state: staleBeforeRestart ? conversation.state : "generating",
+          collected: staleBeforeRestart ? conversation.collected : collectedAfterCheckpoint,
+          activeStoryId: staleBeforeRestart ? conversation.activeStoryId : activeStoryIdAfterCheckpoint,
           replyBody: checkingReply,
           submission,
+          expectedUpdatedAt: checkpointRevision,
         });
         replyBody = checkingReply;
       }
+    } else if (staleBeforeRestart) {
+      // The old job is durable and can finish on its own. Replace its delayed
+      // approval reply so it does not appear to undo a spoken restart.
+      const freshReply = withInitialSmsDisclosure(
+        photoReplyAfterRestart(conversation.state),
+        firstSmsReply,
+      );
+      await checkpointInboundTurn({
+        messageSid: message.messageSid,
+        conversationId: conversation.id,
+        leaseOwner,
+        state: conversation.state,
+        collected: conversation.collected,
+        activeStoryId: conversation.activeStoryId,
+        replyBody: freshReply,
+        submission,
+        expectedUpdatedAt: checkpointRevision,
+      });
+      replyBody = freshReply;
     }
   }
 

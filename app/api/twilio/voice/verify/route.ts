@@ -4,10 +4,13 @@ import { validateTwilioSignature } from "@/lib/twilio";
 import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
 import { createVoiceCallAuthorization } from "@/lib/voice-call-authorization";
 import { reserveVoiceCallBudget } from "@/lib/voice-call-budget";
+import { getVoiceCallPhotoReadiness } from "@/lib/voice-call-photo-readiness";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
 import {
   getConversationRelayUrl,
   voiceConversationRelayTwiML,
   voiceHangupTwiML,
+  voiceMissingPhotoPrompt,
   voiceVerificationGatherTwiML,
 } from "@/lib/voice-twiml";
 import { checkVoiceVerification, isVoiceVerificationConfigured } from "@/lib/voice-verification";
@@ -51,8 +54,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     process.env.TWILIO_PHONE_NUMBER,
     process.env.TWILIO_WHATSAPP_NUMBER,
   );
-  const configuredNumber = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS)
-    .includes("voice") ? contact.phoneNumber : null;
+  const enabledChannels = getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS);
+  const configuredNumber = enabledChannels.includes("voice") ? contact.phoneNumber : null;
   const relayUrl = getConversationRelayUrl();
   const authSecret = process.env.AUTH_SECRET;
   if (!configuredNumber || !process.env.TWILIO_ACCOUNT_SID ||
@@ -68,8 +71,35 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   const code = params.Digits || "";
   if (SIX_DIGITS.test(code)) {
+    let verified: boolean;
     try {
-      if (await checkVoiceVerification(params.From, code)) {
+      verified = await checkVoiceVerification(params.From, code);
+    } catch (error) {
+      console.error("Voice caller verification check failed", error instanceof Error ? error.name : "unknown");
+      return voiceHangupTwiML(
+        "I couldn't verify this call right now. Please call again later.",
+      );
+    }
+    if (verified) {
+      let readiness: Awaited<ReturnType<typeof getVoiceCallPhotoReadiness>>;
+      try {
+        const settings = await getExperienceSettings();
+        if (settings.voicePhotoMode === "none") {
+          return voiceHangupTwiML(
+            "Voice comics are paused because a reference photo is required. Please use a photo-enabled option on our start page.",
+          );
+        }
+        readiness = await getVoiceCallPhotoReadiness(params.From, settings);
+      } catch (error) {
+        console.error("Voice photo readiness check failed", error instanceof Error ? error.name : "unknown");
+        return voiceHangupTwiML(
+          "I couldn't check your photos right now. Please call again later.",
+        );
+      }
+      if (readiness.kind === "missing") {
+        return voiceHangupTwiML(voiceMissingPhotoPrompt(enabledChannels.includes("sms")));
+      }
+      try {
         const budget = await reserveVoiceCallBudget({
           callSid: params.CallSid,
           fromAddress: params.From,
@@ -85,13 +115,13 @@ export async function POST(request: NextRequest): Promise<Response> {
           from: params.From,
           to: params.To,
         }, authSecret);
-        return voiceConversationRelayTwiML(publicBaseUrl, relayUrl, authorization);
+        return voiceConversationRelayTwiML(publicBaseUrl, relayUrl, authorization, readiness);
+      } catch (error) {
+        console.error("Voice conversation start failed", error instanceof Error ? error.name : "unknown");
+        return voiceHangupTwiML(
+          "I couldn't start your comic conversation right now. Please call again later.",
+        );
       }
-    } catch (error) {
-      console.error("Voice caller verification check failed", error instanceof Error ? error.name : "unknown");
-      return voiceHangupTwiML(
-        "I couldn't verify this call right now. Please call again later.",
-      );
     }
   }
 

@@ -41,12 +41,12 @@ export interface ComicModerationDetails {
 }
 
 export class ComicServiceError extends Error {
-  type: "content_policy" | "credit_limit" | "api_error";
+  type: "content_policy" | "credit_limit" | "api_error" | "missing_reference";
   status?: number;
   code?: "moderation_blocked";
   moderationDetails?: ComicModerationDetails;
   constructor(
-    type: "content_policy" | "credit_limit" | "api_error",
+    type: "content_policy" | "credit_limit" | "api_error" | "missing_reference",
     message: string,
     status?: number,
     options?: { code?: "moderation_blocked"; moderationDetails?: ComicModerationDetails },
@@ -135,6 +135,14 @@ export async function createComicStory({
   generateTitle = true,
   usesOwnApiKey = !!apiKey,
 }: CreateComicArgs): Promise<CreateComicResult> {
+  if (!characterImageUrls.some((url) => typeof url === "string" && url.trim().length > 0)) {
+    throw new ComicServiceError(
+      "missing_reference",
+      "Add at least one reference photo before generating your comic.",
+      400,
+    );
+  }
+
   const openAIApiKey = apiKey || process.env.OPENAI_API_KEY;
   if (!openAIApiKey) {
     throw new ComicServiceError(

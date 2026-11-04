@@ -332,6 +332,32 @@ function submittedDraftCondition(job: GenerationConversationJob) {
   );
 }
 
+function queuedNewDraftCondition() {
+  return sql<boolean>`${conversations.collected}->>'newDraftRequestedAt' IS NOT NULL`;
+}
+
+function freshCollectedAfterQueuedNew(job: GenerationConversationJob) {
+  return job.source === "voice"
+    ? sql`jsonb_strip_nulls(jsonb_build_object(
+        'photoHandoffResetAt', ${conversations.collected}->>'newDraftRequestedAt',
+        'ignoredCameraReferences', ${conversations.collected}->'ignoredCameraReferences'
+      ))`
+    : sql`jsonb_strip_nulls(jsonb_build_object(
+        'phoneRestartedAt', GREATEST(
+          COALESCE(${conversations.collected}->>'phoneRestartedAt', ''),
+          ${conversations.collected}->>'newDraftRequestedAt'
+        ),
+        'phoneRestartedByMessageSid', ${conversations.collected}->>'phoneRestartedByMessageSid'
+      ))`;
+}
+
+// Keep Voice revisions strictly increasing so a live call cannot save an old
+// snapshot over a terminal job or a queued NEW.
+const nextConversationRevision = sql`GREATEST(
+  date_trunc('milliseconds', NOW()),
+  date_trunc('milliseconds', ${conversations.updatedAt}) + INTERVAL '1 millisecond'
+)`;
+
 export async function completeConversationForGeneration(
   job: GenerationConversationJob,
   storyId: string,
@@ -339,10 +365,12 @@ export async function completeConversationForGeneration(
   const [updated] = await db
     .update(conversations)
     .set({
-      state: "done",
-      activeStoryId: storyId,
-      collected: sql`${conversations.collected} - 'generationRequestKey'`,
-      updatedAt: new Date(),
+      state: sql`CASE WHEN ${queuedNewDraftCondition()} THEN 'collecting' ELSE 'done' END`,
+      activeStoryId: sql`CASE WHEN ${queuedNewDraftCondition()} THEN NULL ELSE ${storyId}::uuid END`,
+      collected: sql`CASE WHEN ${queuedNewDraftCondition()}
+        THEN ${freshCollectedAfterQueuedNew(job)}
+        ELSE ${conversations.collected} - 'generationRequestKey' END`,
+      updatedAt: nextConversationRevision,
     })
     .where(submittedDraftCondition(job))
     .returning({ id: conversations.id });
@@ -352,19 +380,29 @@ export async function completeConversationForGeneration(
 export async function failConversationForGeneration(
   job: GenerationConversationJob,
   options: { requireRevision?: boolean } = {},
-): Promise<boolean> {
+): Promise<"unchanged" | "restored" | "new_draft"> {
+  const restoredCollected = options.requireRevision
+    ? sql`(${conversations.collected} - 'generationRequestKey') || jsonb_build_object('blockedPrompt', ${job.prompt})`
+    : sql`${conversations.collected} - 'generationRequestKey'`;
   const [updated] = await db
     .update(conversations)
     .set({
-      state: options.requireRevision ? "collecting" : "confirming",
-      collected: options.requireRevision
-        ? sql`(${conversations.collected} - 'generationRequestKey') || jsonb_build_object('blockedPrompt', ${job.prompt})`
-        : sql`${conversations.collected} - 'generationRequestKey'`,
-      updatedAt: new Date(),
+      state: sql`CASE WHEN ${queuedNewDraftCondition()} THEN 'collecting'
+        ELSE ${options.requireRevision ? sql`'collecting'` : sql`'confirming'`} END`,
+      activeStoryId: sql`CASE WHEN ${queuedNewDraftCondition()}
+        THEN NULL ELSE ${conversations.activeStoryId} END`,
+      collected: sql`CASE WHEN ${queuedNewDraftCondition()}
+        THEN ${freshCollectedAfterQueuedNew(job)} ELSE ${restoredCollected} END`,
+      updatedAt: nextConversationRevision,
     })
     .where(submittedDraftCondition(job))
-    .returning({ id: conversations.id });
-  return Boolean(updated);
+    // A submitted draft always has a prompt. Only the queued NEW branch
+    // removes it, so the worker can send the right follow-up after this update.
+    .returning({
+      id: conversations.id,
+      freshDraft: sql<boolean>`${conversations.collected}->>'prompt' IS NULL`,
+    });
+  return !updated ? "unchanged" : updated.freshDraft ? "new_draft" : "restored";
 }
 
 /** Forget the submitted draft after the 24-hour delivery cutoff. */
@@ -375,9 +413,10 @@ export async function expireConversationForGeneration(
     .update(conversations)
     .set({
       state: "collecting",
-      collected: {},
+      collected: sql`CASE WHEN ${queuedNewDraftCondition()}
+        THEN ${freshCollectedAfterQueuedNew(job)} ELSE '{}'::jsonb END`,
       activeStoryId: null,
-      updatedAt: new Date(),
+      updatedAt: nextConversationRevision,
     })
     .where(submittedDraftCondition(job))
     .returning({ id: conversations.id });

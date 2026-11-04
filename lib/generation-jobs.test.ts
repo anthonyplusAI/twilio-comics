@@ -587,4 +587,30 @@ describe("terminal conversation recovery", () => {
     expect(query.sql).toMatch(/ready\.status = 'failed' AND ready\.story_id IS NOT NULL/);
     expect(query.sql).not.toContain("ready.last_error = 'recipient_opted_out'");
   });
+
+  it("honors a queued NEW when repairing a terminal job instead of restoring the old draft", async () => {
+    h.execute.mockResolvedValue({ rows: [{ id: "conversation-1" }] });
+
+    await reconcileTerminalGenerationConversations(10);
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/newDraftRequestedAt[\s\S]*THEN 'collecting'/);
+    expect(query.sql).toMatch(/newDraftRequestedAt[\s\S]*THEN NULL/);
+    expect(query.sql).toContain("photoHandoffResetAt");
+    expect(query.sql).toContain("ignoredCameraReferences");
+    expect(query.sql).toContain("phoneRestartedAt");
+    expect(query.sql).toContain("phoneRestartedByMessageSid");
+    expect(query.sql).toContain("newDraftRequestedAt");
+    expect(query.sql).toContain("generationRequestKey");
+  });
+
+  it("recovers a legacy generating draft by its prompt when it has no request key", async () => {
+    h.execute.mockResolvedValue({ rows: [{ id: "conversation-1" }] });
+
+    await reconcileTerminalGenerationConversations(10);
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/generationRequestKey' IS NULL[\s\S]*c\.collected->>'prompt' = j\.prompt/);
+    expect(query.sql).toMatch(/c\.collected->>'generationRequestKey' IS NULL[\s\S]*c\.collected->>'prompt' = ready\.prompt/);
+  });
 });

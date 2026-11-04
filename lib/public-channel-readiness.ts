@@ -5,6 +5,7 @@ import {
 } from "@/lib/marketing-contact";
 import { getConversationRelayUrl } from "@/lib/voice-twiml";
 import { isVoiceVerificationConfigured } from "@/lib/voice-verification";
+import { getPublicOrigin } from "@/lib/public-origin";
 
 const ACCOUNT_SID = /^AC[0-9a-f]{32}$/i;
 
@@ -16,9 +17,10 @@ export function getPublicEnabledChannels(
   contact: MarketingContact,
   selection: string | undefined,
 ): MarketingChannel[] {
+  if (!getPublicOrigin() ||
+      !ACCOUNT_SID.test(process.env.TWILIO_ACCOUNT_SID || "") ||
+      !process.env.TWILIO_AUTH_TOKEN?.trim()) return [];
   const voiceReady = isVoiceVerificationConfigured() &&
-    ACCOUNT_SID.test(process.env.TWILIO_ACCOUNT_SID || "") &&
-    Boolean(process.env.TWILIO_AUTH_TOKEN) &&
     Boolean(process.env.AUTH_SECRET) &&
     Boolean(getConversationRelayUrl());
   return getEnabledChannels(contact, selection)

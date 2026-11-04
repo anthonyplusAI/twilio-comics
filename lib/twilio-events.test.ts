@@ -71,7 +71,10 @@ beforeEach(() => {
   vi.resetAllMocks();
   h.insertedValues = null;
   setInsertResult([{ messageSid: "SM123" }]);
-  h.execute.mockResolvedValue({ rows: [{ message_sid: "SM123" }] });
+  h.execute.mockResolvedValue({ rows: [{
+    message_sid: "SM123",
+    updated_at: new Date("2026-10-01T00:00:02.000Z"),
+  }] });
   h.sendInboundMessage.mockResolvedValue(undefined);
   h.recordActivityEvent.mockResolvedValue(undefined);
 });
@@ -270,7 +273,65 @@ describe("durable Twilio receipts", () => {
       activeStoryId: null,
       replyBody: "Reply CREATE to approve.",
       submission: null,
+      expectedUpdatedAt: new Date("2026-10-01T00:00:00.000Z"),
     })).rejects.toThrow(/lease/i);
+  });
+
+  it("guards a generating NEW against job completion and restarts the same-number Voice draft", async () => {
+    const updatedAt = await checkpointInboundTurn({
+      messageSid: "SM123",
+      conversationId: "00000000-0000-0000-0000-000000000001",
+      leaseOwner: "worker-1",
+      state: "generating",
+      collected: {
+        prompt: "Old comic",
+        generationRequestKey: "twilio-message:SM-old",
+        newDraftRequestedAt: "2026-10-01T00:00:01.000Z",
+      },
+      activeStoryId: null,
+      replyBody: "A new comic will start after this one finishes. Send fresh photos.",
+      submission: null,
+      expectedUpdatedAt: new Date("2026-10-01T00:00:00.000Z"),
+      expectedGeneratingRequestKey: "twilio-message:SM-old",
+      restartVoice: {
+        phoneNumber: "+15551112222",
+        requestedAt: "2026-10-01T00:00:01.000Z",
+      },
+    });
+
+    expect(updatedAt).toEqual(new Date("2026-10-01T00:00:02.000Z"));
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(query.sql).toMatch(/state\s*=\s*'generating'/);
+    expect(query.sql).toMatch(/generationRequestKey'\s+IS NOT DISTINCT FROM/);
+    expect(query.sql).toMatch(/updated_at\s*=\s*\$\d+/);
+    expect(query.sql).toMatch(/date_trunc\('milliseconds', updated_at\)/);
+    expect(query.sql).toMatch(/voice_reset AS\s*\(\s*UPDATE conversations/s);
+    expect(query.sql).toMatch(/WHEN state = 'generating'[\s\S]*newDraftRequestedAt/);
+    expect(query.sql).toMatch(/photoHandoffResetAt/);
+    expect(query.sql).toMatch(/EXISTS \(SELECT 1 FROM checkpointed_message\)/);
+    expect(query.params).toEqual(expect.arrayContaining([
+      "twilio-message:SM-old", "+15551112222", "2026-10-01T00:00:01.000Z",
+    ]));
+  });
+
+  it("keeps ordinary turn checkpoints free of the NEW-only guard and Voice reset", async () => {
+    await checkpointInboundTurn({
+      messageSid: "SM123",
+      conversationId: "00000000-0000-0000-0000-000000000001",
+      leaseOwner: "worker-1",
+      state: "collecting",
+      collected: { prompt: "A fresh comic" },
+      activeStoryId: null,
+      replyBody: "Tell me more.",
+      submission: null,
+      expectedUpdatedAt: new Date("2026-10-01T00:00:00.000Z"),
+    });
+
+    const query = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL).sql;
+    expect(query).not.toContain("IS NOT DISTINCT FROM");
+    expect(query).not.toContain("voice_reset");
+    expect(query).toMatch(/updated_at\s*=\s*\$\d+/);
   });
 
   it("republishes stale receipt IDs in a bounded recovery batch", async () => {
