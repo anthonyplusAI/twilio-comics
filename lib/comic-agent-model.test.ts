@@ -90,7 +90,7 @@ describe("comic confirmation screening", () => {
 
     expect(result.readyForConfirmation).toBe(true);
     expect(result.reply).toBe("A dark fantasy comic about a monster battle.");
-    expect(moderationCreate).toHaveBeenCalledWith({
+    expect(moderationCreate.mock.calls[0]?.[0]).toEqual({
       model: "omni-moderation-latest",
       input: "A graphic monster battle",
     });
@@ -149,7 +149,7 @@ describe("comic confirmation screening", () => {
     expect(result.readyForConfirmation).toBe(true);
     expect(result.reply).toBe("A dramatic monster battle in a dark fantasy city.");
     expect(result.reply).not.toMatch(/panel|CREATE/i);
-    expect(moderationCreate).toHaveBeenCalledWith({
+    expect(moderationCreate.mock.calls[0]?.[0]).toEqual({
       model: "omni-moderation-latest",
       input: "A dramatic monster battle in a dark fantasy city",
     });
@@ -250,7 +250,49 @@ describe("comic confirmation screening", () => {
   it("does not invite approval when the screening service cannot assess the idea", async () => {
     moderationCreate.mockRejectedValue(new Error("Screening service unavailable"));
 
-    await expect(proposeComicTurn(input)).rejects.toThrow("Screening service unavailable");
+    await expect(proposeComicTurn(input)).rejects.toMatchObject({
+      name: "ComicAgentModelUnavailableError",
+      message: "The comic idea helper is temporarily unavailable",
+    });
+  });
+
+  it("stops a stuck completion within 30 seconds even if the provider ignores cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      chatCreate.mockImplementation(() => new Promise(() => {}));
+      let outcome: unknown = "pending";
+      void proposeComicTurn(input).then(
+        (value) => { outcome = value; },
+        (error: unknown) => { outcome = error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      expect(outcome).toMatchObject({ name: "ComicAgentModelUnavailableError" });
+      expect(chatCreate.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+      expect(moderationCreate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops a stuck screening call within the same 30-second turn budget", async () => {
+    vi.useFakeTimers();
+    try {
+      moderationCreate.mockImplementation(() => new Promise(() => {}));
+      let outcome: unknown = "pending";
+      void proposeComicTurn(input).then(
+        (value) => { outcome = value; },
+        (error: unknown) => { outcome = error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      expect(outcome).toMatchObject({ name: "ComicAgentModelUnavailableError" });
+      expect(moderationCreate.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("asks for a new direction when the text model refuses before returning a draft", async () => {

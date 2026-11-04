@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { recordActivityEvent } from "@/lib/activity-events";
 import { advanceComicAgent, type AgentCollected } from "@/lib/comic-agent";
+import { ComicAgentModelUnavailableError } from "@/lib/comic-agent-model";
 import { CONVERSATION_RESUME_DAYS } from "@/lib/conversation-policy";
 import { channelUserId, getOrCreateChannelIdentity } from "@/lib/channel-identities";
 import {
@@ -56,7 +57,7 @@ const FRESH_START_PHOTO_REPLY =
 const QUEUED_FRESH_START_PHOTO_REPLY =
   "Your previous comic is still being created. After its result message, send one or two new reference photos, then tell me your idea.";
 const AGENT_FAILURE_REPLY =
-  "Sorry, I couldn't process that message. Your saved draft is unchanged.\n\nSend it again, or reply NEW to start over.";
+  "I couldn't process that. Please send it again. Any saved draft is safe.";
 const UNSUPPORTED_ATTACHMENT_REPLY =
   "I couldn't use that attachment. Please send a photo or text your comic idea.";
 const SKIPPED_ATTACHMENT_NOTICE =
@@ -84,6 +85,15 @@ function imageUrls(message: StoredInboundMessage): string[] {
   return message.mediaUrls
     .filter((_, index) => message.mediaContentTypes[index]?.toLowerCase().startsWith("image/"))
     .slice(0, 2);
+}
+
+function agentFailureReply(message: StoredInboundMessage): string {
+  const photos = imageUrls(message);
+  // The model failed before the new MMS references could be checkpointed.
+  if (photos.length && message.body.trim()) {
+    return `I couldn't process that. Resend your ${photos.length === 1 ? "photo" : "photos"} and idea. Any saved draft is safe.`;
+  }
+  return AGENT_FAILURE_REPLY;
 }
 
 function hasNonImageAttachment(message: StoredInboundMessage): boolean {
@@ -321,15 +331,17 @@ async function processOneMessage(
             }
           }
         } catch (error) {
-          // A model turn that fails repeatedly must not hold every later text from
-          // this sender behind it forever. Leave the prior draft untouched and
-          // checkpoint a deterministic outbox reply before calling Twilio.
-          if (message.attemptCount + 1 < MAX_AGENT_ATTEMPTS) throw error;
-          console.warn("Inbound comic agent exhausted retries", {
-            messageSid: message.messageSid,
+          // A slow or unavailable model must not hold later texts behind another
+          // minute-long queue retry. Other failures retain their existing retries.
+          const modelUnavailable = error instanceof ComicAgentModelUnavailableError;
+          if (!modelUnavailable && message.attemptCount + 1 < MAX_AGENT_ATTEMPTS) throw error;
+          console.warn(modelUnavailable
+            ? "Inbound comic agent model unavailable; sending retry reply"
+            : "Inbound comic agent exhausted retries", {
+            channel: message.channel,
             attempts: message.attemptCount + 1,
           });
-          replyBody = AGENT_FAILURE_REPLY;
+          replyBody = agentFailureReply(message);
           submission = null;
         }
         if (advancedSuccessfully && resetOrDiscard &&
@@ -573,16 +585,31 @@ async function processOneMessage(
   if (!stillLeased) throw new ConversationLeaseBusyError();
 
   let outboundSid: string;
+  const sendStartedAt = Date.now();
+  let sendOutcome: "ok" | "error" = "ok";
   try {
-    outboundSid = await sendChannelMessage({
-      channel: message.channel,
-      to: message.fromAddress,
-      from: message.toAddress,
-      body: replyBody,
-      ...(process.env.PUBLIC_BASE_URL ? {
-        statusCallback: `${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/twilio/status?inboundSid=${encodeURIComponent(message.messageSid)}#rc=3&rp=5xx,ct,rt`,
-      } : {}),
-    });
+    try {
+      outboundSid = await sendChannelMessage({
+        channel: message.channel,
+        to: message.fromAddress,
+        from: message.toAddress,
+        body: replyBody,
+        ...(process.env.PUBLIC_BASE_URL ? {
+          statusCallback: `${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/twilio/status?inboundSid=${encodeURIComponent(message.messageSid)}#rc=3&rp=5xx,ct,rt`,
+        } : {}),
+      });
+    } catch (error) {
+      sendOutcome = "error";
+      throw error;
+    } finally {
+      // Only duration and outcome leave this worker; no phone, SID or message content.
+      console.info(JSON.stringify({
+        event: "messaging_outbound_create",
+        channel: message.channel,
+        outcome: sendOutcome,
+        durationMs: Math.max(0, Date.now() - sendStartedAt),
+      }));
+    }
   } catch (error) {
     if (!isTwilioOptOut(error)) throw error;
     await completeInboundOptedOutReply(message.messageSid);
