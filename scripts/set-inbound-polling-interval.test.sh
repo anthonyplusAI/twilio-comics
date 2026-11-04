@@ -154,6 +154,14 @@ if run_set_polling > "$test_root/error.txt" 2>&1; then
 fi
 [[ "$(wc -l < "$AZ_TEST_PATCH_COUNT" | tr -d ' ')" == 1 ]]
 
+jq '.properties.template.scale.rules[0].custom.identity = "/subscriptions/b001fc6f-ea19-456a-8401-63971a1a1d98/resourceGroups/rg-twilio-comics/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-other-worker"' \
+  "$test_root/original.json" > "$AZ_TEST_STATE"
+if run_set_polling > "$test_root/error.txt" 2>&1; then
+  echo 'Unexpected queue managed identity accepted' >&2
+  exit 1
+fi
+[[ "$(wc -l < "$AZ_TEST_PATCH_COUNT" | tr -d ' ')" == 1 ]]
+
 cp "$test_root/original.json" "$AZ_TEST_STATE"
 if AZ_TEST_SKIP_APPLY=1 run_set_polling > "$test_root/error.txt" 2>&1; then
   echo 'Unconfirmed polling interval unexpectedly accepted' >&2

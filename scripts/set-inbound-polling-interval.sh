@@ -18,6 +18,7 @@ expected_subscription='b001fc6f-ea19-456a-8401-63971a1a1d98'
 expected_resource_group='rg-twilio-comics'
 expected_app='twilio-comics-inbound-v2'
 expected_queue='comic-inbound'
+expected_worker_identity="/subscriptions/$expected_subscription/resourceGroups/$expected_resource_group/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-twilio-comics-v2-worker"
 target_poll_seconds=10
 
 [[ "$ACA_INBOUND_APP_NAME" == "$expected_app" &&
@@ -56,7 +57,8 @@ az rest --method get --url "$resource_url" --output json --only-show-errors > "$
 
 if ! jq --exit-status --arg id "$resource_id" --arg name "$ACA_INBOUND_APP_NAME" \
     --arg image "$APP_IMAGE" --arg release "$GITHUB_SHA" \
-    --arg queue "$expected_queue" --arg account 'twiliocomicsst1a1d98' '
+    --arg queue "$expected_queue" --arg account 'twiliocomicsst1a1d98' \
+    --arg worker_identity "$expected_worker_identity" '
   ((.id | ascii_downcase) == ($id | ascii_downcase))
   and .name == $name
   and .type == "Microsoft.App/containerApps"
@@ -77,14 +79,16 @@ if ! jq --exit-status --arg id "$resource_id" --arg name "$ACA_INBOUND_APP_NAME"
     (.properties.template.scale.rules[0].azureQueue.queueName == $queue
       and .properties.template.scale.rules[0].azureQueue.accountName == $account
       and (.properties.template.scale.rules[0].azureQueue.queueLength | tostring) == "4"
-      and (.properties.template.scale.rules[0].azureQueue.identity | type == "string" and length > 0))
+      and ((.properties.template.scale.rules[0].azureQueue.identity // "" | ascii_downcase)
+        == ($worker_identity | ascii_downcase)))
     or
     (.properties.template.scale.rules[0].custom.type == "azure-queue"
       and .properties.template.scale.rules[0].custom.metadata.accountName == $account
       and .properties.template.scale.rules[0].custom.metadata.cloud == "AzurePublicCloud"
       and .properties.template.scale.rules[0].custom.metadata.queueName == $queue
       and .properties.template.scale.rules[0].custom.metadata.queueLength == "4"
-      and (.properties.template.scale.rules[0].custom.identity | type == "string" and length > 0))
+      and ((.properties.template.scale.rules[0].custom.identity // "" | ascii_downcase)
+        == ($worker_identity | ascii_downcase)))
   )
 ' "$before_file" >/dev/null; then
   die "Container App '$ACA_INBOUND_APP_NAME' has unexpected identity, release, or scale settings; no polling interval was changed."
