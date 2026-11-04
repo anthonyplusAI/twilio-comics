@@ -61,6 +61,7 @@ vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityE
 vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserveMessageAgentTurn }));
 
 import { EarlierInboundTurnsPendingError, processInboundMessage } from "@/lib/process-inbound-message";
+import { ComicAgentModelUnavailableError } from "@/lib/comic-agent-model";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import { COMIC_START_MESSAGE } from "@/lib/marketing-contact";
 
@@ -1767,6 +1768,120 @@ describe("ordered inbound messaging processor", () => {
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
 
+  it("replies on the first model outage and lets the next text use the saved draft", async () => {
+    const savedDraft = {
+      prompt: "A robot detective",
+      style: "noir",
+      characterImageUrls: [REFERENCE],
+    };
+    conversation.collected = savedDraft;
+    receipts.SM1.body = "Make the robot detective funny";
+    receipts.SM2 = receipt("SM2", "Make the robot detective solve a bakery mystery", "2026-10-01T00:00:02Z");
+    h.getInboundMessagePosition.mockResolvedValueOnce({ dailyCount: 1, firstMessage: true });
+    h.advanceComicAgent.mockImplementation(async (_current: unknown, turn: { text: string }) => {
+      if (turn.text === receipts.SM1.body) throw new ComicAgentModelUnavailableError();
+      return {
+        nextState: "confirming",
+        collected: { ...savedDraft, prompt: "A robot detective solves a bakery mystery" },
+        activeStoryId: null,
+        reply: "A bakery mystery. Reply CREATE when ready.",
+        action: "none",
+      };
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(receipts.SM1).toMatchObject({ status: "completed", attemptCount: 1, submission: null });
+    expect(conversation.collected).toEqual(savedDraft);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body).toMatch(/couldn't process/i);
+    expect(sends[0].body).toMatch(/Reply HELP.*STOP.*Msg & data rates/i);
+    expectOneGsm7Segment(sends[0].body);
+
+    await processInboundMessage("SM2");
+
+    expect(receipts.SM2).toMatchObject({ status: "completed", attemptCount: 1 });
+    expect(h.advanceComicAgent).toHaveBeenCalledTimes(2);
+    expect(sends[1].body).toBe("A bakery mystery. Reply CREATE when ready.");
+    expect(conversation.collected).toMatchObject({
+      ...savedDraft,
+      prompt: "A robot detective solves a bakery mystery",
+    });
+  });
+
+  it.each([
+    { photoLabel: "photo", mediaUrls: [REFERENCE] },
+    { photoLabel: "photos", mediaUrls: [REFERENCE, "https://api.twilio.com/second.jpg"] },
+  ])("asks for a $photoLabel-and-idea MMS resend when the model fails before saving references", async ({ photoLabel, mediaUrls }) => {
+    const savedDraft = {
+      prompt: "An older comic idea",
+      characterImageUrls: ["blob:uploads/older-photo"],
+    };
+    conversation.collected = savedDraft;
+    receipts.SM1.body = "A new robot detective story";
+    receipts.SM1.mediaUrls = mediaUrls;
+    receipts.SM1.mediaContentTypes = mediaUrls.map(() => "image/jpeg");
+    h.getInboundMessagePosition.mockResolvedValue({ dailyCount: 1, firstMessage: true });
+    h.advanceComicAgent.mockRejectedValue(new ComicAgentModelUnavailableError());
+
+    await processInboundMessage("SM1");
+
+    expect(receipts.SM1).toMatchObject({ status: "completed", attemptCount: 1 });
+    expect(conversation.collected).toEqual(savedDraft);
+    expect(receipts.SM1.replyBody).toContain(`Resend your ${photoLabel} and idea`);
+    expect(receipts.SM1.replyBody).not.toContain(REFERENCE);
+    expectOneGsm7Segment(receipts.SM1.replyBody || "");
+  });
+
+  it("retries sending a checkpointed first-outage reply without another model call", async () => {
+    h.advanceComicAgent.mockRejectedValue(new ComicAgentModelUnavailableError());
+    h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio unavailable"));
+
+    await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio unavailable");
+
+    expect(receipts.SM1).toMatchObject({ status: "reply_pending", attemptCount: 1 });
+    const checkpointedReply = receipts.SM1.replyBody;
+    expect(checkpointedReply).toMatch(/couldn't process/i);
+
+    await processInboundMessage("SM1");
+
+    expect(h.advanceComicAgent).toHaveBeenCalledTimes(1);
+    expect(receipts.SM1.status).toBe("completed");
+    expect(receipts.SM1.replyBody).toBe(checkpointedReply);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body).toBe(checkpointedReply);
+  });
+
+  it("records outbound API timing without logging the player's message or address", async () => {
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "confirming",
+      collected: { prompt: "A robot detective", style: "noir" },
+      activeStoryId: null,
+      reply: "A robot detective. Reply CREATE to approve.",
+      action: "none",
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await processInboundMessage("SM1");
+
+      const sendTimings = info.mock.calls.map(([line]) => String(line))
+        .filter((line) => line.includes('"event":"messaging_outbound_create"'));
+      expect(sendTimings).toHaveLength(1);
+      expect(JSON.parse(sendTimings[0])).toEqual({
+        event: "messaging_outbound_create",
+        channel: "sms",
+        outcome: "ok",
+        durationMs: expect.any(Number),
+      });
+      expect(sendTimings[0]).not.toContain(FROM);
+      expect(sendTimings[0]).not.toContain(TO);
+      expect(sendTimings[0]).not.toContain("A robot detective");
+      expect(sendTimings[0]).not.toContain("SM1");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("retries a failed AI turn twice, then sends a saved failure reply and processes later texts", async () => {
     receipts.SM1.body = "A permanently unprocessable idea";
     receipts.SM2 = receipt("SM2", "A friendly dragon", "2026-10-01T00:00:02Z");
@@ -1792,7 +1907,7 @@ describe("ordered inbound messaging processor", () => {
     await processInboundMessage("SM2");
 
     expect(receipts.SM1).toMatchObject({ status: "completed", attemptCount: 3 });
-    expect(receipts.SM1.replyBody).toMatch(/couldn't process.*message/i);
+    expect(receipts.SM1.replyBody).toMatch(/couldn't process/i);
     expect(receipts.SM2.status).toBe("completed");
     expect(sends.map((send) => send.body)).toEqual([
       receipts.SM1.replyBody,
@@ -1808,7 +1923,7 @@ describe("ordered inbound messaging processor", () => {
     h.sendChannelMessage.mockRejectedValueOnce(new Error("Twilio unavailable"));
     await expect(processInboundMessage("SM1")).rejects.toThrow("Twilio unavailable");
     expect(receipts.SM1).toMatchObject({ status: "reply_pending", attemptCount: 3 });
-    expect(receipts.SM1.replyBody).toMatch(/couldn't process.*message/i);
+    expect(receipts.SM1.replyBody).toMatch(/couldn't process/i);
 
     await processInboundMessage("SM1");
 
