@@ -69,6 +69,7 @@ describe("advanceComicAgent", () => {
       },
     });
     expect(result.collected.prompt).toBe(IDEA);
+    expect(result.reply).toMatch(/Reply STATUS if (?:it|nothing) doesn't arrive/i);
   });
 
   it("treats revisions as conversation, not approval", async () => {
@@ -530,7 +531,8 @@ describe("advanceComicAgent", () => {
     );
     expect(withoutPhotos.nextState).toBe("confirming");
     expect(withoutPhotos.reply).toMatch(/no reference photos/i);
-    expect(withoutPhotos.reply).toMatch(/hang up.*photo setup.*call back/i);
+    expect(withoutPhotos.reply).toMatch(/hang up.*text one or two photos.*phone you're calling on.*call back/i);
+    expect(withoutPhotos.reply).not.toMatch(/photo setup/i);
     expect(withoutPhotos.reply).not.toMatch(/create it/i);
 
     const withPhotos = await advanceComicAgent(
@@ -554,7 +556,7 @@ describe("advanceComicAgent", () => {
     expect(result.nextState).toBe("confirming");
     expect(result.submission).toBeUndefined();
     expect(result.reply).toMatch(/no reference photos/i);
-    expect(result.reply).toMatch(/hang up.*photo setup.*call back/i);
+    expect(result.reply).toMatch(/hang up.*text one or two photos.*phone you're calling on.*call back/i);
   });
 
   it("does not let a Voice skip command bypass the photo requirement", async () => {
@@ -571,6 +573,7 @@ describe("advanceComicAgent", () => {
 
     expect(skipped.collected.suppressPhotoHandoff).not.toBe(true);
     expect(skipped.reply).toMatch(/reference photo.*required/i);
+    expect(skipped.reply).toMatch(/text one or two photos.*phone you're calling on.*call back/i);
     expect(approved.action).toBe("none");
     expect(approved.submission).toBeUndefined();
   });

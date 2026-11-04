@@ -51,6 +51,19 @@ describe("camera references for a verified phone", () => {
     expect(await getStagedCameraPhotoReferences(PHONE, OWNER)).toEqual([FIRST, SECOND]);
   });
 
+  it("does not return a photo whose upload is older than 24 hours after another stage update", async () => {
+    const now = Date.now();
+    setCameraRow({
+      characterImageUrls: [FIRST, SECOND],
+      cameraReferenceSavedAt: {
+        [FIRST]: now - VOICE_PHOTO_HANDOFF_WINDOW_MS - 1,
+        [SECOND]: now - 1_000,
+      },
+    }, new Date(now));
+
+    expect(await getStagedCameraPhotoReferences(PHONE, OWNER)).toEqual([SECOND]);
+  });
+
   it("lets only the active verified browser session count the staged photos", async () => {
     setCameraRow({
       characterImageUrls: [FIRST, SECOND],

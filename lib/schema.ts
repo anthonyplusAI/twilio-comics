@@ -406,6 +406,7 @@ export const experienceSettings = pgTable(
       .default("sms")
       .notNull(),
     cameraEnabled: boolean("camera_enabled").default(false).notNull(),
+    studioEnabled: boolean("studio_enabled").default(false).notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
   (settings) => [

@@ -36,8 +36,8 @@ export async function setExperienceSettings(settings: ExperienceSettings): Promi
   if (typeof settings.cameraEnabled !== "boolean") {
     throw new Error("Invalid browser camera setting");
   }
-  if (settings.voicePhotoMode === "camera" && !settings.cameraEnabled) {
-    throw new Error("Enable the browser camera before choosing kiosk-first Voice photos");
+  if (settings.voicePhotoMode === "camera" || settings.cameraEnabled) {
+    throw new Error("The phone-linked browser camera flow is retired");
   }
 
   const updatedAt = new Date();
@@ -61,6 +61,6 @@ export async function setExperienceSettings(settings: ExperienceSettings): Promi
 
 export async function setVoicePhotoMode(mode: VoicePhotoMode): Promise<void> {
   if (!isVoicePhotoMode(mode)) throw new Error("Invalid Voice photo mode");
-  const settings = await getExperienceSettings();
-  await setExperienceSettings({ ...settings, voicePhotoMode: mode });
+  if (mode === "camera") throw new Error("The phone-linked browser camera flow is retired");
+  await setExperienceSettings({ voicePhotoMode: mode, cameraEnabled: false });
 }

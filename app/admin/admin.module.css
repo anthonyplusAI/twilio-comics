@@ -547,6 +547,7 @@
 .loginGoogleForm { margin: 0; }
 .loginGoogleButton { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 49px; padding: 0 15px; border: 1px solid #b9c7da; border-radius: 5px; color: var(--navy); background: white; font: inherit; font-size: .9rem; font-weight: 800; cursor: pointer; }
 .loginGoogleButton:hover { border-color: var(--twilio-blue); background: #f5f9ff; }
+.loginGoogleButton:disabled { cursor: wait; opacity: .72; }
 .loginGoogleButton svg { margin-left: auto; }
 .loginGoogleMark { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; color: #4285f4; background: #f1f6ff; font-family: Arial, sans-serif; font-size: 1rem; font-weight: 800; }
 .loginGoogleHint { margin: 10px 0 0; color: var(--muted); font-size: .77rem; line-height: 1.5; }

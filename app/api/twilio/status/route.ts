@@ -5,7 +5,7 @@ import {
   recordFallbackMessageStatus,
   recordFailedGenerationNoticeStatus,
   recordGeneratedMessageStatus,
-  sendFailedMmsTextFallback,
+  sendFailedComicTextFallback,
 } from "@/lib/twilio-delivery";
 import { validateTwilioSignature } from "@/lib/twilio";
 import { readTwilioWebhookForm } from "@/lib/twilio-webhook-body";
@@ -104,7 +104,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   if (!fallback && (status === "failed" || status === "undelivered")) {
     try {
-      await sendFailedMmsTextFallback(jobId!);
+      await sendFailedComicTextFallback(jobId!);
     } catch (error) {
       // The recovery Job retries bounded fallback attempts after transient
       // failures; acknowledge this callback to avoid a burst of duplicates.

@@ -120,7 +120,7 @@ function approvalInstruction(channel: ComicAgentChannel, collected: AgentCollect
   const referenceCount = mergeReferences(collected.characterImageUrls, undefined).length;
   if (referenceCount === 0) {
     return channel === "voice"
-      ? "I have no reference photos for this call. Hang up and add one through photo setup, then call back from the same number. Your idea is saved."
+      ? "I have no reference photos for this call. Hang up and text one or two photos to this number from the phone you're calling on. Wait for the Photo saved reply, then call back. Your idea is saved."
       : "Send at least one character photo before replying CREATE. Your idea is saved.";
   }
   return channel === "voice"
@@ -337,8 +337,8 @@ export async function advanceComicAgent(
       existing.targetStoryId
         ? "I can use your previous comic page as a reference. Tell me what to change, or say create it when you're ready."
         : existing.characterImageUrls?.length
-          ? "A reference photo is required. Your saved photos are still attached. To replace them, use photo setup before calling back. Your idea is saved."
-          : "A reference photo is required. Hang up and add one through photo setup, then call back from the same number. Your idea is saved.",
+          ? "A reference photo is required. Your saved photos are still attached. To replace them, hang up and text one or two photos to this number from the phone you're calling on, then call back. Your idea is saved."
+          : "A reference photo is required. Hang up and text one or two photos to this number from the phone you're calling on, then call back. Your idea is saved.",
     );
   }
 
@@ -428,7 +428,11 @@ export async function advanceComicAgent(
       nextState: "generating",
       collected: { ...existing, characterImageUrls: submission.characterImageUrls },
       activeStoryId,
-      reply: "I'm creating your comic now. I'll send the result when it's ready.",
+      reply: turn.channel === "voice"
+        ? "I'm creating your comic now. I'll text the link when it's ready."
+        : turn.channel === "whatsapp"
+          ? "I'm creating your comic now. I'll message the link here. Reply STATUS if it doesn't arrive."
+          : "I'm creating your comic now. I'll text the link here. Reply STATUS if it doesn't arrive.",
       action: "submit",
       submission,
     };

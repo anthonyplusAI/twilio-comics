@@ -106,12 +106,27 @@ describe("Voice photo handoff", () => {
       .toEqual(new Date(resetAt));
   });
 
-  it("selects the configured photo source", () => {
-    expect(photoHandoffSourceChannels("sms", false)).toEqual(["sms"]);
-    expect(photoHandoffSourceChannels("sms", true)).toEqual(["sms", "camera"]);
-    expect(photoHandoffSourceChannels("camera", true)).toEqual(["camera", "sms"]);
-    expect(photoHandoffSourceChannels("camera", false)).toEqual(["sms"]);
-    expect(photoHandoffSourceChannels("none", true)).toEqual([]);
+  it("keeps fresh legacy camera stages available after new camera intake closes", () => {
+    expect(photoHandoffSourceChannels("sms")).toEqual(["sms", "camera"]);
+    expect(photoHandoffSourceChannels("camera")).toEqual(["camera", "sms"]);
+    expect(photoHandoffSourceChannels("none")).toEqual([]);
+  });
+
+  it("does not revive an expired legacy camera photo when another photo refreshed the row", () => {
+    const staleAt = NOW.getTime() - VOICE_PHOTO_HANDOFF_WINDOW_MS - 1;
+    const freshAt = NOW.getTime() - 1_000;
+    const camera = source({
+      characterImageUrls: [CAMERA_PHOTO, NEW_CAMERA_PHOTO],
+      cameraReferenceSavedAt: {
+        [CAMERA_PHOTO]: staleAt,
+        [NEW_CAMERA_PHOTO]: freshAt,
+      },
+    }, { updatedAt: new Date(freshAt) });
+
+    const selected = applied(planVoicePhotoHandoff({
+      mode: "sms", sourceChannel: "camera", voice: voice(), source: camera, now: NOW,
+    }));
+    expect(selected.collected.characterImageUrls).toEqual([NEW_CAMERA_PHOTO]);
   });
 
   it("copies at most two recent MMS photos into an unfinished Voice draft", () => {

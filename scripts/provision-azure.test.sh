@@ -265,6 +265,7 @@ arg_after() { awk -v key="$1" '$0 == key { getline; print; exit }' "$AZURE_TEST_
 [[ "$(arg_after --name)" == twilio-comics-generation-v2 ]]
 [[ "$(arg_after --trigger-type)" == Event ]]
 [[ "$(arg_after --polling-interval)" == 5 ]]
+[[ "$(arg_after --max-executions)" == 4 ]]
 [[ "$(arg_after --scale-rule-type)" == azure-queue ]]
 
 set +e

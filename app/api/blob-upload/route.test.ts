@@ -1,15 +1,19 @@
 import sharp from "sharp";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   auth: vi.fn(),
+  actor: vi.fn(),
   uploadBufferToBlob: vi.fn(),
   reserveBrowserUpload: vi.fn(),
+  reserveGuestUpload: vi.fn(),
 }));
 
 vi.mock("@/auth", () => ({ auth: h.auth }));
+vi.mock("@/lib/studio-guest-session", () => ({ getStudioActor: h.actor }));
 vi.mock("@/lib/blob-storage", () => ({ uploadBufferToBlob: h.uploadBufferToBlob }));
 vi.mock("@/lib/browser-upload-budget", () => ({ reserveBrowserUpload: h.reserveBrowserUpload }));
+vi.mock("@/lib/studio-guest-budget", () => ({ reserveStudioGuestUpload: h.reserveGuestUpload }));
 
 import { POST } from "@/app/api/blob-upload/route";
 
@@ -24,10 +28,20 @@ function uploadRequest(file: File): Request {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
   h.auth.mockResolvedValue({ user: { id: "owner-1", role: "user", studioAuthorized: true } });
+  h.actor.mockImplementation(async () => {
+    const user = (await h.auth())?.user;
+    const userId = user?.id?.trim();
+    return userId && user.studioAuthorized === true
+      ? { userId, kind: "google" }
+      : null;
+  });
   h.uploadBufferToBlob.mockResolvedValue("https://comics.example.com/photo.jpg");
   h.reserveBrowserUpload.mockResolvedValue({ allowed: true });
+  h.reserveGuestUpload.mockResolvedValue({ allowed: true });
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe("POST /api/blob-upload", () => {
   it("rejects an oversized multipart stream without Content-Length before uploading", async () => {
@@ -210,5 +224,53 @@ describe("POST /api/blob-upload", () => {
       expect.stringMatching(/^uploads\/google-admin-user\/[0-9a-f-]+\.jpg$/),
       "image/jpeg",
     );
+  });
+
+  it("lets a guest upload a reference photo under only that guest's identity", async () => {
+    const guestId = "693a8e78-5b98-49e6-9fc2-4b3352ac387a";
+    h.auth.mockResolvedValue(null);
+    h.actor.mockResolvedValue({ userId: guestId, kind: "guest" });
+    const jpeg = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "#4c78a8" },
+    }).jpeg().toBuffer();
+    const request = uploadRequest(new File([new Uint8Array(jpeg)], "photo.jpg", { type: "image/jpeg" }));
+    request.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(201);
+    expect(h.reserveGuestUpload).toHaveBeenCalledWith(guestId, request);
+    expect(h.reserveBrowserUpload).toHaveBeenCalledWith(guestId);
+    expect(h.uploadBufferToBlob).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      expect.stringMatching(new RegExp(`^uploads/${guestId}/[0-9a-f-]+\\.jpg$`)),
+      "image/jpeg",
+    );
+  });
+
+  it("rejects a guest photo upload from another origin", async () => {
+    h.actor.mockResolvedValue({ userId: "693a8e78-5b98-49e6-9fc2-4b3352ac387a", kind: "guest" });
+    const request = uploadRequest(new File(["photo"], "photo.jpg", { type: "image/jpeg" }));
+    request.headers.set("origin", "https://attacker.example");
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(403);
+    expect(h.reserveGuestUpload).not.toHaveBeenCalled();
+    expect(h.reserveBrowserUpload).not.toHaveBeenCalled();
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
+  });
+
+  it("rejects a guest photo before the per-user budget when the shared source is full", async () => {
+    h.actor.mockResolvedValue({ userId: "693a8e78-5b98-49e6-9fc2-4b3352ac387a", kind: "guest" });
+    h.reserveGuestUpload.mockResolvedValue({ allowed: false, reason: "rate_limit" });
+    const request = uploadRequest(new File(["photo"], "photo.jpg", { type: "image/jpeg" }));
+    request.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(429);
+    expect(h.reserveBrowserUpload).not.toHaveBeenCalled();
+    expect(h.uploadBufferToBlob).not.toHaveBeenCalled();
   });
 });

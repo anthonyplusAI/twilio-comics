@@ -314,6 +314,8 @@
 }
 
 .styleOption {
+  display: flex;
+  align-items: center;
   min-height: 42px;
   border: 2px solid var(--ink, #000d25);
   background: #fff;
@@ -326,6 +328,10 @@
   text-align: left;
   cursor: pointer;
   transition: background 150ms ease;
+}
+
+.styleOptionImage {
+  display: none;
 }
 
 .styleOption:hover:not(:disabled) {
@@ -441,6 +447,23 @@
   to { transform: rotate(360deg); }
 }
 
+@media (max-width: 1050px) {
+  .styleOption {
+    gap: 11px;
+    min-height: 82px;
+    padding: 6px;
+  }
+
+  .styleOptionImage {
+    display: block;
+    flex: none;
+    width: 66px;
+    height: 66px;
+    border: 1px solid var(--ink, #000d25);
+    object-fit: cover;
+  }
+}
+
 @media (max-width: 560px) {
   .formHeader,
   .formFooter {
@@ -476,6 +499,20 @@
   .photoMeta,
   .actionMeta {
     flex-wrap: wrap;
+  }
+
+  .styleOption {
+    display: grid;
+    align-content: start;
+    gap: 7px;
+    min-height: 0;
+    text-align: center;
+  }
+
+  .styleOptionImage {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
   }
 
   .actionMeta span:last-child {

@@ -1,11 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { getFreeTierQuota } from "@/lib/quota";
+import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
+import { readBoundedStudioJson } from "@/lib/studio-guest-json";
+import { getStudioActor } from "@/lib/studio-guest-session";
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioActor(request);
+    const userId = actor?.userId;
 
     if (!userId) {
       return NextResponse.json(
@@ -14,32 +15,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { hasApiKey } = await request.json();
-
-    // Check if user has API key (unlimited)
-    if (hasApiKey) {
-      return NextResponse.json({
-        hasApiKey: true,
-        creditsRemaining: "unlimited",
-        resetTime: null,
-      });
+    if (actor?.kind === "guest" && !photoRequestHasAllowedOrigin(request)) {
+      return NextResponse.json({ error: "Invalid request origin" }, { status: 403 });
     }
 
-    const limitResult = await getFreeTierQuota(userId);
+    const json = await readBoundedStudioJson(request);
+    if (!json.ok) return NextResponse.json({ error: json.error }, { status: json.status });
+    const body = json.value;
+    const hasApiKey = body && typeof body === "object" && "hasApiKey" in body
+      ? (body as { hasApiKey: unknown }).hasApiKey : false;
+    if (actor?.kind === "guest" && hasApiKey) {
+      return NextResponse.json({ error: "Browser Studio uses the app's OpenAI key" }, { status: 400 });
+    }
 
+    // Public Studio uses rolling throughput safeguards, not weekly credits.
     return NextResponse.json({
-      hasApiKey: false,
-      creditsRemaining: limitResult.remaining,
-      resetTime: limitResult.reset,
+      hasApiKey: hasApiKey === true,
+      creditsRemaining: "unlimited",
+      resetTime: null,
     });
   } catch (error) {
     console.error("Error in check-credits API:", error);
     return NextResponse.json(
-      {
-        error: `Internal server error: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      },
+      { error: "Could not check comic availability" },
       { status: 500 }
     );
   }

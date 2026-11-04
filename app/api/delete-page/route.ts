@@ -1,11 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { photoRequestHasAllowedOrigin } from "@/lib/browser-photo-session";
 import { getStoryWithPagesBySlug, deletePage } from "@/lib/db-actions";
+import { readBoundedStudioJson } from "@/lib/studio-guest-json";
+import { getStudioActor } from "@/lib/studio-guest-session";
 
 export async function DELETE(request: NextRequest) {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
+    const actor = await getStudioActor(request);
+    const userId = actor?.userId;
 
     if (!userId) {
       return NextResponse.json(
@@ -13,10 +15,19 @@ export async function DELETE(request: NextRequest) {
         { status: 401 }
       );
     }
+    if (actor?.kind === "guest" && !photoRequestHasAllowedOrigin(request)) {
+      return NextResponse.json({ error: "Invalid request origin" }, { status: 403 });
+    }
 
-    const { storySlug, pageId } = await request.json();
+    const json = await readBoundedStudioJson(request);
+    if (!json.ok) return NextResponse.json({ error: json.error }, { status: json.status });
+    const fields = json.value && typeof json.value === "object" && !Array.isArray(json.value)
+      ? json.value as Record<string, unknown>
+      : {};
+    const { storySlug, pageId } = fields;
 
-    if (!storySlug || !pageId) {
+    if (typeof storySlug !== "string" || !storySlug ||
+        typeof pageId !== "string" || !pageId) {
       return NextResponse.json(
         { error: "Missing required fields: storySlug and pageId" },
         { status: 400 }
@@ -56,11 +67,7 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error("Error deleting page:", error);
     return NextResponse.json(
-      {
-        error: `Internal server error: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      },
+      { error: "Could not delete page" },
       { status: 500 }
     );
   }

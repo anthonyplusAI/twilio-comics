@@ -12,7 +12,7 @@ import {
 import { recoverUnpublishedGenerationJobs } from "@/lib/generation-jobs";
 import { processGenerationJob } from "@/lib/process-generation-job";
 import { recoverPendingInboundMessages } from "@/lib/twilio-events";
-import { recoverFailedMmsTextFallbacks } from "@/lib/twilio-delivery";
+import { recoverFailedComicTextFallbacks } from "@/lib/twilio-delivery";
 
 export async function processNextGenerationJob(): Promise<boolean> {
   const message = await receiveGenerationJob(20 * 60);
@@ -43,7 +43,7 @@ export async function runWorker(): Promise<void> {
     const sweeps = await Promise.allSettled([
       recoverPendingInboundMessages(),
       recoverUnpublishedGenerationJobs(),
-      recoverFailedMmsTextFallbacks(),
+      recoverFailedComicTextFallbacks(),
     ]);
     const failures = sweeps.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],

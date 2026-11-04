@@ -7,8 +7,9 @@ import { revalidatePath } from "next/cache";
 import { signIn, signOut } from "@/auth";
 import { requireAdmin } from "@/lib/admin-access";
 import { rotateAdminCredentials } from "@/lib/admin-auth";
+import { setBrowserStudioEnabled } from "@/lib/browser-studio-settings";
 import { db } from "@/lib/db";
-import { isVoicePhotoMode, setExperienceSettings } from "@/lib/photo-experience-settings";
+import { setExperienceSettings } from "@/lib/photo-experience-settings";
 import { MAX_GENERATION_QUOTA_OVERRIDE, UNLIMITED_GENERATION_QUOTA_OVERRIDE } from "@/lib/quota";
 import { users } from "@/lib/schema";
 
@@ -38,28 +39,36 @@ export async function adminSignOut(): Promise<void> {
   await signOut({ redirectTo: "/admin/login" });
 }
 
-export async function updatePhotoExperienceSettings(formData: FormData): Promise<void> {
+export async function updateBrowserStudioSetting(formData: FormData): Promise<void> {
   await requireAdmin();
-
-  const mode = formData.get("voicePhotoMode");
-  const cameraValues = formData.getAll("cameraEnabled");
-  if (
-    !isVoicePhotoMode(mode) ||
-    cameraValues.length > 1 ||
-    cameraValues.some((value) => value !== "on")
-  ) {
-    redirect("/admin/settings?error=invalid");
-  }
-  const cameraEnabled = cameraValues.length === 1;
-  if (mode === "camera" && !cameraEnabled) {
-    redirect("/admin/settings?error=camera-required");
+  const values = formData.getAll("studioEnabled");
+  if (values.length > 1 || values.some((value) => value !== "on")) {
+    redirect("/admin/settings?error=invalid-studio");
   }
 
-  await setExperienceSettings({ voicePhotoMode: mode, cameraEnabled });
+  await setBrowserStudioEnabled(values.length === 1);
   revalidatePath("/start");
+  revalidatePath("/studio");
   revalidatePath("/start/camera");
   revalidatePath("/admin/settings");
-  redirect("/admin/settings?saved=1");
+  redirect("/admin/settings?saved=studio");
+}
+
+export async function updateSmsVoiceSetting(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const values = formData.getAll("voiceEnabled");
+  if (values.length > 1 || values.some((value) => value !== "on")) {
+    redirect("/admin/settings?error=invalid-voice");
+  }
+
+  await setExperienceSettings({
+    voicePhotoMode: values.length === 1 ? "sms" : "none",
+    cameraEnabled: false,
+  });
+  revalidatePath("/start");
+  revalidatePath("/start/voice");
+  revalidatePath("/admin/settings");
+  redirect("/admin/settings?saved=voice");
 }
 
 export async function updateUserGenerationQuota(formData: FormData): Promise<void> {

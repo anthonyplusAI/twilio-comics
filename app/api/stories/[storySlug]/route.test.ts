@@ -1,13 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const h = vi.hoisted(() => ({
   auth: vi.fn(),
+  actor: vi.fn(),
   getStoryWithPagesBySlug: vi.fn(),
   updateStory: vi.fn(),
 }));
 
 vi.mock("@/auth", () => ({ auth: h.auth }));
+vi.mock("@/lib/studio-guest-session", () => ({ getStudioActor: h.actor }));
 vi.mock("@/lib/db-actions", () => ({
   getStoryWithPagesBySlug: h.getStoryWithPagesBySlug,
   updateStory: h.updateStory,
@@ -19,16 +21,21 @@ import { GET, PUT } from "@/app/api/stories/[storySlug]/route";
 const params = { params: Promise.resolve({ storySlug: "moon-comic" }) };
 const noStore = "private, no-store, max-age=0";
 
-function request(method = "GET", body?: string) {
+function request(method = "GET", body?: string, origin?: string) {
   return new NextRequest("https://comics.example.com/api/stories/moon-comic", {
     method,
-    ...(body ? { body, headers: { "content-type": "application/json" } } : {}),
+    ...(body ? { body, headers: { "content-type": "application/json", ...(origin ? { origin } : {}) } } : {}),
   });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   h.auth.mockResolvedValue(null);
+  h.actor.mockImplementation(async () => {
+    const userId = (await h.auth())?.user?.id?.trim();
+    return userId ? { userId, kind: "google" } : null;
+  });
+  vi.stubEnv("PUBLIC_BASE_URL", "https://comics.example.com");
   h.updateStory.mockResolvedValue(undefined);
   h.getStoryWithPagesBySlug.mockResolvedValue({
     story: {
@@ -56,6 +63,7 @@ beforeEach(() => {
     }],
   });
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe("public story JSON cache policy", () => {
   it("does not cache a story or the missing response after it is deleted", async () => {
@@ -95,6 +103,7 @@ describe("public story JSON cache policy", () => {
 
     expect(response.status).toBe(200);
     expect(body.isOwner).toBe(true);
+    expect(body.actorKind).toBe("google");
     expect(body.pages[0]).toMatchObject({
       id: "page-1",
       prompt: "Make the hero look like my child, named Casey",
@@ -126,5 +135,58 @@ describe("public story JSON cache policy", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe(noStore);
     expect(await response.json()).toEqual({ success: true });
+  });
+
+  it("returns editing fields to the guest who made the comic", async () => {
+    h.actor.mockResolvedValue({ userId: "creator", kind: "guest" });
+
+    const response = await GET(request(), params);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.isOwner).toBe(true);
+    expect(body.actorKind).toBe("guest");
+    expect(body.pages[0]).toMatchObject({ id: "page-1", prompt: "Make the hero look like my child, named Casey" });
+  });
+
+  it("lets a guest rename their own comic from the same origin", async () => {
+    h.actor.mockResolvedValue({ userId: "creator", kind: "guest" });
+
+    const response = await PUT(request("PUT", JSON.stringify({ title: "New Moon" }), "https://comics.example.com"), params);
+
+    expect(response.status).toBe(200);
+    expect(h.updateStory).toHaveBeenCalledWith("story-1", { title: "New Moon" });
+  });
+
+  it("rejects a cross-origin guest story update", async () => {
+    h.actor.mockResolvedValue({ userId: "creator", kind: "guest" });
+
+    const response = await PUT(request("PUT", JSON.stringify({ title: "New Moon" }), "https://attacker.example"), params);
+
+    expect(response.status).toBe(403);
+    expect(h.updateStory).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized guest update before writing to the story", async () => {
+    h.actor.mockResolvedValue({ userId: "creator", kind: "guest" });
+
+    const response = await PUT(request("PUT", JSON.stringify({ title: "x".repeat(17_000) }),
+      "https://comics.example.com"), params);
+
+    expect(response.status).toBe(413);
+    expect(h.updateStory).not.toHaveBeenCalled();
+  });
+
+  it("shows a saved comic read-only after Browser Studio closes", async () => {
+    h.actor.mockResolvedValue(null);
+
+    const view = await GET(request(), params);
+    const update = await PUT(request("PUT", JSON.stringify({ title: "New Moon" }),
+      "https://comics.example.com"), params);
+
+    expect(view.status).toBe(200);
+    expect(await view.json()).toMatchObject({ isOwner: false });
+    expect(update.status).toBe(401);
+    expect(h.updateStory).not.toHaveBeenCalled();
   });
 });

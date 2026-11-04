@@ -93,13 +93,9 @@ export function planConsumedSmsPhotoStage(
   return { ...source.collected, characterImageUrls: [], photoHandoffFingerprint: undefined };
 }
 
-/** The selected source wins when both text and kiosk photos are staged. */
-export function photoHandoffSourceChannels(
-  mode: VoicePhotoMode,
-  cameraEnabled: boolean,
-): PhotoHandoffSourceChannel[] {
+/** Read fresh legacy camera stages until they expire, even though new intake is closed. */
+export function photoHandoffSourceChannels(mode: VoicePhotoMode): PhotoHandoffSourceChannel[] {
   if (mode === "none") return [];
-  if (!cameraEnabled) return ["sms"];
   return mode === "camera" ? ["camera", "sms"] : ["sms", "camera"];
 }
 
@@ -151,6 +147,14 @@ export function planVoicePhotoHandoff({
   const ignoredCameraReferences = new Set(voice.collected.ignoredCameraReferences || []);
   const resetAt = Date.parse(voice.collected.photoHandoffResetAt || "");
   const cameraSavedAt = source.collected.cameraReferenceSavedAt;
+  const cameraReferenceIsFresh = (reference: string): boolean => {
+    const savedAt = cameraSavedAt?.[reference];
+    const effectiveSavedAt = typeof savedAt === "number" && Number.isSafeInteger(savedAt)
+      ? savedAt
+      : source.updatedAt.getTime();
+    const savedAgeMs = now.getTime() - effectiveSavedAt;
+    return savedAgeMs >= -5 * 60_000 && savedAgeMs <= VOICE_PHOTO_HANDOFF_WINDOW_MS;
+  };
   const stagedReferences = Array.isArray(source.collected?.characterImageUrls)
     ? source.collected.characterImageUrls
     : [];
@@ -159,6 +163,7 @@ export function planVoicePhotoHandoff({
       (sourceChannel === "sms"
         ? isTwilioMediaUrl(reference) && recentSmsUrls.has(reference)
         : CAMERA_REFERENCE.test(reference) && !ignoredCameraReferences.has(reference) &&
+          cameraReferenceIsFresh(reference) &&
           (!Number.isFinite(resetAt) ||
             (typeof cameraSavedAt?.[reference] === "number" && cameraSavedAt[reference] >= resetAt))))
     .slice(0, 2);

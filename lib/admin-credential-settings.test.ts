@@ -23,6 +23,10 @@ vi.mock("@/lib/photo-experience-settings", () => ({
   setExperienceSettings: vi.fn(),
   isVoicePhotoMode: vi.fn(),
 }));
+vi.mock("@/lib/browser-studio-settings", () => ({
+  getBrowserStudioEnabled: vi.fn().mockResolvedValue(false),
+  setBrowserStudioEnabled: vi.fn(),
+}));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("next/navigation", () => ({ redirect: h.redirect }));
 
@@ -102,7 +106,8 @@ describe("admin credential settings", () => {
     expect(html).toContain('name="confirmNewPassword"');
     expect(newPasswordInput).toContain('minLength="1"');
     expect(confirmPasswordInput).toContain('minLength="1"');
-    expect(html).toContain("Offer camera and photo upload");
+    expect(html).toContain("Let players make comics in their browser");
+    expect(html).toContain("Offer SMS + Voice");
   });
 
   it("does not use a Google admin's display name as the shared password username", async () => {

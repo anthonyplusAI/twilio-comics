@@ -21,7 +21,7 @@ function validCameraRef(reference: unknown, userId: string): reference is string
 function references(value: unknown, userId: string): string[] {
   if (!value || typeof value !== "object" || !("characterImageUrls" in value)) return [];
   const refs = (value as { characterImageUrls?: unknown }).characterImageUrls;
-  return Array.isArray(refs) ? refs.filter((ref) => validCameraRef(ref, userId)).slice(0, 2) : [];
+  return Array.isArray(refs) ? refs.filter((ref) => validCameraRef(ref, userId)) : [];
 }
 
 function isFresh(updatedAt: Date, now: number): boolean {
@@ -36,7 +36,23 @@ export function currentCameraReferences(
   userId: string,
   now = Date.now(),
 ): string[] {
-  return isFresh(updatedAt, now) ? references(collected, userId) : [];
+  if (!isFresh(updatedAt, now)) return [];
+  const savedAt = collected && typeof collected === "object" &&
+    "cameraReferenceSavedAt" in collected
+    ? (collected as { cameraReferenceSavedAt?: unknown }).cameraReferenceSavedAt
+    : null;
+  const savedTimes = savedAt && typeof savedAt === "object" && !Array.isArray(savedAt)
+    ? savedAt as Record<string, unknown>
+    : {};
+  return references(collected, userId)
+    .filter((reference) => {
+      const savedTime = savedTimes[reference];
+      const effectiveSavedAt = typeof savedTime === "number" && Number.isSafeInteger(savedTime)
+        ? savedTime
+        : updatedAt.getTime();
+      return isFresh(new Date(effectiveSavedAt), now);
+    })
+    .slice(0, MAX_CAMERA_PHOTOS);
 }
 
 export function planCameraStage(
@@ -186,12 +202,14 @@ export async function stageCameraPhoto(
     if (!plan) return null;
     const now = Date.now();
     const newReference = `blob:${blobKey}`;
-    const savedAt = Object.fromEntries(plan.references.map((reference) => [
-      reference,
-      reference === newReference
+    const savedAt = Object.fromEntries(plan.references.map((reference) => {
+      const priorSavedAt = row.collected.cameraReferenceSavedAt?.[reference];
+      return [reference, reference === newReference
         ? now
-        : row.collected.cameraReferenceSavedAt?.[reference] ?? row.updatedAt.getTime(),
-    ]));
+        : typeof priorSavedAt === "number" && Number.isSafeInteger(priorSavedAt)
+          ? priorSavedAt
+          : row.updatedAt.getTime()];
+    }));
     await tx.update(conversations)
       .set({
         collected: {
@@ -245,10 +263,12 @@ export async function clearStagedCameraPhotoReferences(
     delete nextCollected.cameraReferenceSavedAt;
     if (remaining.length) {
       nextCollected.characterImageUrls = remaining;
-      nextCollected.cameraReferenceSavedAt = Object.fromEntries(remaining.map((reference) => [
-        reference,
-        row.collected.cameraReferenceSavedAt?.[reference] ?? row.updatedAt.getTime(),
-      ]));
+      nextCollected.cameraReferenceSavedAt = Object.fromEntries(remaining.map((reference) => {
+        const priorSavedAt = row.collected.cameraReferenceSavedAt?.[reference];
+        return [reference, typeof priorSavedAt === "number" && Number.isSafeInteger(priorSavedAt)
+          ? priorSavedAt
+          : row.updatedAt.getTime()];
+      }));
     }
     await tx.update(conversations)
       .set({

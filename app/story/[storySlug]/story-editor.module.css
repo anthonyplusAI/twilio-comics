@@ -1,0 +1,163 @@
+.resultPage {
+  --background: #f3f4f7;
+  --foreground: #000d25;
+  --card: #ffffff;
+  --card-foreground: #000d25;
+  --popover: #ffffff;
+  --popover-foreground: #000d25;
+  --primary: #db132a;
+  --primary-foreground: #ffffff;
+  --secondary: #e4f7ff;
+  --secondary-foreground: #000d25;
+  --muted: #dde0e6;
+  --muted-foreground: #4d5777;
+  --border: #babecc;
+  --input: #ffffff;
+  --ring: #1866ee;
+  --indigo: #db132a;
+  display: flex;
+  flex-direction: column;
+  height: 100svh;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.resultHeader {
+  flex: none;
+  height: 64px;
+  border-bottom: 3px solid var(--ink);
+}
+
+.resultNav { gap: clamp(14px, 2.5vw, 30px); }
+.backLink { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
+
+.editorShell {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.editorShell > header {
+  flex: none;
+  border-bottom: 2px solid var(--ink);
+  background: var(--paper);
+  backdrop-filter: none;
+}
+
+.editorShell > header h1,
+.editorShell > header input {
+  color: var(--ink);
+  font-family: var(--font-space-grotesk), sans-serif;
+  font-weight: 700;
+}
+
+.editorShell > header button,
+.editorShell > header a {
+  color: var(--ink);
+}
+
+.editorShell > header button:hover,
+.editorShell > header a:hover {
+  background: var(--pale-blue);
+  color: var(--ink);
+}
+
+.editorShell[data-owner="true"] > header > div:last-child > button:last-child {
+  border: 2px solid var(--ink);
+  border-radius: 2px;
+  background: var(--red-action);
+  color: var(--paper);
+  font-weight: 800;
+}
+
+.editorShell[data-owner="true"] > header > div:last-child > button:last-child:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.guestNote {
+  flex: none;
+  margin: 0;
+  border-bottom: 2px solid var(--ink);
+  background: var(--pale-blue);
+  padding: 8px 16px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.editorViewport {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editorViewport > aside {
+  border-right: 2px solid var(--ink);
+  background: var(--paper);
+}
+
+.editorViewport > aside button {
+  border-radius: 3px;
+}
+
+.editorViewport > main {
+  background: var(--surface);
+}
+
+.editorViewport > main :global(.dot-grid) {
+  background-image: radial-gradient(#babecd 1px, transparent 1px);
+}
+
+.editorViewport > main :global(.scan-line) { display: none; }
+
+.editorViewport > main > div.relative > div:first-child {
+  box-shadow: 8px 8px 0 var(--ink);
+}
+
+.editorViewport > main button:hover {
+  background: var(--pale-blue);
+  color: var(--ink);
+}
+
+.editorViewport button:focus-visible,
+.editorShell > header button:focus-visible,
+.editorShell > header a:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.centerState {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  min-height: 0;
+  background: var(--surface);
+  padding: 24px;
+  text-align: center;
+}
+
+.centerState :global(img) { filter: none !important; }
+.centerState :global(.text-white) { color: var(--ink); }
+.centerState h1 { margin: 0; font-family: var(--font-bangers), Impact, sans-serif; font-size: clamp(42px, 6vw, 62px); font-weight: 400; }
+.centerState > a { border: 2px solid var(--ink); background: var(--red-action); padding: 10px 16px; box-shadow: 3px 3px 0 var(--ink); color: var(--paper); font-weight: 800; text-decoration: none; }
+.centerState > a:hover { background: var(--ink); }
+
+@media (max-width: 560px) {
+  .resultHeader { height: auto; min-height: 64px; flex-wrap: wrap; gap: 2px; padding: 9px 16px; }
+  .resultNav { width: 100%; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .resultHeader :global(img) { width: 32px; height: 32px; }
+  .guestNote { padding: 7px 12px; font-size: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editorViewport > main :global(.scan-line) { animation: none; }
+}

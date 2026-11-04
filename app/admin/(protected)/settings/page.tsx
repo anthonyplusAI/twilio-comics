@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight, Camera, MessageCircle, PhoneCall } from "lucide-react";
-import { updateAdminCredentials, updatePhotoExperienceSettings } from "@/app/admin/actions";
+import { ArrowLeft, ArrowUpRight, BookOpen, PhoneCall } from "lucide-react";
+import { updateAdminCredentials, updateBrowserStudioSetting, updateSmsVoiceSetting } from "@/app/admin/actions";
 import { requireAdmin } from "@/lib/admin-access";
-import { getExperienceSettings, type VoicePhotoMode } from "@/lib/photo-experience-settings";
+import { getBrowserStudioEnabled } from "@/lib/browser-studio-settings";
+import { getExperienceSettings } from "@/lib/photo-experience-settings";
+import { isStudioStartReady } from "@/lib/studio-start-readiness";
 import styles from "../../admin.module.css";
 
 export const dynamic = "force-dynamic";
@@ -12,32 +14,6 @@ export const metadata: Metadata = {
   title: "Experience settings | Twilio Comics",
   robots: { index: false, follow: false },
 };
-
-const voicePhotoOptions = [
-  {
-    value: "sms",
-    title: "Use saved photos (text first)",
-    description: "For calls, prefer photos texted from the same number. Use browser photos if the camera is enabled and no text photos are saved.",
-    icon: MessageCircle,
-  },
-  {
-    value: "camera",
-    title: "Use saved photos (camera first)",
-    description: "For calls, prefer verified browser photos, then fall back to photos sent by text. Enable the browser camera below.",
-    icon: Camera,
-  },
-  {
-    value: "none",
-    title: "Calls without photos",
-    description: "Voice ignores saved photos. The browser camera can still serve SMS when enabled.",
-    icon: PhoneCall,
-  },
-] as const satisfies ReadonlyArray<{
-  value: VoicePhotoMode;
-  title: string;
-  description: string;
-  icon: typeof PhoneCall;
-}>;
 
 function credentialErrorMessage(error: string | undefined): string | null {
   switch (error) {
@@ -64,11 +40,13 @@ export default async function AdminSettingsPage({
   searchParams: Promise<{ saved?: string; error?: string; credentialError?: string }>;
 }) {
   await requireAdmin();
-  const [{ voicePhotoMode, cameraEnabled }, params] = await Promise.all([
+  const [studioEnabled, phoneSettings, params] = await Promise.all([
+    getBrowserStudioEnabled(),
     getExperienceSettings(),
     searchParams,
   ]);
   const credentialError = credentialErrorMessage(params.credentialError);
+  const studioReady = isStudioStartReady();
 
   return (
     <div className={styles.settingsPage}>
@@ -76,21 +54,33 @@ export default async function AdminSettingsPage({
         <div>
           <p className={styles.sectionKicker}>Operations settings</p>
           <h1>Settings.</h1>
-          <p>Manage your admin login and the photo experience.</p>
+          <p>Manage your admin login and the ways people can play.</p>
         </div>
         <Link className={styles.backAction} href="/admin">
           <ArrowLeft size={17} aria-hidden="true" /> Overview
         </Link>
       </div>
 
-      {params.saved === "1" && (
-        <p className={styles.settingsSuccess} role="status">Saved. The public start page now reflects this choice.</p>
+      {params.saved === "studio" && (
+        <p className={styles.settingsSuccess} role="status">
+          Saved. Browser Studio is {studioEnabled
+            ? studioReady ? "available for players" : "enabled, but unavailable until its runtime configuration is complete"
+            : "closed for players"}.
+        </p>
       )}
-      {params.error === "invalid" && (
-        <p className={styles.settingsError} role="alert">Choose one of the available photo options.</p>
+      {studioEnabled && !studioReady && (
+        <p className={styles.settingsError} role="alert">
+          Browser Studio is enabled but hidden from players because its server configuration is incomplete.
+        </p>
       )}
-      {params.error === "camera-required" && (
-        <p className={styles.settingsError} role="alert">Turn on the browser camera to make it the first photo source for calls.</p>
+      {params.saved === "voice" && (
+        <p className={styles.settingsSuccess} role="status">Saved. SMS + Voice is {phoneSettings.voicePhotoMode === "none" ? "closed" : "available"} when the phone channels are configured.</p>
+      )}
+      {params.error === "invalid-studio" && (
+        <p className={styles.settingsError} role="alert">The Browser Studio setting was invalid. Please try again.</p>
+      )}
+      {params.error === "invalid-voice" && (
+        <p className={styles.settingsError} role="alert">The SMS + Voice setting was invalid. Please try again.</p>
       )}
 
       <section className={`${styles.settingsPanel} ${styles.credentialsPanel}`} id="change-login" aria-labelledby="change-login-heading">
@@ -165,60 +155,67 @@ export default async function AdminSettingsPage({
         </form>
       </section>
 
-      <section className={styles.settingsPanel} aria-labelledby="voice-photo-heading">
+      <section className={styles.settingsPanel} aria-labelledby="studio-setting-heading">
         <div className={styles.settingsPanelHeading}>
           <div>
-            <h2 id="voice-photo-heading">Photo setup</h2>
-            <p>Visitors can text photos in their SMS chat. These settings add a browser option and control photo use during calls.</p>
+            <h2 id="studio-setting-heading">Browser Studio</h2>
+            <p>Open or close the browser option on the public start page.</p>
           </div>
           <Link href="/start" target="_blank" rel="noopener noreferrer">
             View start page <ArrowUpRight size={16} aria-hidden="true" />
           </Link>
         </div>
 
-        <form action={updatePhotoExperienceSettings} className={styles.settingsForm}>
+        <form action={updateBrowserStudioSetting} className={styles.settingsForm}>
           <fieldset>
-            <legend className={styles.settingsLegend}>Browser photo booth</legend>
+            <legend className={styles.settingsLegend}>Browser mode</legend>
             <label className={styles.settingsToggleCard}>
               <input
                 className={styles.settingsCheck}
                 type="checkbox"
-                name="cameraEnabled"
-                defaultChecked={cameraEnabled}
+                name="studioEnabled"
+                defaultChecked={studioEnabled}
               />
-              <span className={styles.settingsChoiceIcon}><Camera size={22} aria-hidden="true" /></span>
+              <span className={styles.settingsChoiceIcon}><BookOpen size={22} aria-hidden="true" /></span>
               <span className={styles.settingsChoiceCopy}>
-                <strong>Offer camera and photo upload</strong>
-                <span>After phone verification, people can add up to two photos for an SMS comic or a photo-enabled call.</span>
+                <strong>Let players make comics in their browser</strong>
+                <span>Players take or upload one or two photos, choose a style, and make a comic without Google or a phone number. When SMS and Verify are configured, they can optionally text the finished link to themselves.</span>
               </span>
             </label>
           </fieldset>
+          <div className={styles.settingsActions}>
+            <button type="submit">Save browser setting</button>
+            <p>When closed, Studio disappears from /start and creation and editing pause. Existing comics remain readable by link. Public generation uses the existing server OpenAI key. There is no weekly player quota, but rolling hourly and daily limits protect it; set a project spending limit before opening Studio.</p>
+          </div>
+        </form>
+      </section>
 
-          <fieldset className={styles.settingsVoiceFieldset}>
-            <legend className={styles.settingsLegend}>How calls use saved photos</legend>
-            <div className={styles.settingsChoices}>
-              {voicePhotoOptions.map(({ value, title, description, icon: Icon }) => (
-                <label className={styles.settingsChoice} key={value}>
-                  <input
-                    className={styles.settingsRadio}
-                    type="radio"
-                    name="voicePhotoMode"
-                    value={value}
-                    defaultChecked={voicePhotoMode === value}
-                    required
-                  />
-                  <span className={styles.settingsChoiceIcon}><Icon size={22} aria-hidden="true" /></span>
-                  <span className={styles.settingsChoiceCopy}>
-                    <strong>{title}</strong>
-                    <span>{description}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
+      <section className={styles.settingsPanel} aria-labelledby="phone-flow-heading">
+        <div className={styles.settingsPanelHeading}>
+          <div>
+            <h2 id="phone-flow-heading">SMS + Voice</h2>
+            <p>For SMS, players text one or two photos and then their idea. For SMS + Voice, they text their photos before calling from the same number. Their finished link arrives by text.</p>
+          </div>
+        </div>
+        <form action={updateSmsVoiceSetting} className={styles.settingsForm}>
+          <fieldset>
+            <legend className={styles.settingsLegend}>Call option</legend>
+            <label className={styles.settingsToggleCard}>
+              <input
+                className={styles.settingsCheck}
+                type="checkbox"
+                name="voiceEnabled"
+                defaultChecked={phoneSettings.voicePhotoMode !== "none"}
+              />
+              <span className={styles.settingsChoiceIcon}><PhoneCall size={22} aria-hidden="true" /></span>
+              <span className={styles.settingsChoiceCopy}>
+                <strong>Offer SMS + Voice</strong>
+                <span>Players text reference photos, wait for “Photo saved,” then call from the same number. Voice must also be configured in Twilio.</span>
+              </span>
+            </label>
           </fieldset>
           <div className={styles.settingsActions}>
-            <button type="submit">Save settings</button>
-            <p>Saved in PostgreSQL and kept through app deployments.</p>
+            <button type="submit">Save call setting</button>
           </div>
         </form>
       </section>

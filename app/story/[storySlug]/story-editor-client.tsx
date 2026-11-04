@@ -1,17 +1,20 @@
 "use client";
 
+import Image from "next/image";
+import Link from "next/link";
 import { useState, useEffect, useEffectEvent, useRef } from "react";
 import { useParams } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { ArrowLeft } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useApiKey } from "@/hooks/use-api-key";
 import { EditorToolbar } from "@/components/editor/editor-toolbar";
 import { PageSidebar } from "@/components/editor/page-sidebar";
 import { ComicCanvas } from "@/components/editor/comic-canvas";
-import { ApiKeyModal } from "@/components/api-key-modal";
 import { PageInfoSheet } from "@/components/editor/page-info-sheet";
 import { GeneratePageModal } from "@/components/editor/generate-page-modal";
 import { StoryLoader } from "@/components/ui/story-loader";
+import { TextComicAction } from "@/components/editor/text-comic-action";
+import marketingStyles from "../../marketing.module.css";
+import styles from "./story-editor.module.css";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,18 +54,32 @@ interface StoryApiPage {
   characterImageUrls?: string[];
 }
 
-export function StoryEditorClient() {
+function ResultHeader({ isOwner }: { isOwner: boolean }) {
+  return (
+    <header className={`${marketingStyles.siteHeader} ${styles.resultHeader}`}>
+      <Link href="/" className={marketingStyles.brand} aria-label="Twilio Comics home">
+        <Image src="/images/twilio-bug.svg" alt="" width={36} height={36} />
+        <span>Twilio Comics</span>
+      </Link>
+      <nav className={`${marketingStyles.headerNav} ${styles.resultNav}`} aria-label="Comic navigation">
+        <Link href="/start" className={styles.backLink}>
+          <ArrowLeft size={16} aria-hidden="true" /> Start options
+        </Link>
+        {isOwner && <Link href="/stories">My comics</Link>}
+      </nav>
+    </header>
+  );
+}
+
+export function StoryEditorClient({ canTextComic = false }: { canTextComic?: boolean }) {
   const params = useParams();
   const slug = params.storySlug as string;
-  const { status } = useSession();
-  const isLoaded = status !== "loading";
-  const isSignedIn = status === "authenticated";
 
   const [story, setStory] = useState<StoryData | null>(null);
   const [isOwner, setIsOwner] = useState<boolean>(false);
+  const [isGuestOwner, setIsGuestOwner] = useState(false);
   const [pages, setPages] = useState<PageData[]>([]);
   const [currentPage, setCurrentPage] = useState(0);
-  const [showApiModal, setShowApiModal] = useState(false);
   const [showInfoSheet, setShowInfoSheet] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -77,7 +94,6 @@ export function StoryEditorClient() {
   const [pdfProgress, setPdfProgress] = useState<string | null>(null);
   const pdfInProgressRef = useRef(false);
   const { toast } = useToast();
-  const [apiKey, setApiKey] = useApiKey();
 
 
   const handleTitleUpdate = (newTitle: string) => {
@@ -97,6 +113,7 @@ export function StoryEditorClient() {
           story: StoryData;
           pages: StoryApiPage[];
           isOwner: boolean;
+          actorKind?: "guest" | "google" | null;
         };
     
         const {
@@ -108,6 +125,7 @@ export function StoryEditorClient() {
         const owner = ownerStatus === true;
         setStory(storyData);
         setIsOwner(owner);
+        setIsGuestOwner(owner && result.actorKind === "guest");
         setPages(
           pagesData.map((page) => ({
             id: page.pageNumber,
@@ -142,53 +160,9 @@ export function StoryEditorClient() {
     }
   }, [slug, toast]);
 
-  const hasGenerationCredits = async (): Promise<boolean> => {
-    try {
-      const hasApiKey = !!apiKey;
-      const response = await fetch('/api/check-credits', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ hasApiKey }),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        toast({
-          title: "Error",
-          description: "Failed to check credits",
-          variant: "destructive",
-        });
-        return false;
-      }
-
-      if (hasApiKey || data.creditsRemaining === "unlimited") {
-        return true;
-      }
-      if (data.creditsRemaining > 0) return true;
-
-      setShowApiModal(true);
-      toast({
-        title: "No credits remaining",
-        description: "You have no app-funded credits remaining. Add an API key for unlimited generation.",
-        variant: "destructive",
-      });
-      return false;
-    } catch (error) {
-      console.error("Error checking credits:", error);
-      toast({
-        title: "Error",
-        description: "Failed to check credits",
-        variant: "destructive",
-      });
-      return false;
-    }
-  };
-
   const handleAddPage = async () => {
-    if (!isLoaded || !isSignedIn || !isOwner) return;
-    if (await hasGenerationCredits()) setShowGenerateModal(true);
+    if (!isOwner) return;
+    setShowGenerateModal(true);
   };
 
   const addPageFromShortcut = useEffectEvent(() => {
@@ -228,12 +202,12 @@ export function StoryEditorClient() {
   }, [pages, currentPage, isOwner]);
 
   const handleRedrawPage = async () => {
-    if (!isLoaded || !isSignedIn || !isOwner) return;
-    if (await hasGenerationCredits()) setShowRedrawDialog(true);
+    if (!isOwner) return;
+    setShowRedrawDialog(true);
   };
 
   const confirmRedrawPage = async () => {
-    if (!isSignedIn || !isOwner) return;
+    if (!isOwner) return;
 
     setShowRedrawDialog(false);
 
@@ -247,7 +221,6 @@ export function StoryEditorClient() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(apiKey ? { "x-api-key": apiKey } : {}),
         },
         body: JSON.stringify({
           storyId: story?.slug,
@@ -288,10 +261,6 @@ export function StoryEditorClient() {
     } finally {
       setLoadingPageId(null);
     }
-  };
-
-  const handleApiKeyClick = () => {
-    setShowApiModal(true);
   };
 
   const downloadPDF = async () => {
@@ -355,7 +324,7 @@ export function StoryEditorClient() {
   };
 
   const confirmDeletePage = async () => {
-    if (!isSignedIn || !isOwner || pageToDelete === null) return;
+    if (!isOwner || pageToDelete === null) return;
 
     const pageData = pages[pageToDelete];
     if (!pageData) return;
@@ -410,16 +379,11 @@ export function StoryEditorClient() {
     }
   };
 
-  const handleApiKeySubmit = (key: string) => {
-    setApiKey(key);
-    setShowApiModal(false);
-  };
-
   const handleGeneratePage = async (data: {
     prompt: string;
     characterUrls?: string[];
   }): Promise<void> => {
-    if (!isSignedIn || !isOwner) {
+    if (!isOwner) {
       throw new Error("Only the story owner can add pages");
     }
 
@@ -428,7 +392,6 @@ export function StoryEditorClient() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
       },
       body: JSON.stringify({
         storyId: story?.slug,
@@ -472,22 +435,31 @@ export function StoryEditorClient() {
 
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <StoryLoader />
+      <div className={`${marketingStyles.page} ${styles.resultPage}`}>
+        <ResultHeader isOwner={false} />
+        <main className={styles.centerState} role="status">
+          <StoryLoader text="Opening your comic…" />
+        </main>
       </div>
     );
   }
 
   if (!story) {
     return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="text-white">Story not found</div>
+      <div className={`${marketingStyles.page} ${styles.resultPage}`}>
+        <ResultHeader isOwner={false} />
+        <main className={styles.centerState}>
+          <h1>This comic could not be opened.</h1>
+          <Link href="/start">See ways to start</Link>
+        </main>
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background">
+    <div className={`${marketingStyles.page} ${styles.resultPage}`}>
+      <ResultHeader isOwner={isOwner} />
+      <div className={styles.editorShell} data-owner={isOwner}>
       <EditorToolbar
         title={story.title}
         onContinueStory={handleAddPage}
@@ -496,6 +468,16 @@ export function StoryEditorClient() {
         isOwner={isOwner}
         onTitleUpdate={handleTitleUpdate}
       />
+
+      {isOwner && canTextComic && pages.some((page) => Boolean(page.image)) && (
+        <TextComicAction storySlug={story.slug} />
+      )}
+
+      {isGuestOwner && (
+        <p className={styles.guestNote}>
+          This browser can edit your comic while Studio is open, for up to 30 days. Save its link to keep reading and sharing it.
+        </p>
+      )}
 
       {pdfProgress && (
         <div
@@ -507,15 +489,15 @@ export function StoryEditorClient() {
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className={styles.editorViewport}>
         <PageSidebar
           pages={pages}
           currentPage={currentPage}
           onPageSelect={setCurrentPage}
           onAddPage={handleAddPage}
           loadingPageId={loadingPageId}
-          onApiKeyClick={handleApiKeyClick}
           isOwner={isOwner}
+          showAccountMenu={isOwner && !isGuestOwner}
         />
         <ComicCanvas
           page={pages[currentPage]}
@@ -536,12 +518,8 @@ export function StoryEditorClient() {
           }
         />
       </div>
+      </div>
 
-      <ApiKeyModal
-        isOpen={showApiModal}
-        onClose={() => setShowApiModal(false)}
-        onSubmit={handleApiKeySubmit}
-      />
       <GeneratePageModal
         isOpen={showGenerateModal}
         onClose={() => setShowGenerateModal(false)}

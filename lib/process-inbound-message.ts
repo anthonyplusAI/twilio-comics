@@ -231,7 +231,7 @@ async function processOneMessage(
             const smsSettings = message.channel === "sms" ? await getExperienceSettings() : null;
             // Snapshot the staged set before CREATE. The conditional clear
             // below must not erase a fresh upload made during this turn.
-            const stagedForSubmission = approval && smsSettings?.cameraEnabled
+            const stagedForSubmission = approval && !attachedPhotos.length
               ? await getStagedCameraPhotoReferences(
                   message.fromAddress,
                   channelUserId(message.fromAddress),
@@ -245,7 +245,7 @@ async function processOneMessage(
               agentCollected = { ...agentCollected, characterImageUrls: [] };
             }
             let turnPhotos = attachedPhotos;
-            if (smsSettings?.cameraEnabled && !attachedPhotos.length && !resetOrDiscard &&
+            if (message.channel === "sms" && !attachedPhotos.length && !resetOrDiscard &&
                 (conversation.state === "done" || !agentCollected.characterImageUrls?.length)) {
               turnPhotos = stagedForSubmission ?? await getStagedCameraPhotoReferences(
                 message.fromAddress,

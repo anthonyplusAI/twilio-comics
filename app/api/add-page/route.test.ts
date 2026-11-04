@@ -4,6 +4,9 @@ import { MAX_USER_PROMPT } from "@/lib/prompt";
 
 const h = vi.hoisted(() => ({
   auth: vi.fn(),
+  actor: vi.fn(),
+  reserveStudioCapacity: vi.fn(),
+  markPaidStarted: vi.fn(),
   getStoryWithPagesBySlug: vi.fn(),
   getNextPageNumber: vi.fn(),
   createPage: vi.fn(),
@@ -19,6 +22,14 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/auth", () => ({ auth: h.auth }));
+vi.mock("@/lib/studio-guest-session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/studio-guest-session")>()),
+  getStudioActor: h.actor,
+}));
+vi.mock("@/lib/studio-guest-capacity", () => ({
+  reserveStudioAppGenerationCapacity: h.reserveStudioCapacity,
+  markStudioAppGenerationPaidStarted: h.markPaidStarted,
+}));
 vi.mock("@/lib/db-actions", () => ({
   getStoryWithPagesBySlug: h.getStoryWithPagesBySlug,
   getNextPageNumber: h.getNextPageNumber,
@@ -86,6 +97,7 @@ beforeEach(() => {
   h.reserveFreeTierQuota.mockReset();
   h.releaseFreeTierQuota.mockReset();
   h.consumeFreeTierQuota.mockReset();
+  h.markPaidStarted.mockReset().mockResolvedValue(undefined);
   process.env.OPENAI_API_KEY = "test-key";
   vi.stubEnv("AZURE_STORAGE_CONNECTION_STRING", "");
   vi.stubEnv("AZURE_STORAGE_BLOB_ENDPOINT", "https://account.blob.core.windows.net");
@@ -95,6 +107,14 @@ beforeEach(() => {
   h.transaction.mockImplementation(async (callback) => callback({ execute: h.execute }));
   h.execute.mockReset().mockResolvedValue({ rows: [] });
   h.auth.mockResolvedValue({ user: { id: story.userId } });
+  h.actor.mockImplementation(async () => {
+    const userId = (await h.auth())?.user?.id?.trim();
+    return userId ? { userId, kind: "google" } : null;
+  });
+  h.reserveStudioCapacity.mockResolvedValue({
+    reason: "accepted",
+    quota: { allowed: true, remaining: "unlimited", reset: null, status: "reserved" },
+  });
   h.getStoryWithPagesBySlug.mockResolvedValue({ story, pages: [page] });
   h.reserveFreeTierQuota.mockResolvedValue({ allowed: true, remaining: 2, reset: null, status: "reserved" });
   h.generateComicImage.mockResolvedValue(Buffer.from("new image"));
@@ -105,13 +125,14 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("POST /api/add-page redraw quota", () => {
+describe("POST /api/add-page Studio capacity", () => {
   it("generates an existing page after reserving one quota claim", async () => {
     const response = await POST(request(page.id));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ pageId: page.id, pageNumber: 2 });
-    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
     expect(h.generateComicImage).toHaveBeenCalledOnce();
     expect(h.updatePage).toHaveBeenCalledWith(page.id, "https://example.com/new.png");
     expect(h.consumeFreeTierQuota).toHaveBeenCalledOnce();
@@ -157,7 +178,7 @@ describe("POST /api/add-page redraw quota", () => {
     const response = await POST(request("3e9ed609-1a7e-410c-aa95-a54d23b33448"));
 
     expect(response.status).toBe(404);
-    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
     expect(h.generateComicImage).not.toHaveBeenCalled();
     expect(h.consumeFreeTierQuota).not.toHaveBeenCalled();
   });
@@ -170,7 +191,8 @@ describe("POST /api/add-page redraw quota", () => {
     const response = await POST(request(page.id));
 
     expect(response.status).toBe(404);
-    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
     expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
     expect(h.generateComicImage).not.toHaveBeenCalled();
     expect(h.consumeFreeTierQuota).not.toHaveBeenCalled();
@@ -182,7 +204,7 @@ describe("POST /api/add-page redraw quota", () => {
     const response = await POST(request(page.id));
 
     expect(response.status).toBe(403);
-    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
     expect(h.generateComicImage).not.toHaveBeenCalled();
   });
 
@@ -192,20 +214,38 @@ describe("POST /api/add-page redraw quota", () => {
     const response = await POST(request(page.id));
 
     expect(response.status).toBe(200);
-    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
     expect(h.generateComicImage).toHaveBeenCalledOnce();
     expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("releases weekly quota after an app-funded image failure", async () => {
-    h.generateComicImage.mockRejectedValueOnce(new Error("OpenAI unavailable"));
+  it("charges an app-funded redraw after an image-policy failure", async () => {
+    h.generateComicImage.mockRejectedValueOnce(new Error("Your request was rejected as a result of our safety system"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await POST(request(page.id));
+
+      expect(response.status).toBe(400);
+      expect(h.markPaidStarted).toHaveBeenCalledOnce();
+      expect(h.consumeFreeTierQuota).toHaveBeenCalledOnce();
+      expect(h.releaseFreeTierQuota).not.toHaveBeenCalled();
+      expect(h.execute).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("releases the reservation and skips the provider if the paid-start marker fails", async () => {
+    h.markPaidStarted.mockRejectedValue(new Error("Budget write failed"));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const response = await POST(request(page.id));
 
       expect(response.status).toBe(500);
+      expect(h.generateComicImage).not.toHaveBeenCalled();
       expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
-      expect(h.execute).not.toHaveBeenCalled();
+      expect(h.consumeFreeTierQuota).not.toHaveBeenCalled();
     } finally {
       logged.mockRestore();
     }
@@ -219,6 +259,7 @@ describe("POST /api/add-page redraw quota", () => {
     expect(response.status).toBe(200);
     expect(h.generateComicImage).toHaveBeenCalledWith(expect.objectContaining({ apiKey: ownKey }));
     expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
     expect(h.execute).not.toHaveBeenCalled();
   });
 
@@ -226,24 +267,55 @@ describe("POST /api/add-page redraw quota", () => {
     const response = await POST(request(page.id, "test-key"));
 
     expect(response.status).toBe(200);
-    expect(h.reserveFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
     expect(h.generateComicImage).toHaveBeenCalledOnce();
     expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it("rejects an app-funded redraw when the user's weekly quota is exhausted", async () => {
+  it("ignores a Google owner's exhausted legacy weekly quota", async () => {
     h.reserveFreeTierQuota.mockResolvedValue({ allowed: false, remaining: 0, reset: null, status: "rejected" });
 
     const response = await POST(request(page.id));
 
-    expect(response.status).toBe(429);
-    expect(await response.json()).toMatchObject({ errorType: "quota_limit", isRateLimited: true });
-    expect(h.generateComicImage).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+    expect(h.generateComicImage).toHaveBeenCalledOnce();
     expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it("applies the rolling Studio limit to an app-funded Google redraw", async () => {
+    h.reserveStudioCapacity.mockResolvedValue({
+      reason: "rate_limit",
+      scope: "user",
+      window: "hour",
+      message: "You've made many comic pages in the past hour. Please try again later.",
+    });
+
+    const response = await POST(request(page.id));
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ errorType: "generation_rate_limit", isRateLimited: true });
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
   });
 });
 
 describe("POST /api/add-page input validation", () => {
+  it("rejects an oversized JSON body before loading the story", async () => {
+    const response = await POST(requestBody({
+      storyId: story.slug,
+      pageId: page.id,
+      prompt: "A fox visits Mars",
+      padding: "x".repeat(17_000),
+    }));
+
+    expect(response.status).toBe(413);
+    expect(h.getStoryWithPagesBySlug).not.toHaveBeenCalled();
+    expect(h.reserveFreeTierQuota).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["non-object JSON", null],
     ["non-string prompt", { storyId: story.slug, prompt: 42 }],
@@ -312,5 +384,152 @@ describe("POST /api/add-page input validation", () => {
       referenceImageUrls: expect.arrayContaining([characterImage]),
     }));
     expect(h.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/add-page for a public Studio guest", () => {
+  const guestId = "693a8e78-5b98-49e6-9fc2-4b3352ac387a";
+  const otherId = "bbf04d09-50c6-4384-bd75-af935129bc78";
+  const firstPage = { ...page, id: "e59f63e3-8820-4728-8795-e0538dd06f17", pageNumber: 1 };
+  const originalPhoto = () => getBlobPublicUrl(`uploads/${guestId}/a1111111-1111-4111-8111-111111111111.jpg`);
+
+  beforeEach(() => {
+    h.auth.mockResolvedValue(null);
+    h.actor.mockResolvedValue({ userId: guestId, kind: "guest" });
+    h.getStoryWithPagesBySlug.mockResolvedValue({ story: { ...story, userId: guestId }, pages: [page] });
+  });
+
+  it("redraws the guest's own page with the server OpenAI key", async () => {
+    const input = request(page.id);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(200);
+    expect(h.reserveStudioCapacity).toHaveBeenCalledOnce();
+    expect(h.generateComicImage).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "test-key" }));
+  });
+
+  it("returns a clear rolling-rate response before redrawing another guest page", async () => {
+    h.reserveStudioCapacity.mockResolvedValue({
+      reason: "rate_limit",
+      scope: "source",
+      window: "day",
+      message: "This network has made many comic pages in the past day. Please try again later.",
+    });
+    const input = request(page.id);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: "This network has made many comic pages in the past day. Please try again later.",
+      errorType: "generation_rate_limit",
+      isRateLimited: true,
+    });
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+  });
+
+  it("includes the authorized original portrait when redrawing page one", async () => {
+    h.getStoryWithPagesBySlug.mockResolvedValue({
+      story: { ...story, userId: guestId },
+      pages: [{ ...firstPage, characterImageUrls: [originalPhoto()] }],
+    });
+    const input = request(firstPage.id);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(200);
+    expect(h.generateComicImage).toHaveBeenCalledWith(expect.objectContaining({
+      referenceImageUrls: expect.arrayContaining([originalPhoto()]),
+    }));
+  });
+
+  it("rejects a page-one redraw with no stored original photo before spending capacity", async () => {
+    h.getStoryWithPagesBySlug.mockResolvedValue({
+      story: { ...story, userId: guestId },
+      pages: [{ ...firstPage, characterImageUrls: [] }],
+    });
+    const input = requestBody({
+      storyId: story.slug,
+      pageId: firstPage.id,
+      prompt: "A fox visits Mars",
+      characterImages: [originalPhoto()],
+    });
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(400);
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects another guest's stored page-one portrait", async () => {
+    const foreignPhoto = getBlobPublicUrl(`uploads/${otherId}/a1111111-1111-4111-8111-111111111111.jpg`);
+    h.getStoryWithPagesBySlug.mockResolvedValue({
+      story: { ...story, userId: guestId },
+      pages: [{ ...firstPage, characterImageUrls: [foreignPhoto] }],
+    });
+    const input = request(firstPage.id);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(400);
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
+  });
+
+  it("releases capacity if the original portrait disappears during the redraw", async () => {
+    h.getStoryWithPagesBySlug
+      .mockResolvedValueOnce({ story: { ...story, userId: guestId }, pages: [{ ...firstPage, characterImageUrls: [originalPhoto()] }] })
+      .mockResolvedValueOnce({ story: { ...story, userId: guestId }, pages: [{ ...firstPage, characterImageUrls: [] }] });
+    const input = request(firstPage.id);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(400);
+    expect(h.releaseFreeTierQuota).toHaveBeenCalledOnce();
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects another origin before generating a guest page", async () => {
+    const input = request(page.id);
+    input.headers.set("origin", "https://attacker.example");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(403);
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
+    expect(h.generateComicImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a supplied API key for a guest page", async () => {
+    const input = request(page.id, `sk-${"a".repeat(32)}`);
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(400);
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
+  });
+
+  it("rejects another guest's reference photo", async () => {
+    const otherPhoto = getBlobPublicUrl(`uploads/${otherId}/a1111111-1111-4111-8111-111111111111.jpg`);
+    const input = requestBody({
+      storyId: story.slug,
+      pageId: page.id,
+      prompt: "A fox visits Mars",
+      characterImages: [otherPhoto],
+    });
+    input.headers.set("origin", "https://comics.example.com");
+
+    const response = await POST(input);
+
+    expect(response.status).toBe(403);
+    expect(h.reserveStudioCapacity).not.toHaveBeenCalled();
   });
 });

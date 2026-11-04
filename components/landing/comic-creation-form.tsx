@@ -6,18 +6,15 @@ import Image from "next/image";
 import { Camera, ImagePlus, X, ArrowRight, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadFileToBlob } from "@/lib/blob-upload-client";
-import { signIn, useSession } from "next-auth/react";
-import { SignInButton } from "@/components/auth/sign-in-button";
 import { CameraCaptureButton } from "@/components/camera/camera-capture";
 import { COMIC_STYLES } from "@/lib/constants";
 import { useKeyboardShortcut } from "@/hooks/use-keyboard-shortcut";
-import { useApiKey } from "@/hooks/use-api-key";
 import { isContentPolicyViolation } from "@/lib/utils";
-import { ApiKeyModal } from "@/components/api-key-modal";
 import { MAX_USER_PROMPT } from "@/lib/prompt";
 import styles from "./comic-creation-form.module.css";
 
 interface ComicCreationFormProps {
+  studioReady: boolean;
   prompt: string;
   setPrompt: (prompt: string) => void;
   style: string;
@@ -42,6 +39,12 @@ const SUPPORTED_IMAGE_TYPES = new Set([
   "image/heif",
 ]);
 const SUPPORTED_IMAGE_EXTENSION = /\.(?:jpe?g|png|webp|heic|heif)$/i;
+const STYLE_SAMPLE_IMAGES: Record<(typeof COMIC_STYLES)[number]["id"], string> = {
+  "american-modern": "/american.jpg",
+  manga: "/manga.png",
+  noir: "/noir.jpg",
+  vintage: "/vintage-superman.jpg",
+};
 
 function isSupportedReferencePhoto(file: File): boolean {
   const mime = file.type.toLowerCase();
@@ -60,6 +63,7 @@ function photoDisplayName(file: File, index: number): string {
 }
 
 export function ComicCreationForm({
+  studioReady,
   prompt,
   setPrompt,
   style,
@@ -72,17 +76,7 @@ export function ComicCreationForm({
   const router = useRouter();
   const [loadingStep, setLoadingStep] = useState(0);
   const { toast } = useToast();
-  const { data: session, status } = useSession();
-  const isLoaded = status !== "loading";
-  const hasStudioSession = status === "authenticated" &&
-    session?.user?.studioAuthorized === true &&
-    typeof session.user.id === "string" &&
-    session.user.id.trim().length > 0;
-  const [apiKey, setApiKey] = useApiKey();
-  const hasApiKey = !!apiKey;
   const [previews, setPreviews] = useState<(string | null)[]>([]);
-  const [creditsRemaining, setCreditsRemaining] = useState<number | "unlimited" | null>(null);
-  const [showApiModal, setShowApiModal] = useState(false);
   const [stylePreferenceLoaded, setStylePreferenceLoaded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -132,45 +126,15 @@ export function ComicCreationForm({
     return () => urls.forEach((url) => { if (url) URL.revokeObjectURL(url); });
   }, [characterFiles]);
 
-  // Fetch credits on mount
-  useEffect(() => {
-    if (hasStudioSession && !hasApiKey) {
-      const fetchCredits = async () => {
-        try {
-          const response = await fetch('/api/check-credits', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ hasApiKey: false }),
-          });
-          const data = await response.json();
-          if (response.ok) {
-            setCreditsRemaining(data.creditsRemaining);
-          }
-        } catch (error) {
-          console.error('Error fetching credits:', error);
-        }
-      };
-      fetchCredits();
-    } else if (hasApiKey) {
-      setCreditsRemaining(null); // Unlimited
-    }
-  }, [hasStudioSession, hasApiKey]);
-
   // Keyboard shortcut for form submission
   useKeyboardShortcut(() => {
-    if (!isLoading && prompt.trim() && characterFiles.length > 0) {
-      if (!hasStudioSession) {
-        void signIn("google", { redirectTo: window.location.href });
-      } else {
-        void handleCreate();
-      }
+    if (studioReady && !isLoading && prompt.trim() && characterFiles.length > 0) {
+      void handleCreate();
     }
-  }, { disabled: isLoading || !isLoaded });
+  }, { disabled: isLoading || !studioReady });
 
   const addPhotos = (files: File[]) => {
-    if (!hasStudioSession || isLoading) return;
+    if (!studioReady || isLoading) return;
     const supported = files.filter(isSupportedReferencePhoto);
     if (supported.length !== files.length) {
       toast({
@@ -196,12 +160,7 @@ export function ComicCreationForm({
   };
 
   const handleCreate = async () => {
-    if (!isLoaded || isLoading) {
-      return;
-    }
-
-    if (!hasStudioSession) {
-      void signIn("google", { redirectTo: window.location.href });
+    if (!studioReady || isLoading) {
       return;
     }
 
@@ -237,37 +196,6 @@ export function ComicCreationForm({
     }, 3500);
 
     try {
-      // Check credits
-      const hasApiKey = !!apiKey;
-      if (!hasApiKey) {
-        const creditsResponse = await fetch('/api/check-credits', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ hasApiKey }),
-        });
-        const creditsData = await creditsResponse.json();
-
-        if (!creditsResponse.ok) {
-          toast({
-            title: "Error",
-            description: "Failed to check credits",
-            variant: "destructive",
-          });
-          clearInterval(stepInterval);
-          setIsLoading(false);
-          return;
-        }
-
-        if (creditsData.creditsRemaining === 0) {
-          setShowApiModal(true);
-          clearInterval(stepInterval);
-          setIsLoading(false);
-          return;
-        }
-      }
-
       const characterUploads = await Promise.all(
         characterFiles.map((file) => uploadFileToBlob(file).then(({ url }) => url))
       );
@@ -280,7 +208,6 @@ export function ComicCreationForm({
         },
         body: JSON.stringify({
           prompt,
-          ...(apiKey && { apiKey }),
           style,
           characterImages: characterUploads,
         }),
@@ -322,11 +249,6 @@ export function ComicCreationForm({
     }
   };
 
-  const handleApiKeySubmit = (key: string) => {
-    setApiKey(key);
-    setShowApiModal(false);
-  };
-
   const loadingSteps = [
     "Enhancing prompt...",
     "Generating scenes...",
@@ -336,13 +258,11 @@ export function ComicCreationForm({
 
   const selectedStyle = style || DEFAULT_STYLE;
   const photoSlotsAvailable = characterFiles.length < MAX_REFERENCE_PHOTOS;
-  const canAddPhotos = hasStudioSession && !isLoading && photoSlotsAvailable;
-  const canGenerate = hasStudioSession && !isLoading && Boolean(prompt.trim()) && characterFiles.length > 0;
-  const actionHint = !isLoaded
-    ? "Checking sign-in…"
-    : !hasStudioSession
-      ? "Sign in, then add a photo and your idea."
-      : characterFiles.length === 0
+  const canAddPhotos = studioReady && !isLoading && photoSlotsAvailable;
+  const canGenerate = studioReady && !isLoading && Boolean(prompt.trim()) && characterFiles.length > 0;
+  const actionHint = !studioReady
+    ? "Preparing Browser Studio…"
+    : characterFiles.length === 0
         ? "Add a photo to make your comic personal."
         : !prompt.trim()
           ? "Write your idea to continue."
@@ -357,12 +277,9 @@ export function ComicCreationForm({
       </div>
 
       <div className={styles.formBody}>
-        {isLoaded && !hasStudioSession && (
+        {!studioReady && (
           <div className={styles.signInGate}>
-            <p>Sign in with Google to add photos and create your comic.</p>
-            <SignInButton className={styles.signInGateButton}>
-              Sign in with Google <ArrowRight size={18} aria-hidden="true" />
-            </SignInButton>
+            <p>Preparing Browser Studio…</p>
           </div>
         )}
         <section className={styles.stepSection} aria-labelledby="studio-photos-title">
@@ -410,7 +327,7 @@ export function ComicCreationForm({
                         className={styles.removePhoto}
                         aria-label={`Remove reference photo ${index + 1}`}
                         onClick={() => removeFile(index)}
-                        disabled={!hasStudioSession || isLoading}
+                        disabled={!studioReady || isLoading}
                       >
                         <X size={16} aria-hidden="true" />
                       </button>
@@ -506,7 +423,15 @@ export function ComicCreationForm({
                 onClick={() => setStyle(option.id)}
                 disabled={isLoading}
               >
-                {option.name}
+                <Image
+                  src={STYLE_SAMPLE_IMAGES[option.id]}
+                  alt=""
+                  width={256}
+                  height={256}
+                  sizes="(max-width: 560px) 40vw, 80px"
+                  className={styles.styleOptionImage}
+                />
+                <span>{option.name}</span>
               </button>
             ))}
           </div>
@@ -514,58 +439,24 @@ export function ComicCreationForm({
       </div>
 
       <div className={styles.formFooter}>
-        {!isLoaded ? (
-          <div className={styles.authPending} role="status">Checking sign-in…</div>
-        ) : hasStudioSession ? (
-          <button
-            type="button"
-            aria-label="Generate comic"
-            className={styles.generateButton}
-            onClick={() => { void handleCreate(); }}
-            disabled={!canGenerate}
-          >
-            {isLoading ? (
-              <><Loader2 size={18} className={styles.spinner} aria-hidden="true" /> {loadingSteps[loadingStep]}</>
-            ) : (
-              <>Generate comic <ArrowRight size={19} aria-hidden="true" /></>
-            )}
-          </button>
-        ) : (
-          <button type="button" aria-label="Generate comic" className={styles.generateButton} disabled>
-            Generate comic <ArrowRight size={19} aria-hidden="true" />
-          </button>
-        )}
+        <button
+          type="button"
+          aria-label="Generate comic"
+          className={styles.generateButton}
+          onClick={() => { void handleCreate(); }}
+          disabled={!canGenerate}
+        >
+          {isLoading ? (
+            <><Loader2 size={18} className={styles.spinner} aria-hidden="true" /> {loadingSteps[loadingStep]}</>
+          ) : (
+            <>Generate comic <ArrowRight size={19} aria-hidden="true" /></>
+          )}
+        </button>
         <div className={styles.actionMeta}>
           <span role="status">{actionHint}</span>
-          {hasStudioSession && (
-            <span>
-              {hasApiKey
-                ? "Using your OpenAI API key"
-                : creditsRemaining === "unlimited"
-                  ? "Unlimited generations"
-                  : creditsRemaining !== null
-                  ? `${creditsRemaining} credit${creditsRemaining === 1 ? "" : "s"} remaining`
-                  : "Checking credits…"}
-            </span>
-          )}
+          {studioReady && <span>No account needed. Make another comic whenever you like.</span>}
         </div>
-        {hasStudioSession && (
-          <button
-            type="button"
-            className={styles.apiKeyButton}
-            onClick={() => setShowApiModal(true)}
-          >
-            {hasApiKey ? "Manage OpenAI key" : "Use my OpenAI key"}
-          </button>
-        )}
       </div>
-
-      <ApiKeyModal
-        theme="studio"
-        isOpen={showApiModal}
-        onClose={() => setShowApiModal(false)}
-        onSubmit={handleApiKeySubmit}
-      />
     </section>
   );
 }

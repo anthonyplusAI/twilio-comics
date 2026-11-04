@@ -27,8 +27,8 @@ import {
   recordGeneratedMessageStatus,
   recordFallbackMessageStatus,
   recordFailedGenerationNoticeStatus,
-  recoverFailedMmsTextFallbacks,
-  sendFailedMmsTextFallback,
+  recoverFailedComicTextFallbacks,
+  sendFailedComicTextFallback,
   shouldRecordDeliveryStatus,
 } from "@/lib/twilio-delivery";
 
@@ -212,7 +212,72 @@ describe("recordGeneratedMessageStatus", () => {
   });
 });
 
-describe("sendFailedMmsTextFallback", () => {
+describe("sendFailedComicTextFallback", () => {
+  it("retries a failed text-only comic once with a short link", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning.mockResolvedValueOnce([{
+      id: jobId,
+      storyId: "story-1",
+      source: "sms",
+      recipientAddress: "+15551112222",
+      senderAddress: "+15550000000",
+      deliveryHadMedia: false,
+      deliveryFallbackAttempts: 1,
+      createdAt: new Date(Date.now() - 60_000),
+    }]);
+    h.getStoryById.mockResolvedValue({
+      slug: "dragon",
+      title: "Dragon Story",
+      dubShortUrl: "https://twil.io/comic-33",
+    });
+    h.sendChannelMessage.mockResolvedValue("SMfallback");
+    process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+
+    await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(true);
+
+    expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "sms",
+      body: "Your comic: https://twil.io/comic-33",
+      statusCallback: `https://comics.example.com/api/twilio/status?jobId=${jobId}&fallback=1#rc=3&rp=5xx,ct,rt`,
+    }));
+    const claim = new PgDialect().sqlToQuery(h.where.mock.calls[0][0]);
+    expect(claim.sql).toContain('"generation_jobs"."delivery_had_media"');
+    expect(claim.sql).toContain('"generation_jobs"."delivery_fallback_attempts"');
+    expect(claim.params).toContain("30008");
+    expect(claim.params).toContain(1);
+    expect(claim.params).not.toContain("21610");
+    expect(claim.params).not.toContain("30007");
+  });
+
+  it("does not schedule a second SMS retry after a failed text-only attempt", async () => {
+    h.update.mockReturnValue({ set: h.set });
+    h.set.mockReturnValue({ where: h.where });
+    h.where.mockReturnValue({ returning: h.returning });
+    h.returning.mockResolvedValueOnce([{
+      id: jobId,
+      storyId: "story-1",
+      source: "sms",
+      recipientAddress: "+15551112222",
+      senderAddress: "+15550000000",
+      deliveryHadMedia: false,
+      deliveryFallbackAttempts: 1,
+      createdAt: new Date(Date.now() - 60_000),
+    }]);
+    h.getStoryById.mockResolvedValue({ slug: "dragon", title: "Dragon Story" });
+    h.sendChannelMessage.mockRejectedValue(new Error("Twilio unavailable"));
+    process.env.PUBLIC_BASE_URL = "https://comics.example.com";
+
+    await expect(sendFailedComicTextFallback(jobId)).rejects.toThrow("Twilio unavailable");
+
+    expect(h.sendChannelMessage).toHaveBeenCalledOnce();
+    expect(h.set).toHaveBeenLastCalledWith(expect.objectContaining({
+      deliveryFallbackStatus: "failed",
+      deliveryFallbackLeaseExpiresAt: null,
+    }));
+  });
+
   it("durably suppresses an expired MMS text fallback and keeps its comic history", async () => {
     h.update.mockReturnValue({ set: h.set });
     h.set.mockReturnValue({ where: h.where });
@@ -228,7 +293,7 @@ describe("sendFailedMmsTextFallback", () => {
         attemptCount: 1,
       }]);
 
-    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
+    await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(false);
 
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
     expect(h.getStoryById).not.toHaveBeenCalled();
@@ -278,7 +343,7 @@ describe("sendFailedMmsTextFallback", () => {
       });
       process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
-      await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
+      await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(false);
 
       expect(h.getStoryById).toHaveBeenCalledOnce();
       expect(h.sendChannelMessage).not.toHaveBeenCalled();
@@ -307,7 +372,7 @@ describe("sendFailedMmsTextFallback", () => {
     h.sendChannelMessage.mockResolvedValue("SMfallback");
     process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
-    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+    await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(true);
     expect(h.recordActivityEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventKey: `job:${jobId}:fallback:SMfallback:accepted`,
       kind: "generation.delivery",
@@ -350,7 +415,7 @@ describe("sendFailedMmsTextFallback", () => {
     h.sendChannelMessage.mockResolvedValue("SMfallback");
     process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
-    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+    await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(true);
     expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
       body: 'Your comic "Dragon Story" is ready:\nhttps://twil.io/comic-33\n\nStar Twilio Comics on GitHub: https://github.com/anthonyplusAI/twilio-comics',
     }));
@@ -377,7 +442,7 @@ describe("sendFailedMmsTextFallback", () => {
       h.sendChannelMessage.mockResolvedValue("SMfallback");
       process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
-      await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(true);
+      await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(true);
 
       expect(h.sendChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
         validityPeriod: 20,
@@ -392,7 +457,7 @@ describe("sendFailedMmsTextFallback", () => {
     h.set.mockReturnValue({ where: h.where });
     h.where.mockReturnValue({ returning: h.returning });
     h.returning.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-    await expect(sendFailedMmsTextFallback(jobId)).resolves.toBe(false);
+    await expect(sendFailedComicTextFallback(jobId)).resolves.toBe(false);
     expect(h.sendChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -418,7 +483,7 @@ describe("sendFailedMmsTextFallback", () => {
     h.sendChannelMessage.mockResolvedValue("SMfallback");
     process.env.PUBLIC_BASE_URL = "https://comics.example.com";
 
-    await expect(recoverFailedMmsTextFallbacks()).resolves.toBe(1);
+    await expect(recoverFailedComicTextFallbacks()).resolves.toBe(1);
     const eligible = new PgDialect().sqlToQuery(h.selectWhere.mock.calls[0][0]);
     expect(eligible.sql).toContain('"generation_jobs"."delivery_had_media"');
     expect(eligible.sql).toContain('"generation_jobs"."delivery_fallback_lease_expires_at"');

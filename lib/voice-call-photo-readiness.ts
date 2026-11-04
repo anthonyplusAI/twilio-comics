@@ -93,10 +93,7 @@ export async function getVoiceCallPhotoReadiness(
     .where(and(eq(conversations.channel, "voice"), eq(conversations.phoneNumber, phone)))
     .limit(1);
   const voice = voiceRow ?? null;
-  const sourceChannels = photoHandoffSourceChannels(
-    settings.voicePhotoMode,
-    settings.cameraEnabled,
-  );
+  const sourceChannels = photoHandoffSourceChannels(settings.voicePhotoMode);
   const windowStart = new Date(now.getTime() - VOICE_PHOTO_HANDOFF_WINDOW_MS);
   const candidates: VoiceCallPhotoSource[] = [];
   for (const sourceChannel of sourceChannels) {

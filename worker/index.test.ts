@@ -8,7 +8,7 @@ const h = vi.hoisted(() => ({
   processInboundMessage: vi.fn(),
   recoverPendingInboundMessages: vi.fn(),
   recoverUnpublishedGenerationJobs: vi.fn(),
-  recoverFailedMmsTextFallbacks: vi.fn(),
+  recoverFailedComicTextFallbacks: vi.fn(),
   Busy: class ConversationLeaseBusyError extends Error {},
 }));
 
@@ -31,7 +31,7 @@ vi.mock("@/lib/generation-jobs", () => ({
   recoverUnpublishedGenerationJobs: h.recoverUnpublishedGenerationJobs,
 }));
 vi.mock("@/lib/twilio-delivery", () => ({
-  recoverFailedMmsTextFallbacks: h.recoverFailedMmsTextFallbacks,
+  recoverFailedComicTextFallbacks: h.recoverFailedComicTextFallbacks,
 }));
 
 const originalRecoveryMode = process.env.RECOVERY_MODE;
@@ -46,7 +46,7 @@ beforeEach(() => {
   h.processInboundMessage.mockResolvedValue(undefined);
   h.recoverPendingInboundMessages.mockResolvedValue(0);
   h.recoverUnpublishedGenerationJobs.mockResolvedValue(0);
-  h.recoverFailedMmsTextFallbacks.mockResolvedValue(0);
+  h.recoverFailedComicTextFallbacks.mockResolvedValue(0);
   delete process.env.RECOVERY_MODE;
 });
 
@@ -142,7 +142,7 @@ describe("Azure Queue worker dispatch", () => {
 
     expect(h.recoverPendingInboundMessages).toHaveBeenCalledOnce();
     expect(h.recoverUnpublishedGenerationJobs).toHaveBeenCalledOnce();
-    expect(h.recoverFailedMmsTextFallbacks).toHaveBeenCalledOnce();
+    expect(h.recoverFailedComicTextFallbacks).toHaveBeenCalledOnce();
     expect(h.receiveGenerationJob).not.toHaveBeenCalled();
   });
 
@@ -156,6 +156,6 @@ describe("Azure Queue worker dispatch", () => {
     });
 
     expect(h.recoverUnpublishedGenerationJobs).toHaveBeenCalledOnce();
-    expect(h.recoverFailedMmsTextFallbacks).toHaveBeenCalledOnce();
+    expect(h.recoverFailedComicTextFallbacks).toHaveBeenCalledOnce();
   });
 });
