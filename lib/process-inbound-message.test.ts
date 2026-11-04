@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   getInboundMessage: vi.fn(),
@@ -24,7 +24,6 @@ const h = vi.hoisted(() => ({
   getStagedCameraPhotoReferences: vi.fn(),
   clearStagedCameraPhotoReferences: vi.fn(),
   getExperienceSettings: vi.fn(),
-  getPublicEnabledChannels: vi.fn(),
 }));
 
 vi.mock("@/lib/twilio-events", () => ({
@@ -52,9 +51,6 @@ vi.mock("@/lib/browser-photo-staging", () => ({
 vi.mock("@/lib/photo-experience-settings", () => ({
   getExperienceSettings: h.getExperienceSettings,
 }));
-vi.mock("@/lib/public-channel-readiness", () => ({
-  getPublicEnabledChannels: h.getPublicEnabledChannels,
-}));
 vi.mock("@/lib/channel-story-link", () => ({
   channelStoryLink: h.channelStoryLink,
   latestStoryLinkForSms: h.latestStoryLinkForSms,
@@ -64,7 +60,7 @@ vi.mock("@/lib/twilio", () => ({ sendChannelMessage: h.sendChannelMessage }));
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
 vi.mock("@/lib/message-agent-budget", () => ({ reserveMessageAgentTurn: h.reserveMessageAgentTurn }));
 
-import { processInboundMessage } from "@/lib/process-inbound-message";
+import { EarlierInboundTurnsPendingError, processInboundMessage } from "@/lib/process-inbound-message";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 
 type Receipt = {
@@ -130,6 +126,8 @@ function receipt(
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("TWILIO_PHONE_NUMBER", TO);
+  vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms");
   receipts = {
     SM1: receipt("SM1", "A robot detective", "2026-10-01T00:00:01Z"),
   };
@@ -213,7 +211,10 @@ beforeEach(() => {
   h.getStagedCameraPhotoReferences.mockResolvedValue([]);
   h.clearStagedCameraPhotoReferences.mockResolvedValue(false);
   h.getExperienceSettings.mockResolvedValue({ voicePhotoMode: "sms", cameraEnabled: false });
-  h.getPublicEnabledChannels.mockReturnValue([]);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("ordered inbound messaging processor", () => {
@@ -675,6 +676,28 @@ describe("ordered inbound messaging processor", () => {
     ]);
   });
 
+  it("signals a fast retry after processing twelve earlier inbound turns", async () => {
+    receipts = {};
+    for (let index = 1; index <= 13; index++) {
+      const sid = `SM${index}`;
+      receipts[sid] = receipt(sid, "", new Date(Date.UTC(2026, 9, 1, 0, 0, index)).toISOString(), {
+        status: "reply_pending",
+        replyBody: `Reply ${index}`,
+      });
+    }
+
+    const error = await processInboundMessage("SM13").catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(EarlierInboundTurnsPendingError);
+    expect(error).toMatchObject({
+      name: "EarlierInboundTurnsPendingError",
+      message: "Too many earlier inbound turns; retry the remaining work",
+    });
+
+    expect(sends).toHaveLength(12);
+    expect(receipts.SM13.status).toBe("reply_pending");
+    expect(h.releaseConversationLease).toHaveBeenCalledOnce();
+  });
+
   it("passes a photo-only WhatsApp turn to the agent", async () => {
     conversation.channel = "whatsapp";
     conversation.phoneNumber = `whatsapp:${FROM}`;
@@ -706,11 +729,13 @@ describe("ordered inbound messaging processor", () => {
     expect(sends[0].channel).toBe("whatsapp");
   });
 
-  it("offers a same-number call after acknowledging a saved SMS photo", async () => {
+  it("offers a same-number call for sms,voice without worker Auth or Verify settings", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms,voice");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("TWILIO_VERIFY_SERVICE_SID", "");
     receipts.SM1.body = "";
     receipts.SM1.mediaUrls = ["https://api.twilio.com/photo-1"];
     receipts.SM1.mediaContentTypes = ["image/jpeg"];
-    h.getPublicEnabledChannels.mockReturnValue(["sms", "voice"]);
     h.advanceComicAgent.mockResolvedValue({
       nextState: "collecting",
       collected: { characterImageUrls: ["https://api.twilio.com/photo-1"] },
@@ -722,7 +747,24 @@ describe("ordered inbound messaging processor", () => {
     await processInboundMessage("SM1");
 
     expect(sends[0].body).toMatch(/Photo saved.*Text your idea.*call us from this phone after this reply/i);
-    expect(h.getPublicEnabledChannels).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the photo acknowledgement when voice is disabled", async () => {
+    vi.stubEnv("TWILIO_ENABLED_CHANNELS", "sms");
+    receipts.SM1.body = "";
+    receipts.SM1.mediaUrls = ["https://api.twilio.com/photo-1"];
+    receipts.SM1.mediaContentTypes = ["image/jpeg"];
+    h.advanceComicAgent.mockResolvedValue({
+      nextState: "collecting",
+      collected: { characterImageUrls: ["https://api.twilio.com/photo-1"] },
+      activeStoryId: null,
+      reply: "Photo saved. What's your comic idea?",
+      action: "none",
+    });
+
+    await processInboundMessage("SM1");
+
+    expect(sends[0].body).toBe("Photo saved. What's your comic idea?");
   });
 
   it("adds recent verified kiosk photos to an SMS idea", async () => {

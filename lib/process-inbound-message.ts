@@ -12,9 +12,8 @@ import { submitGenerationJob } from "@/lib/generation-jobs";
 import { isDailyGenerationCapacityRejection } from "@/lib/generation-policy";
 import { GITHUB_STAR_MESSAGE } from "@/lib/github";
 import { reserveMessageAgentTurn } from "@/lib/message-agent-budget";
-import { getMarketingContact } from "@/lib/marketing-contact";
+import { getEnabledChannels, getMarketingContact } from "@/lib/marketing-contact";
 import { getExperienceSettings } from "@/lib/photo-experience-settings";
-import { getPublicEnabledChannels } from "@/lib/public-channel-readiness";
 import {
   checkpointInboundTurn,
   claimConversationLease,
@@ -67,6 +66,13 @@ export class ConversationLeaseBusyError extends Error {
   constructor() {
     super("Conversation lease is owned by another worker");
     this.name = "ConversationLeaseBusyError";
+  }
+}
+
+export class EarlierInboundTurnsPendingError extends Error {
+  constructor() {
+    super("Too many earlier inbound turns; retry the remaining work");
+    this.name = "EarlierInboundTurnsPendingError";
   }
 }
 
@@ -274,7 +280,7 @@ async function processOneMessage(
                 process.env.TWILIO_PHONE_NUMBER,
                 process.env.TWILIO_WHATSAPP_NUMBER,
               );
-              if (getPublicEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes("voice")) {
+              if (getEnabledChannels(contact, process.env.TWILIO_ENABLED_CHANNELS).includes("voice")) {
                 replyBody = "Photo saved. Text your idea, or call us from this phone after this reply to tell it by voice.";
               }
             }
@@ -629,7 +635,7 @@ export async function processInboundMessage(messageSid: string): Promise<void> {
       await processOneMessage(message, conversation, leaseOwner);
       if (message.messageSid === messageSid) return;
     }
-    throw new Error("Too many earlier inbound turns; retry the remaining work");
+    throw new EarlierInboundTurnsPendingError();
   } finally {
     await releaseConversationLease(leased.id, leaseOwner);
   }

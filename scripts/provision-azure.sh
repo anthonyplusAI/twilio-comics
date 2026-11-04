@@ -19,6 +19,7 @@ LOG_ANALYTICS_WORKSPACE="${LOG_ANALYTICS_WORKSPACE:-law-twilio-comics}"
 # Its Jobs and managed identities retain their historical Azure resource names.
 ACA_ENVIRONMENT="${ACA_ENVIRONMENT:-cae-twilio-comics-v2}"
 ACA_NAME="${ACA_NAME:-twilio-comics}"
+ACA_INBOUND_APP_NAME="${ACA_INBOUND_APP_NAME:-twilio-comics-inbound-v2}"
 ACA_JOB_NAME="${ACA_JOB_NAME:-twilio-comics-generation-v2}"
 ACA_RECOVERY_JOB_NAME="${ACA_RECOVERY_JOB_NAME:-twilio-comics-recovery-v2}"
 GENERATION_JOB_POLLING_INTERVAL=5
@@ -31,6 +32,18 @@ ACA_MIGRATION_JOB_NAME="${ACA_MIGRATION_JOB_NAME:-twilio-comics-migrate-v2}"
 BLOB_CONTAINER="${BLOB_CONTAINER:-comics}"
 QUEUE_NAME="${QUEUE_NAME:-comic-generation}"
 POISON_QUEUE_NAME="${POISON_QUEUE_NAME:-comic-generation-poison}"
+INBOUND_QUEUE_NAME="${INBOUND_QUEUE_NAME:-comic-inbound}"
+INBOUND_POISON_QUEUE_NAME="${INBOUND_POISON_QUEUE_NAME:-comic-inbound-poison}"
+ACA_INBOUND_MAX_REPLICAS="${ACA_INBOUND_MAX_REPLICAS:-8}"
+[[ "$ACA_INBOUND_MAX_REPLICAS" =~ ^([1-9]|10)$ ]] \
+  || die 'ACA_INBOUND_MAX_REPLICAS must be a whole number from 1 to 10 until the database connection budget is raised.'
+[[ "$QUEUE_NAME" != "$POISON_QUEUE_NAME"
+  && "$INBOUND_QUEUE_NAME" != "$QUEUE_NAME"
+  && "$INBOUND_QUEUE_NAME" != "$POISON_QUEUE_NAME"
+  && "$INBOUND_QUEUE_NAME" != "$INBOUND_POISON_QUEUE_NAME"
+  && "$INBOUND_POISON_QUEUE_NAME" != "$QUEUE_NAME"
+  && "$INBOUND_POISON_QUEUE_NAME" != "$POISON_QUEUE_NAME" ]] \
+  || die 'Inbound, generation, and poison queues must all have distinct names.'
 WEB_IDENTITY_NAME="${WEB_IDENTITY_NAME:-id-twilio-comics-v2-web}"
 WORKER_IDENTITY_NAME="${WORKER_IDENTITY_NAME:-id-twilio-comics-v2-worker}"
 PULL_IDENTITY_NAME="${PULL_IDENTITY_NAME:-id-twilio-comics-v2-acr-pull}"
@@ -38,6 +51,8 @@ DEPLOY_APP_NAME="${DEPLOY_APP_NAME:-twilio-comics-v2-gha-deploy}"
 # The retired sample environment, Jobs, and identities must never be rebuilt.
 [[ "$ACA_ENVIRONMENT" != cae-twilio-comics
   && "$ACA_NAME" != twilio-comics-v2
+  && "$ACA_INBOUND_APP_NAME" != twilio-comics-inbound
+  && "$ACA_INBOUND_APP_NAME" != "$ACA_NAME"
   && "$ACA_JOB_NAME" != twilio-comics-generation
   && "$ACA_RECOVERY_JOB_NAME" != twilio-comics-recovery
   && "$WEB_IDENTITY_NAME" != id-twilio-comics-web
@@ -246,6 +261,12 @@ storage_create_retry "queue $QUEUE_NAME" \
 storage_create_retry "queue $POISON_QUEUE_NAME" \
   az storage queue create --account-name "$STORAGE_ACCOUNT" --name "$POISON_QUEUE_NAME" \
     --auth-mode login --output none
+storage_create_retry "queue $INBOUND_QUEUE_NAME" \
+  az storage queue create --account-name "$STORAGE_ACCOUNT" --name "$INBOUND_QUEUE_NAME" \
+    --auth-mode login --output none
+storage_create_retry "queue $INBOUND_POISON_QUEUE_NAME" \
+  az storage queue create --account-name "$STORAGE_ACCOUNT" --name "$INBOUND_POISON_QUEUE_NAME" \
+    --auth-mode login --output none
 
 WEB_ENV=(
   "AZURE_CLIENT_ID=$WEB_CLIENT_ID"
@@ -262,6 +283,14 @@ WORKER_ENV=(
   "AZURE_STORAGE_CONTAINER_NAME=$BLOB_CONTAINER"
   "AZURE_STORAGE_QUEUE_NAME=$QUEUE_NAME"
   "AZURE_STORAGE_POISON_QUEUE_NAME=$POISON_QUEUE_NAME"
+)
+INBOUND_ENV=(
+  "${WORKER_ENV[@]}"
+  "AZURE_STORAGE_INBOUND_QUEUE_NAME=$INBOUND_QUEUE_NAME"
+  "AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME=$INBOUND_POISON_QUEUE_NAME"
+  'WORKER_MODE=inbound'
+  'DB_POOL_MAX=2'
+  'INBOUND_WORKER_CONCURRENCY=4'
 )
 RECOVERY_ENV=("${WORKER_ENV[@]}" 'RECOVERY_MODE=1')
 
@@ -372,6 +401,33 @@ ensure_workload_identity app "$ACA_NAME" "$PULL_ID"
 ensure_infrastructure_env app "$ACA_NAME" "${WEB_ENV[@]}"
 ensure_registry_pull app "$ACA_NAME"
 
+# Keep the queue consumer private and dormant until its image, Key Vault
+# references, and runtime settings are configured and verified by deploy.yml.
+if ! az containerapp show --name "$ACA_INBOUND_APP_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
+  az containerapp create --name "$ACA_INBOUND_APP_NAME" --resource-group "$RESOURCE_GROUP" \
+    --environment "$ACA_ENVIRONMENT" --image "$PLACEHOLDER_IMAGE" \
+    --cpu 0.5 --memory 1Gi --min-replicas 0 --max-replicas "$ACA_INBOUND_MAX_REPLICAS" \
+    --scale-rule-name inbound-queue --scale-rule-type azure-queue \
+    --scale-rule-metadata "accountName=${STORAGE_ACCOUNT}" 'cloud=AzurePublicCloud' \
+      'queueLength=4' "queueName=${INBOUND_QUEUE_NAME}" \
+    --scale-rule-identity "$WORKER_ID" \
+    --termination-grace-period 240 \
+    --command pnpm --args start:worker \
+    --user-assigned "$WORKER_ID" "$PULL_ID" --env-vars "${INBOUND_ENV[@]}" \
+    --tags "${TAGS[@]}" --output none
+else
+  existing_inbound_app="$(az containerapp show --name "$ACA_INBOUND_APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" --output json)"
+  jq -e '(.properties.configuration.ingress == null or .properties.configuration.ingress == {})' \
+    <<< "$existing_inbound_app" >/dev/null \
+    || die "Inbound Container App '$ACA_INBOUND_APP_NAME' must have no ingress."
+  require_expected_environment 'Inbound Container App' "$ACA_INBOUND_APP_NAME" "$existing_inbound_app"
+fi
+ensure_workload_identity app "$ACA_INBOUND_APP_NAME" "$WORKER_ID"
+ensure_workload_identity app "$ACA_INBOUND_APP_NAME" "$PULL_ID"
+ensure_infrastructure_env app "$ACA_INBOUND_APP_NAME" "${INBOUND_ENV[@]}"
+ensure_registry_pull app "$ACA_INBOUND_APP_NAME"
+
 # The placeholder does not expose /api/healthz. It stays private and scaled to
 # zero until the real image and runtime configuration are deployed.
 if ! az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" --output none >/dev/null 2>&1; then
@@ -477,10 +533,13 @@ LEGACY_ASSIGNMENT_IDS="$(jq -r --arg scope "$RESOURCE_GROUP_ID" '
 # migration Job is created by the PostgreSQL role provisioner, so rerun this
 # script after that step to grant its Job-specific role.
 WEB_SCOPE="$(az containerapp show --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
+INBOUND_SCOPE="$(az containerapp show --name "$ACA_INBOUND_APP_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
 GENERATION_SCOPE="$(az containerapp job show --name "$ACA_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
 RECOVERY_SCOPE="$(az containerapp job show --name "$ACA_RECOVERY_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query id --output tsv)"
 verify_workload_scope "$WEB_SCOPE" containerApps "$ACA_NAME" \
   || die "Could not verify the exact Container App resource ID for '$ACA_NAME'."
+verify_workload_scope "$INBOUND_SCOPE" containerApps "$ACA_INBOUND_APP_NAME" \
+  || die "Could not verify the exact inbound Container App resource ID for '$ACA_INBOUND_APP_NAME'."
 verify_workload_scope "$GENERATION_SCOPE" jobs "$ACA_JOB_NAME" \
   || die "Could not verify the exact generation Job resource ID for '$ACA_JOB_NAME'."
 verify_workload_scope "$RECOVERY_SCOPE" jobs "$ACA_RECOVERY_JOB_NAME" \
@@ -489,6 +548,7 @@ verify_workload_scope "$RECOVERY_SCOPE" jobs "$ACA_RECOVERY_JOB_NAME" \
 ROLE_CREATED=false
 assign_role "$DEPLOY_PRINCIPAL" "$ACR_ID" AcrPush
 assign_role "$DEPLOY_PRINCIPAL" "$WEB_SCOPE" 'Container Apps Contributor'
+assign_role "$DEPLOY_PRINCIPAL" "$INBOUND_SCOPE" 'Container Apps Contributor'
 assign_role "$DEPLOY_PRINCIPAL" "$GENERATION_SCOPE" 'Container Apps Jobs Contributor'
 assign_role "$DEPLOY_PRINCIPAL" "$RECOVERY_SCOPE" 'Container Apps Jobs Contributor'
 if [[ -n "$ACA_MIGRATION_JOB_NAME" ]]; then
@@ -647,6 +707,10 @@ jq -e '[.[].branch_policies[]] as $policies
 
 gh variable set ACR_NAME --repo "$GITHUB_REPOSITORY" --body "$ACR_NAME"
 gh variable set ACA_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_NAME"
+gh variable set ACA_INBOUND_APP_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_INBOUND_APP_NAME"
+gh variable set ACA_INBOUND_MAX_REPLICAS --repo "$GITHUB_REPOSITORY" --body "$ACA_INBOUND_MAX_REPLICAS"
+gh variable set AZURE_STORAGE_INBOUND_QUEUE_NAME --repo "$GITHUB_REPOSITORY" --body "$INBOUND_QUEUE_NAME"
+gh variable set AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME --repo "$GITHUB_REPOSITORY" --body "$INBOUND_POISON_QUEUE_NAME"
 gh variable set ACA_JOB_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_JOB_NAME"
 gh variable set ACA_RECOVERY_JOB_NAME --repo "$GITHUB_REPOSITORY" --body "$ACA_RECOVERY_JOB_NAME"
 if [[ -n "$ACA_MIGRATION_JOB_NAME" ]]; then

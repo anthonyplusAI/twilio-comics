@@ -52,6 +52,23 @@ describe("database initialization", () => {
 });
 
 describe("PostgreSQL connection security", () => {
+  it("uses a smaller pool for a scaled inbound worker", async () => {
+    vi.stubEnv("DB_POOL_MAX", "2");
+    const { createPostgresPoolConfig } = await import("./db");
+
+    const config = createPostgresPoolConfig(testPostgresUrl({ host: "comics-pg.postgres.database.azure.com" }));
+
+    expect(config.max).toBe(2);
+  });
+
+  it.each(["0", "5", "1.5", "invalid"])("rejects an unsafe DB_POOL_MAX of %s", async (limit) => {
+    vi.stubEnv("DB_POOL_MAX", limit);
+    const { createPostgresPoolConfig } = await import("./db");
+
+    expect(() => createPostgresPoolConfig(testPostgresUrl({ host: "comics-pg.postgres.database.azure.com" })))
+      .toThrow("DB_POOL_MAX must be an integer from 1 to 4");
+  });
+
   it("does not log credentials from an idle connection error", async () => {
     const secret = "sentinel_" + "driver_password";
     const databaseUrl = testPostgresUrl({

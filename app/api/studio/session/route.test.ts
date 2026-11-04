@@ -57,6 +57,20 @@ describe("POST /api/studio/session", () => {
     expect(readStudioBudgetToken(response.cookies.get("twilio_comics_studio_budget")?.value)).toBe(guestId);
   });
 
+  it("opens a session when the POST body is an empty stream", async () => {
+    const input = new NextRequest("https://comics.example.com/api/studio/session", {
+      method: "POST",
+      headers: { origin: "https://comics.example.com" },
+      body: "",
+    });
+
+    expect(input.body).not.toBeNull();
+    const response = await POST(input);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ready: true });
+  });
+
   it("reuses an existing guest instead of creating another user", async () => {
     h.guestActor.mockResolvedValue({ userId: "693a8e78-5b98-49e6-9fc2-4b3352ac387a", kind: "guest" });
 

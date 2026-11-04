@@ -14,9 +14,9 @@ import {
 const USER_PAGE_SIZE = 20;
 const ACTIVITY_PAGE_SIZE = 40;
 const RAW_RECORD_LIMIT = 20;
-const failedAgentReplyEvent = sql`
-  kind = 'message.delivery'
-    AND status IN ('failed', 'undelivered')
+const agentReplyIssueEvent = sql`
+  ((kind = 'message.delivery' AND status IN ('failed', 'undelivered'))
+    OR (kind = 'message.delivery.alert' AND status = 'stalled'))
     AND details->>'purpose' = 'agent_reply'
     AND message_sid IS NOT NULL
 `;
@@ -187,7 +187,7 @@ export async function getAdminDashboard(
             AND COALESCE(delivery_fallback_status, '') NOT IN ('delivered', 'read')
             ${deliveryFailureWindow}) AS delivery_failed,
         (SELECT COUNT(DISTINCT message_sid) FROM activity_events
-          WHERE ${failedAgentReplyEvent} ${activityWindow}) AS agent_reply_delivery_failed,
+          WHERE ${agentReplyIssueEvent} ${activityWindow}) AS agent_reply_delivery_failed,
         (SELECT COUNT(*) FROM activity_events
           WHERE ((kind = 'message.outbound' AND channel = 'sms')
              OR (kind = 'generation.delivery' AND status = 'accepted'
@@ -330,7 +330,7 @@ export interface ActivityCursor {
 
 export type AdminActivityFilter = "all" | "failed-agent-replies";
 
-/** A global operations timeline with an optional agent reply delivery filter. */
+/** A global operations timeline with an optional agent reply issue filter. */
 export function buildAdminActivityHistoryQuery(input: {
   filter: AdminActivityFilter;
   cursor: ActivityCursor | null;
@@ -338,7 +338,7 @@ export function buildAdminActivityHistoryQuery(input: {
   range?: AdminDashboardRange;
 }): SQL {
   const filtered = input.filter === "failed-agent-replies"
-    ? sql`AND ${failedAgentReplyEvent}`
+    ? sql`AND ${agentReplyIssueEvent}`
     : sql``;
   const window = input.range ? metricWindow(sql`occurred_at`, input.range) : sql``;
   const before = input.cursor

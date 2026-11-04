@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   execute: vi.fn(),
   sendInboundMessage: vi.fn(),
   recordActivityEvent: vi.fn(),
+  fetchTwilioMessageStatus: vi.fn(),
   insertedValues: null as Record<string, unknown> | null,
 }));
 
@@ -24,6 +25,7 @@ vi.mock("@/lib/generation-queue", () => ({
   sendInboundMessage: h.sendInboundMessage,
 }));
 vi.mock("@/lib/activity-events", () => ({ recordActivityEvent: h.recordActivityEvent }));
+vi.mock("@/lib/twilio", () => ({ fetchTwilioMessageStatus: h.fetchTwilioMessageStatus }));
 
 import {
   claimConversationLease,
@@ -33,6 +35,7 @@ import {
   getInboundMessagePosition,
   recordInboundMessage,
   recoverPendingInboundMessages,
+  recoverStalledAgentReplies,
   recordAgentMessageStatus,
 } from "@/lib/twilio-events";
 
@@ -77,6 +80,155 @@ beforeEach(() => {
   }] });
   h.sendInboundMessage.mockResolvedValue(undefined);
   h.recordActivityEvent.mockResolvedValue(undefined);
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("stalled SMS agent reply monitoring", () => {
+  const candidate = {
+    inbound_sid: "SMinbound",
+    outbound_sid: "SMoutbound",
+    sent_at: new Date(Date.now() - 12 * 60_000),
+  };
+
+  it("checks only bounded, saved, stale SMS replies and alerts once for a nonterminal Twilio status", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [candidate] })
+      .mockResolvedValueOnce({ rows: [{ id: "alert-id" }] });
+    h.fetchTwilioMessageStatus.mockResolvedValue("scheduled");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(recoverStalledAgentReplies(700)).resolves.toEqual({
+      checked: 1,
+      alerted: 1,
+      terminalObserved: 0,
+      lookupErrors: 0,
+    });
+
+    const candidates = dialect.sqlToQuery(h.execute.mock.calls[0][0] as SQL);
+    expect(candidates.sql).toMatch(/FROM twilio_inbound_messages/i);
+    expect(candidates.sql).toMatch(/LEFT JOIN activity_events sent_event/i);
+    expect(candidates.sql).toMatch(/COALESCE\(sent_event\.occurred_at, receipt\.updated_at\) <=/i);
+    expect(candidates.sql).toMatch(/channel = 'sms'/i);
+    expect(candidates.sql).toMatch(/status = 'completed'/i);
+    expect(candidates.sql).toMatch(/outbound_sid IS NOT NULL/i);
+    expect(candidates.sql).toMatch(/updated_at <=/i);
+    expect(candidates.sql).toMatch(/created_at >=/i);
+    expect(candidates.sql).toMatch(/NOT EXISTS[\s\S]*activity_events/i);
+    expect(candidates.params).toContain(600);
+    expect(h.fetchTwilioMessageStatus).toHaveBeenCalledExactlyOnceWith("SMoutbound");
+
+    const alert = dialect.sqlToQuery(h.execute.mock.calls[1][0] as SQL);
+    expect(alert.sql).toMatch(/INSERT INTO activity_events/i);
+    expect(alert.sql).toContain("message.delivery.alert");
+    expect(alert.sql).toContain("stalled");
+    expect(alert.sql).toContain("ON CONFLICT (event_key) DO NOTHING");
+    expect(alert.sql).toMatch(/NOT EXISTS[\s\S]*activity_events/i);
+    expect(alert.sql).toMatch(/COALESCE\(sent_event\.occurred_at, receipt\.updated_at\) <=/i);
+    expect(alert.params).toContain("message:SMoutbound:stalled");
+    expect(alert.params).toContain("scheduled");
+    expect(JSON.stringify(alert)).not.toContain(input.fromAddress);
+    expect(JSON.stringify(alert)).not.toContain(input.body);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(input.fromAddress);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(input.body);
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
+  });
+
+  it("records a terminal lookup marker without reporting delivery or resending", async () => {
+    h.execute
+      .mockResolvedValueOnce({ rows: [candidate] })
+      .mockResolvedValueOnce({ rows: [{ id: "terminal-id" }] });
+    h.fetchTwilioMessageStatus.mockResolvedValue("delivered");
+
+    await expect(recoverStalledAgentReplies()).resolves.toEqual({
+      checked: 1,
+      alerted: 0,
+      terminalObserved: 1,
+      lookupErrors: 0,
+    });
+
+    const marker = dialect.sqlToQuery(h.execute.mock.calls[1][0] as SQL);
+    expect(marker.sql).toContain("message.delivery.audit");
+    expect(marker.sql).not.toContain("message.delivery.alert");
+    expect(marker.params).toContain("message:SMoutbound:terminal-observed");
+    expect(marker.params).toContain("delivered");
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a failed Twilio lookup or create an alert from an unknown status", async () => {
+    h.execute.mockResolvedValueOnce({ rows: [
+      candidate,
+      { ...candidate, inbound_sid: "SMinbound2", outbound_sid: "SMoutbound2" },
+    ] });
+    h.fetchTwilioMessageStatus
+      .mockRejectedValueOnce(new Error("Twilio unavailable: +15551112222"))
+      .mockResolvedValueOnce("future-status");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(recoverStalledAgentReplies(2)).resolves.toEqual({
+      checked: 2,
+      alerted: 0,
+      terminalObserved: 0,
+      lookupErrors: 2,
+    });
+
+    expect(h.fetchTwilioMessageStatus).toHaveBeenCalledTimes(2);
+    expect(h.execute).toHaveBeenCalledOnce();
+    expect(h.sendInboundMessage).not.toHaveBeenCalled();
+    expect(h.recordActivityEvent).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
+    expect(JSON.stringify(error.mock.calls)).not.toContain("+15551112222");
+    expect(JSON.stringify(error.mock.calls)).not.toContain(input.body);
+  });
+
+  it("stops a failing status sweep after ten lookups and reports deferred work", async () => {
+    h.execute.mockResolvedValueOnce({ rows: Array.from({ length: 15 }, (_, index) => ({
+      inbound_sid: `SMinbound${index}`,
+      outbound_sid: `SMoutbound${index}`,
+      sent_at: candidate.sent_at,
+    })) });
+    h.fetchTwilioMessageStatus.mockRejectedValue(new Error("Twilio API unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(recoverStalledAgentReplies(15)).resolves.toEqual({
+      checked: 10,
+      alerted: 0,
+      terminalObserved: 0,
+      lookupErrors: 10,
+    });
+
+    expect(h.fetchTwilioMessageStatus).toHaveBeenCalledTimes(10);
+    expect(error).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith("Agent reply status sweep deferred candidates", { count: 5 });
+  });
+
+  it("keeps a slow status sweep within a two-minute work budget", async () => {
+    h.execute.mockResolvedValueOnce({ rows: Array.from({ length: 15 }, (_, index) => ({
+      inbound_sid: `SMinbound${index}`,
+      outbound_sid: `SMoutbound${index}`,
+      sent_at: candidate.sent_at,
+    })) }).mockResolvedValue({ rows: [{ id: "terminal-id" }] });
+    h.fetchTwilioMessageStatus.mockResolvedValue("delivered");
+    const now = Date.now();
+    vi.spyOn(Date, "now")
+      .mockReturnValueOnce(now)
+      .mockReturnValueOnce(now)
+      .mockReturnValueOnce(now + 120_001);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(recoverStalledAgentReplies(15)).resolves.toEqual({
+      checked: 10,
+      alerted: 0,
+      terminalObserved: 10,
+      lookupErrors: 0,
+    });
+
+    expect(h.fetchTwilioMessageStatus).toHaveBeenCalledTimes(10);
+    expect(warn).toHaveBeenCalledWith("Agent reply status sweep deferred candidates", { count: 5 });
+  });
 });
 
 describe("durable Twilio receipts", () => {

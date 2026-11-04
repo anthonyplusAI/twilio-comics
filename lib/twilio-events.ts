@@ -5,7 +5,8 @@ import { db } from "@/lib/db";
 import { sendInboundMessage } from "@/lib/generation-queue";
 import { conversations, twilioInboundMessages, type Conversation } from "@/lib/schema";
 import type { AgentCollected, ComicAgentSubmission } from "@/lib/comic-agent";
-import type { TwilioMessageChannel } from "@/lib/twilio";
+import { fetchTwilioMessageStatus, type TwilioMessageChannel } from "@/lib/twilio";
+import { isDeliveryStatus } from "@/lib/twilio-delivery";
 
 export type InboundMessageStatus = "pending" | "processing" | "reply_pending" | "completed";
 
@@ -517,4 +518,160 @@ export async function recoverPendingInboundMessages(limit = 50): Promise<number>
     await sendInboundMessage(row.messageSid);
   }
   return rows.length;
+}
+
+const STALLED_REPLY_AGE_MS = 10 * 60_000;
+const STALLED_REPLY_LOOKBACK_MS = 6 * 60 * 60_000;
+const STALLED_REPLY_MAX_BATCH = 600;
+const STALLED_REPLY_LOOKUP_CONCURRENCY = 10;
+const STALLED_REPLY_MAX_SWEEP_MS = 2 * 60_000;
+const STALLED_REPLY_MAX_CONSECUTIVE_LOOKUP_ERRORS = 10;
+const terminalReplyStatuses = ["delivered", "read", "failed", "undelivered", "canceled"] as const;
+
+interface StalledReplyCandidate {
+  inbound_sid: string;
+  outbound_sid: string;
+  sent_at: Date;
+}
+
+export interface StalledReplyRecoveryResult {
+  checked: number;
+  alerted: number;
+  terminalObserved: number;
+  lookupErrors: number;
+}
+
+/**
+ * Observe only saved SMS replies with no terminal callback after ten minutes.
+ * A unique event key records each anomaly once; no message is sent or marked
+ * delivered by this check. The recent indexed window bounds database work.
+ */
+export async function recoverStalledAgentReplies(limit = STALLED_REPLY_MAX_BATCH): Promise<StalledReplyRecoveryResult> {
+  const batchLimit = Number.isFinite(limit)
+    ? Math.max(1, Math.min(Math.trunc(limit), STALLED_REPLY_MAX_BATCH))
+    : STALLED_REPLY_MAX_BATCH;
+  const now = Date.now();
+  const staleBefore = new Date(now - STALLED_REPLY_AGE_MS);
+  const lookback = new Date(now - STALLED_REPLY_LOOKBACK_MS);
+  const callbackSettledBefore = new Date(now - 5_000);
+  const candidates = rowsOf<StalledReplyCandidate>(await db.execute(sql`
+    SELECT receipt.message_sid AS inbound_sid,
+           receipt.outbound_sid,
+           COALESCE(sent_event.occurred_at, receipt.updated_at) AS sent_at
+    FROM twilio_inbound_messages receipt
+    LEFT JOIN activity_events sent_event
+      ON sent_event.event_key = 'message:' || receipt.outbound_sid || ':outbound'
+    WHERE receipt.channel = 'sms'
+      AND receipt.status = 'completed'
+      AND receipt.outbound_sid IS NOT NULL
+      AND receipt.created_at >= ${lookback}
+      AND receipt.created_at <= ${staleBefore}
+      AND COALESCE(sent_event.occurred_at, receipt.updated_at) <= ${staleBefore}
+      AND receipt.updated_at <= ${callbackSettledBefore}
+      AND NOT EXISTS (
+        SELECT 1 FROM activity_events event
+        WHERE event.event_key IN (
+          'message:' || receipt.outbound_sid || ':stalled',
+          'message:' || receipt.outbound_sid || ':terminal-observed',
+          'message:' || receipt.outbound_sid || ':status:delivered',
+          'message:' || receipt.outbound_sid || ':status:read',
+          'message:' || receipt.outbound_sid || ':status:failed',
+          'message:' || receipt.outbound_sid || ':status:undelivered',
+          'message:' || receipt.outbound_sid || ':status:canceled'
+        )
+      )
+    ORDER BY receipt.created_at DESC, receipt.message_sid DESC
+    LIMIT ${batchLimit}
+  `));
+
+  const result: StalledReplyRecoveryResult = {
+    checked: 0,
+    alerted: 0,
+    terminalObserved: 0,
+    lookupErrors: 0,
+  };
+  let consecutiveLookupErrors = 0;
+  for (let start = 0; start < candidates.length; start += STALLED_REPLY_LOOKUP_CONCURRENCY) {
+    if (Date.now() - now >= STALLED_REPLY_MAX_SWEEP_MS) break;
+    const batch = candidates.slice(start, start + STALLED_REPLY_LOOKUP_CONCURRENCY);
+    const outcomes = await Promise.all(batch.map(async (candidate) => {
+      let status: string;
+      try {
+        status = await fetchTwilioMessageStatus(candidate.outbound_sid);
+      } catch {
+        return { kind: "lookup_error" as const };
+      }
+      if (!isDeliveryStatus(status)) return { kind: "lookup_error" as const };
+
+      const terminal = (terminalReplyStatuses as readonly string[]).includes(status);
+      const eventKey = `message:${candidate.outbound_sid}:${terminal ? "terminal-observed" : "stalled"}`;
+      const terminalEventKeys = sql.join(
+        terminalReplyStatuses.map((terminalStatus) =>
+          sql`${`message:${candidate.outbound_sid}:status:${terminalStatus}`}`),
+        sql`, `,
+      );
+      const eventKind = terminal ? sql`'message.delivery.audit'` : sql`'message.delivery.alert'`;
+      const eventStatus = terminal ? sql`'terminal_observed'` : sql`'stalled'`;
+      const inserted = rowsOf<{ id: string }>(await db.execute(sql`
+        INSERT INTO activity_events
+          (event_key, channel, kind, direction, message_sid, status, details)
+        SELECT ${eventKey}, 'sms', ${eventKind}, 'outbound', receipt.outbound_sid,
+               ${eventStatus}, jsonb_build_object(
+                 'purpose', 'agent_reply',
+                 'inReplyTo', receipt.message_sid,
+                 'observedStatus', ${status},
+                 'ageSeconds', GREATEST(0, EXTRACT(EPOCH FROM (
+                   NOW() - COALESCE(sent_event.occurred_at, receipt.updated_at)
+                 ))::int)
+               )
+        FROM twilio_inbound_messages receipt
+        LEFT JOIN activity_events sent_event
+          ON sent_event.event_key = 'message:' || receipt.outbound_sid || ':outbound'
+        WHERE receipt.message_sid = ${candidate.inbound_sid}
+          AND receipt.outbound_sid = ${candidate.outbound_sid}
+          AND receipt.channel = 'sms'
+          AND receipt.status = 'completed'
+          AND COALESCE(sent_event.occurred_at, receipt.updated_at) <= ${staleBefore}
+          AND receipt.updated_at <= ${callbackSettledBefore}
+          AND NOT EXISTS (
+            SELECT 1 FROM activity_events event
+            WHERE event.event_key IN (${terminalEventKeys})
+          )
+        ON CONFLICT (event_key) DO NOTHING
+        RETURNING id
+      `));
+      if (inserted.length && !terminal) {
+        console.warn("Agent reply stalled in Twilio", {
+          messageSid: candidate.outbound_sid,
+          observedStatus: status,
+          ageMinutes: Math.max(0, Math.floor((now - new Date(candidate.sent_at).getTime()) / 60_000)),
+        });
+      }
+      return {
+        kind: terminal ? "terminal" as const : "alert" as const,
+        inserted: inserted.length > 0,
+      };
+    }));
+    for (const outcome of outcomes) {
+      result.checked += 1;
+      if (outcome.kind === "lookup_error") {
+        result.lookupErrors += 1;
+        consecutiveLookupErrors += 1;
+      } else {
+        consecutiveLookupErrors = 0;
+        if (outcome.inserted && outcome.kind === "terminal") result.terminalObserved += 1;
+        else if (outcome.inserted) result.alerted += 1;
+      }
+    }
+    if (consecutiveLookupErrors >= STALLED_REPLY_MAX_CONSECUTIVE_LOOKUP_ERRORS) break;
+  }
+  if (result.lookupErrors) {
+    console.error("Agent reply status checks could not complete", { count: result.lookupErrors });
+  }
+  if (result.checked < candidates.length) {
+    console.warn("Agent reply status sweep deferred candidates", {
+      count: candidates.length - result.checked,
+    });
+  }
+  return result;
 }

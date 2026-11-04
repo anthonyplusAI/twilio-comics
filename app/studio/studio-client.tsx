@@ -79,6 +79,7 @@ export function StudioClient() {
             <div className={styles.formColumn}>
               <ComicCreationForm
                 studioReady={studioReady}
+                sessionError={sessionError}
                 prompt={prompt}
                 setPrompt={setPrompt}
                 style={style}

@@ -12,6 +12,28 @@ function client() {
   return twilio(required("TWILIO_ACCOUNT_SID"), required("TWILIO_AUTH_TOKEN"));
 }
 
+let statusClientCache: {
+  accountSid: string;
+  authToken: string;
+  instance: ReturnType<typeof twilio>;
+} | null = null;
+
+/** Read a saved outbound SID from Twilio without changing its delivery state. */
+export async function fetchTwilioMessageStatus(messageSid: string): Promise<string> {
+  const accountSid = required("TWILIO_ACCOUNT_SID");
+  const authToken = required("TWILIO_AUTH_TOKEN");
+  if (!statusClientCache || statusClientCache.accountSid !== accountSid ||
+      statusClientCache.authToken !== authToken) {
+    statusClientCache = {
+      accountSid,
+      authToken,
+      instance: twilio(accountSid, authToken, { timeout: 5_000, autoRetry: false }),
+    };
+  }
+  const message = await statusClientCache.instance.messages(messageSid).fetch();
+  return message.status;
+}
+
 export interface InboundMessage {
   messageSid: string;
   channel: TwilioMessageChannel;

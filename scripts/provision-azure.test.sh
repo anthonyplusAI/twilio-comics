@@ -46,6 +46,28 @@ assert_subject 'git@github.com:current-owner/twilio-comics.git' 'current-owner/t
 assert_subject 'https://github.com/new-owner/twilio-comics.git' 'new-owner/twilio-comics'
 assert_subject 'ssh://git@github.com/third-owner/twilio-comics.git' 'third-owner/twilio-comics'
 
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage ACA_INBOUND_MAX_REPLICAS=11 \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'ACA_INBOUND_MAX_REPLICAS must be'* ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage QUEUE_NAME=comic-inbound \
+  bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 1 && "$output" == *'must all have distinct names'* ]] || {
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
 # A mistaken rerun must not recreate any resource from the retired V1 sample.
 for obsolete in \
     'ACA_ENVIRONMENT=cae-twilio-comics' \
@@ -145,7 +167,12 @@ case "$1 $2 ${3:-}" in
   'storage account show')
     [[ "${*}" == *'--query id'* ]] && printf '/storage\n'
     exit 0 ;;
-  'storage container create'|'storage queue create') exit 0 ;;
+  'storage container create') exit 0 ;;
+  'storage queue create')
+    if [[ -n "${AZURE_TEST_STORAGE_LOG:-}" ]]; then
+      printf '%s\n' "$*" >> "$AZURE_TEST_STORAGE_LOG"
+    fi
+    exit 0 ;;
   'identity show --name')
     name="$(after --name "$@")"
     case "$(after --query "$@")" in
@@ -205,11 +232,27 @@ case "$1 $2 ${3:-}" in
     esac
     exit 0 ;;
   'containerapp show --name')
-    [[ "${AZURE_TEST_MISSING_APP:-}" == 1 ]] && exit 1
     name="$(after --name "$@")"
+    [[ "${AZURE_TEST_MISSING_APP:-}" == 1 && "$name" == twilio-comics ]] && exit 1
+    [[ "${AZURE_TEST_MISSING_INBOUND_APP:-}" == 1 && "$name" == twilio-comics-inbound-v2 ]] && exit 1
     [[ "${*}" == *'--query id'* ]] && printf '/resource-group/providers/Microsoft.App/containerApps/%s\n' "$name"
-    [[ "${*}" == *'--output json'* ]] && workload_json \
-      "/resource-group/providers/Microsoft.App/containerApps/$name" '/identity/web' 'web-client'
+    if [[ "${*}" == *'--output json'* ]]; then
+      if [[ "$name" == twilio-comics-inbound-v2 ]]; then
+        workload_json "/resource-group/providers/Microsoft.App/containerApps/$name" \
+          '/identity/worker' 'worker-client' | jq '
+            del(.properties.configuration.ingress)
+            | .properties.template.containers[0].env += [
+                {"name":"AZURE_STORAGE_INBOUND_QUEUE_NAME","value":"comic-inbound"},
+                {"name":"AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME","value":"comic-inbound-poison"},
+                {"name":"WORKER_MODE","value":"inbound"},
+                {"name":"DB_POOL_MAX","value":"2"},
+                {"name":"INBOUND_WORKER_CONCURRENCY","value":"4"}
+              ]'
+      else
+        workload_json "/resource-group/providers/Microsoft.App/containerApps/$name" \
+          '/identity/web' 'web-client'
+      fi
+    fi
     exit 0 ;;
   'containerapp job show')
     name="$(after --name "$@")"
@@ -308,6 +351,34 @@ set -e
 [[ "$(arg_after --target-port)" == 8080 ]]
 [[ "$(arg_after --min-replicas)" == 0 ]]
 [[ "$(arg_after --termination-grace-period)" == 240 ]]
+
+# Inbound turns need their own private, queue-scaled app so image jobs cannot
+# consume every SMS reply worker. Provisioning keeps it dormant until deploy.
+AZURE_TEST_STORAGE_LOG="$TEST_ROOT/inbound-storage-actions"
+export AZURE_TEST_STORAGE_LOG
+: > "$AZURE_TEST_STORAGE_LOG"
+set +e
+output="$(PATH="$TEST_ROOT/bin:$PATH" SUBSCRIPTION_ID=test-subscription \
+  ACR_NAME=testacr STORAGE_ACCOUNT=teststorage PROVISION_AZURE_CONFIRM=yes \
+  AZURE_TEST_ACTION_LOG="$TEST_ROOT/inbound-role-actions" \
+  AZURE_TEST_FEDERATED_LOG="$TEST_ROOT/inbound-federated-actions" \
+  AZURE_TEST_MISSING_INBOUND_APP=1 bash "$TEST_ROOT/repo/scripts/provision-azure.sh" 2>&1)"
+status=$?
+set -e
+[[ "$status" == 76 ]] || { printf '%s\n' "$output" >&2; exit 1; }
+[[ "$(arg_after --name)" == twilio-comics-inbound-v2 ]]
+[[ "$(arg_after --min-replicas)" == 0 ]]
+[[ "$(arg_after --max-replicas)" == 8 ]]
+[[ "$(arg_after --scale-rule-type)" == azure-queue ]]
+[[ "$(arg_after --scale-rule-identity)" == /identity/worker ]]
+grep -Fxq 'queueName=comic-inbound' "$AZURE_TEST_LOG"
+grep -Fxq 'queueLength=4' "$AZURE_TEST_LOG"
+grep -Fxq 'WORKER_MODE=inbound' "$AZURE_TEST_LOG"
+grep -Fxq 'INBOUND_WORKER_CONCURRENCY=4' "$AZURE_TEST_LOG"
+grep -Fq 'storage queue create --account-name teststorage --name comic-inbound ' "$AZURE_TEST_STORAGE_LOG"
+grep -Fq 'storage queue create --account-name teststorage --name comic-inbound-poison ' "$AZURE_TEST_STORAGE_LOG"
+! grep -Fxq -- '--ingress' "$AZURE_TEST_LOG"
+unset AZURE_TEST_STORAGE_LOG
 
 # A resumed run waits for an existing ACA environment to finish provisioning
 # before it attempts to create a Container App inside that environment.
@@ -539,6 +610,7 @@ set -e
 [[ "$status" == 0 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /acr --role AcrPush' "$AZURE_TEST_ACTION_LOG"
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/containerApps/twilio-comics --role Container Apps Contributor' "$AZURE_TEST_ACTION_LOG"
+grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/containerApps/twilio-comics-inbound-v2 --role Container Apps Contributor' "$AZURE_TEST_ACTION_LOG"
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/jobs/twilio-comics-generation-v2 --role Container Apps Jobs Contributor' "$AZURE_TEST_ACTION_LOG"
 grep -Fq 'role assignment create --assignee-object-id principal-deploy --assignee-principal-type ServicePrincipal --scope /resource-group/providers/Microsoft.App/jobs/twilio-comics-recovery-v2 --role Container Apps Jobs Contributor' "$AZURE_TEST_ACTION_LOG"
 for forbidden in 'role assignment delete' ' --scope /resource-group --role Contributor' 'twilio-comics-migrate-v2 --role'; do
@@ -548,6 +620,8 @@ for forbidden in 'role assignment delete' ' --scope /resource-group --role Contr
   fi
 done
 grep -Fq 'variable set ACA_MIGRATION_JOB_NAME --repo third-owner/twilio-comics --body twilio-comics-migrate-v2' "$AZURE_TEST_GH_LOG"
+grep -Fq 'variable set ACA_INBOUND_MAX_REPLICAS --repo third-owner/twilio-comics --body 8' "$AZURE_TEST_GH_LOG"
+grep -Fq 'variable set AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME --repo third-owner/twilio-comics --body comic-inbound-poison' "$AZURE_TEST_GH_LOG"
 grep -Fq 'api PUT repos/third-owner/twilio-comics/environments/production' "$AZURE_TEST_GH_LOG"
 grep -Fq 'api POST repos/third-owner/twilio-comics/environments/production/deployment-branch-policies' "$AZURE_TEST_GH_LOG"
 [[ "$output" == *'does not exist yet; rerun this script after role bootstrap'* ]]

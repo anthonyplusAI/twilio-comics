@@ -16,10 +16,14 @@ env:
   ACR_NAME: ${{ vars.ACR_NAME }}
   ACR_REPOSITORY: twilio-comics
   ACA_NAME: ${{ vars.ACA_NAME }}
+  ACA_INBOUND_APP_NAME: ${{ vars.ACA_INBOUND_APP_NAME }}
+  ACA_INBOUND_MAX_REPLICAS: ${{ vars.ACA_INBOUND_MAX_REPLICAS }}
   ACA_JOB_NAME: ${{ vars.ACA_JOB_NAME }}
   ACA_MIGRATION_JOB_NAME: ${{ vars.ACA_MIGRATION_JOB_NAME }}
   ACA_RECOVERY_JOB_NAME: ${{ vars.ACA_RECOVERY_JOB_NAME }}
   ACA_RESOURCE_GROUP: ${{ vars.ACA_RESOURCE_GROUP }}
+  AZURE_STORAGE_INBOUND_QUEUE_NAME: ${{ vars.AZURE_STORAGE_INBOUND_QUEUE_NAME }}
+  AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME: ${{ vars.AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME }}
 
 jobs:
   ci:
@@ -104,12 +108,24 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Install Container Apps CLI extension
         run: az extension add --name containerapp --upgrade --only-show-errors
-      - name: Verify web placeholder is private
+      - name: Verify release workload preconditions
+        id: prerelease
         run: |
           test -n "$ACA_NAME"
+          test -n "$ACA_INBOUND_APP_NAME"
+          test -n "$AZURE_STORAGE_INBOUND_QUEUE_NAME"
+          test -n "$AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME"
           test -n "$ACA_JOB_NAME"
           test -n "$ACA_RECOVERY_JOB_NAME"
           test -n "$ACA_MIGRATION_JOB_NAME"
+          if [[ ! "$ACA_INBOUND_MAX_REPLICAS" =~ ^([1-9]|10)$ ]]; then
+            echo 'ACA_INBOUND_MAX_REPLICAS must be 1–10 for the current database connection budget.' >&2
+            exit 1
+          fi
+          if [ "$AZURE_STORAGE_INBOUND_QUEUE_NAME" = "$AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME" ]; then
+            echo 'The inbound and poison queues must be different.' >&2
+            exit 1
+          fi
           app=$(az containerapp show --name "$ACA_NAME" --resource-group "$ACA_RESOURCE_GROUP" --output json)
           if ! jq --exit-status '(.properties.configuration.activeRevisionsMode // "Single") == "Single"' \
             >/dev/null <<< "$app"; then
@@ -123,6 +139,66 @@ jobs:
             echo 'The sample placeholder is public. Set internal ingress before releasing.' >&2
             exit 1
           fi
+          if ! jq --exit-status '
+            [.properties.template.containers[0].env[]? | select(.name == "TWILIO_ENABLED_CHANNELS")]
+              | if length == 0 then true
+                elif length == 1 then
+                  (.[0].value | if type == "string" then test("^[a-z, ]*$") else false end)
+                else false end
+          ' >/dev/null <<< "$app"; then
+            echo 'The web app has an invalid TWILIO_ENABLED_CHANNELS setting.' >&2
+            exit 1
+          fi
+          web_channels=$(jq --raw-output '
+            [.properties.template.containers[0].env[]? | select(.name == "TWILIO_ENABLED_CHANNELS")][0].value // ""
+          ' <<< "$app")
+          printf 'web_channels=%s\n' "$web_channels" >> "$GITHUB_OUTPUT"
+          inbound=$(az containerapp show --name "$ACA_INBOUND_APP_NAME" \
+            --resource-group "$ACA_RESOURCE_GROUP" --output json)
+          if ! jq --exit-status --arg queue "$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
+            --arg poison "$AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME" '
+            (.properties.configuration.ingress == null or .properties.configuration.ingress == {})
+            and (.properties.configuration.activeRevisionsMode // "Single") == "Single"
+            and ([.properties.template.containers[0].env[]? | select(.name == "WORKER_MODE")]
+              | length == 1 and .[0].value == "inbound")
+            and ([.properties.template.containers[0].env[]? | select(.name == "AZURE_STORAGE_INBOUND_QUEUE_NAME")]
+              | length == 1 and .[0].value == $queue)
+            and ([.properties.template.containers[0].env[]? | select(.name == "AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME")]
+              | length == 1 and .[0].value == $poison)
+            and ([.properties.template.containers[0].env[]? | select(.name == "AZURE_STORAGE_QUEUE_NAME")]
+              | length == 1 and .[0].value != $queue and .[0].value != $poison)
+            and ([.properties.template.scale.rules[]? | select(.name == "inbound-queue")]
+              | length == 1 and (
+                (.[0].azureQueue.queueName == $queue
+                  and (.[0].azureQueue.queueLength | tostring) == "4"
+                  and (.[0].azureQueue.identity | type) == "string")
+                or (.[0].custom.type == "azure-queue"
+                  and .[0].custom.metadata.queueName == $queue
+                  and .[0].custom.metadata.queueLength == "4"
+                  and (.[0].custom.identity | type) == "string")))
+            and ([.properties.template.containers[0].env[]? | select(.name == "DATABASE_URL")]
+              | length == 1 and .[0].secretRef == "runtime-database-url")
+            and ([.properties.template.containers[0].env[]? | select(.name == "MEDIA_SIGNING_SECRET")]
+              | length == 1 and .[0].secretRef == "media-signing-secret")
+            and ([.properties.template.containers[0].env[]? | select(.name == "OPENAI_API_KEY")]
+              | length == 1 and .[0].secretRef == "openai-api-key")
+            and ([.properties.template.containers[0].env[]? | select(.name == "TWILIO_AUTH_TOKEN")]
+              | length == 1 and .[0].secretRef == "twilio-auth-token")
+            and ([.properties.template.containers[0].env[]? | select(.name == "INBOUND_WORKER_CONCURRENCY")]
+              | length == 1 and .[0].value == "4")
+            and ([.properties.template.containers[0].env[]? | select(.name == "TWILIO_ENABLED_CHANNELS")]
+              | length == 1 and (.[0].value | type) == "string")
+            and ([.properties.template.containers[0].env[]? | select(.name == "AUTH_SECRET")]
+              | length == 0)
+            and ([.properties.configuration.secrets[]?
+              | select(.name == "runtime-database-url" or .name == "media-signing-secret"
+                or .name == "openai-api-key" or .name == "twilio-auth-token")]
+              | length == 4 and all(.[]; (.keyVaultUrl | type) == "string"
+                and (.identity | type) == "string" and .value == null))
+          ' >/dev/null <<< "$inbound"; then
+            echo 'The private inbound worker is not fully provisioned; run the inbound setup before release.' >&2
+            exit 1
+          fi
       - name: Verify Dub generation Job configuration
         run: |
           job_json="$(az containerapp job show \
@@ -133,7 +209,59 @@ jobs:
           bash scripts/check-aca-dub-config.sh <<< "$job_json"
       - name: Run private PostgreSQL migration Job
         run: bash scripts/run-azure-migration-job.sh
+      - name: Deploy warm inbound SMS worker
+        env:
+          WEB_ENABLED_CHANNELS: ${{ steps.prerelease.outputs.web_channels }}
+        run: |
+          az containerapp update \
+            --name "$ACA_INBOUND_APP_NAME" \
+            --resource-group "$ACA_RESOURCE_GROUP" \
+            --image "$APP_IMAGE" \
+            --command pnpm --args start:worker \
+            --set-env-vars "RELEASE_SHA=$GITHUB_SHA" 'WORKER_MODE=inbound' \
+              'DB_POOL_MAX=2' 'INBOUND_WORKER_CONCURRENCY=4' \
+              "TWILIO_ENABLED_CHANNELS=$WEB_ENABLED_CHANNELS" \
+              "AZURE_STORAGE_INBOUND_QUEUE_NAME=$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
+              "AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME=$AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME" \
+            --termination-grace-period 240 \
+            --min-replicas 1 \
+            --max-replicas "$ACA_INBOUND_MAX_REPLICAS"
+      - name: Wait for the released inbound worker
+        run: |
+          for attempt in $(seq 1 30); do
+            revision=$(az containerapp show \
+              --name "$ACA_INBOUND_APP_NAME" --resource-group "$ACA_RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv)
+            if [ -n "$revision" ]; then
+              if revision_json=$(az containerapp revision show \
+                --name "$ACA_INBOUND_APP_NAME" --resource-group "$ACA_RESOURCE_GROUP" \
+                --revision "$revision" --output json --only-show-errors) &&
+                jq --exit-status --arg image "$APP_IMAGE" --arg release "$GITHUB_SHA" '
+                  .properties.template.containers[0].image == $image
+                  and .properties.provisioningState == "Provisioned"
+                  and .properties.runningState == "Running"
+                  and .properties.replicas >= 1
+                  and ([.properties.template.containers[0].env[]? | select(.name == "RELEASE_SHA")]
+                    | length == 1 and .[0].value == $release)
+                ' >/dev/null <<< "$revision_json"; then
+                if logs=$(az containerapp logs show \
+                  --name "$ACA_INBOUND_APP_NAME" --resource-group "$ACA_RESOURCE_GROUP" \
+                  --revision "$revision" --type console --format text --tail 100 \
+                  --only-show-errors 2>/dev/null) &&
+                  grep -Fq 'inbound_worker_ready' <<< "$logs"; then
+                  echo "Inbound worker revision $revision passed its queue and database startup checks."
+                  exit 0
+                fi
+              fi
+            fi
+            echo "Waiting for inbound worker revision (${attempt}/30)"
+            sleep 10
+          done
+          echo 'Inbound worker did not become ready; web queue cutover was not attempted.' >&2
+          exit 1
       - name: Deploy generation job
+        env:
+          WEB_ENABLED_CHANNELS: ${{ steps.prerelease.outputs.web_channels }}
         run: |
           az containerapp job update \
             --name "$ACA_JOB_NAME" \
@@ -141,6 +269,9 @@ jobs:
             --image "$APP_IMAGE" \
             --max-executions 4 \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" \
+              'DB_POOL_MAX=2' \
+              "TWILIO_ENABLED_CHANNELS=$WEB_ENABLED_CHANNELS" \
+              "AZURE_STORAGE_INBOUND_QUEUE_NAME=$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
             --remove-env-vars DAILY_GENERATION_JOB_LIMIT MESSAGE_AGENT_GLOBAL_DAILY_LIMIT
       - name: Deploy scheduled recovery job
         run: |
@@ -152,6 +283,8 @@ jobs:
             --args start:worker \
             --cron-expression '*/5 * * * *' \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" 'RECOVERY_MODE=1' \
+              'DB_POOL_MAX=2' \
+              "AZURE_STORAGE_INBOUND_QUEUE_NAME=$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
             --remove-env-vars DAILY_GENERATION_JOB_LIMIT
       - name: Ensure web readiness probe
         run: bash scripts/ensure-azure-readiness-probe.sh
@@ -162,6 +295,7 @@ jobs:
             --resource-group "$ACA_RESOURCE_GROUP" \
             --image "$APP_IMAGE" \
             --set-env-vars "RELEASE_SHA=$GITHUB_SHA" \
+              "AZURE_STORAGE_INBOUND_QUEUE_NAME=$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
             --remove-env-vars DAILY_GENERATION_JOB_LIMIT VOICE_VERIFY_NUMBER_DAILY_LIMIT CAMERA_VERIFY_GLOBAL_HOURLY_LIMIT CAMERA_VERIFY_GLOBAL_DAILY_LIMIT \
             --termination-grace-period 240 \
             --min-replicas 1 \
