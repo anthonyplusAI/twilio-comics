@@ -224,6 +224,7 @@ jobs:
               "AZURE_STORAGE_INBOUND_QUEUE_NAME=$AZURE_STORAGE_INBOUND_QUEUE_NAME" \
               "AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME=$AZURE_STORAGE_INBOUND_POISON_QUEUE_NAME" \
             --termination-grace-period 240 \
+            --cpu 0.25 --memory 0.5Gi \
             --min-replicas 1 \
             --max-replicas "$ACA_INBOUND_MAX_REPLICAS"
       - name: Wait for the released inbound worker

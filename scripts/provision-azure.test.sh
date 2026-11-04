@@ -367,6 +367,14 @@ status=$?
 set -e
 [[ "$status" == 76 ]] || { printf '%s\n' "$output" >&2; exit 1; }
 [[ "$(arg_after --name)" == twilio-comics-inbound-v2 ]]
+[[ "$(arg_after --cpu)" == 0.25 ]] || {
+  printf 'Inbound app must be provisioned with 0.25 vCPU.\n' >&2
+  exit 1
+}
+[[ "$(arg_after --memory)" == 0.5Gi ]] || {
+  printf 'Inbound app must be provisioned with 0.5 GiB memory.\n' >&2
+  exit 1
+}
 [[ "$(arg_after --min-replicas)" == 0 ]]
 [[ "$(arg_after --max-replicas)" == 8 ]]
 [[ "$(arg_after --scale-rule-type)" == azure-queue ]]
@@ -379,6 +387,20 @@ grep -Fq 'storage queue create --account-name teststorage --name comic-inbound '
 grep -Fq 'storage queue create --account-name teststorage --name comic-inbound-poison ' "$AZURE_TEST_STORAGE_LOG"
 ! grep -Fxq -- '--ingress' "$AZURE_TEST_LOG"
 unset AZURE_TEST_STORAGE_LOG
+
+# Every release resizes the existing inbound app as well as replacing its
+# image, so rerunning provisioning is not required for the cost reduction.
+python3 - "$PROJECT_ROOT/.github/workflows/deploy.yml" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+step = workflow.split('      - name: Deploy warm inbound SMS worker\n', 1)[1].split('      - name:', 1)[0]
+assert '--cpu 0.25' in step, 'release must size the inbound CPU to 0.25 vCPU'
+assert '--memory 0.5Gi' in step, 'release must size the inbound memory to 0.5 GiB'
+assert '--min-replicas 1' in step, 'release must keep one warm inbound replica'
+assert '--max-replicas "$ACA_INBOUND_MAX_REPLICAS"' in step
+PY
 
 # A resumed run waits for an existing ACA environment to finish provisioning
 # before it attempts to create a Container App inside that environment.

@@ -16,7 +16,6 @@ import {
   processInboundMessage,
 } from "@/lib/process-inbound-message";
 import { recoverUnpublishedGenerationJobs } from "@/lib/generation-jobs";
-import { processGenerationJob } from "@/lib/process-generation-job";
 import { recoverPendingInboundMessages, recoverStalledAgentReplies } from "@/lib/twilio-events";
 import { recoverFailedComicTextFallbacks } from "@/lib/twilio-delivery";
 import { db } from "@/lib/db";
@@ -65,6 +64,7 @@ export async function processNextGenerationJob(): Promise<boolean> {
   }
 
   if (message.version === 1) {
+    const { processGenerationJob } = await import("@/lib/process-generation-job");
     await processGenerationJob(message.jobId);
   } else {
     try {
