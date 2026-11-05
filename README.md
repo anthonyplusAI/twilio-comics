@@ -28,6 +28,14 @@ The Twilio CLI confirmed that the toll-free verified number supports SMS, MMS, a
 
 </details>
 
+## Watch the illustrated film
+
+<!-- Video hosted as a GitHub user attachment. -->
+
+{{GITHUB_VIDEO_URL}}
+
+*30-second illustrated concept. WhatsApp appears in the film but is disabled in the current pilot.*
+
 ## Sample pages
 
 <p align="center">
